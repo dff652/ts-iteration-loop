@@ -1,0 +1,123 @@
+"""
+推理服务 API
+封装 check_outlier 项目功能
+"""
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
+from sqlalchemy.orm import Session
+from typing import List
+import uuid
+
+from src.db.database import get_db, Task
+from src.models.schemas import (
+    InferenceTaskRequest, InferenceResult,
+    TaskResponse, TaskStatus, ApiResponse
+)
+from src.adapters.check_outlier import CheckOutlierAdapter
+
+router = APIRouter()
+adapter = CheckOutlierAdapter()
+
+
+@router.get("/algorithms", response_model=ApiResponse)
+async def list_algorithms():
+    """获取可用算法列表"""
+    algorithms = [
+        {"id": "chatts", "name": "ChatTS", "description": "ChatTS 大模型检测"},
+        {"id": "adtk_hbos", "name": "ADTK-HBOS", "description": "传统统计方法"},
+        {"id": "ensemble", "name": "Ensemble", "description": "集成方法"}
+    ]
+    return ApiResponse(
+        success=True,
+        data={"algorithms": algorithms},
+        message=f"支持 {len(algorithms)} 种算法"
+    )
+
+
+@router.post("/batch", response_model=TaskResponse)
+async def start_batch_inference(
+    request: InferenceTaskRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db)
+):
+    """启动批量推理任务"""
+    task_id = str(uuid.uuid4())
+    
+    # 创建任务记录
+    task = Task(
+        id=task_id,
+        type="inference",
+        status=TaskStatus.PENDING,
+        config=request.model_dump_json()
+    )
+    db.add(task)
+    db.commit()
+    
+    # 后台执行推理
+    background_tasks.add_task(
+        adapter.run_batch_inference,
+        task_id=task_id,
+        model=request.model,
+        algorithm=request.algorithm,
+        input_files=request.input_files
+    )
+    
+    return TaskResponse(
+        task_id=task_id,
+        status=TaskStatus.PENDING,
+        message=f"推理任务已提交，处理 {len(request.input_files)} 个文件"
+    )
+
+
+@router.get("/status/{task_id}", response_model=TaskResponse)
+async def get_inference_status(task_id: str, db: Session = Depends(get_db)):
+    """获取推理任务状态"""
+    task = db.query(Task).filter(Task.id == task_id).first()
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    
+    return TaskResponse(
+        task_id=task.id,
+        status=TaskStatus(task.status),
+        message=task.error or ""
+    )
+
+
+@router.get("/results/{task_id}", response_model=ApiResponse)
+async def get_inference_results(task_id: str, db: Session = Depends(get_db)):
+    """获取推理结果"""
+    task = db.query(Task).filter(Task.id == task_id).first()
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    
+    if task.status != TaskStatus.COMPLETED:
+        return ApiResponse(
+            success=False,
+            message=f"任务尚未完成，当前状态: {task.status}"
+        )
+    
+    import json
+    results = json.loads(task.result) if task.result else {}
+    
+    return ApiResponse(
+        success=True,
+        data=results,
+        message="推理结果获取成功"
+    )
+
+
+@router.post("/export-to-annotation/{task_id}", response_model=ApiResponse)
+async def export_to_annotation(task_id: str, db: Session = Depends(get_db)):
+    """将推理结果导出为预标注格式"""
+    task = db.query(Task).filter(Task.id == task_id).first()
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    
+    try:
+        output_path = adapter.convert_to_annotation_format(task.result)
+        return ApiResponse(
+            success=True,
+            data={"annotation_file": output_path},
+            message="已导出为标注格式，可在标注工具中加载"
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

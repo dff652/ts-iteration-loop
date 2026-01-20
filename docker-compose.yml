@@ -1,0 +1,60 @@
+version: '3.8'
+
+services:
+  # 主应用 (FastAPI + Gradio)
+  app:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/app
+      - /home/douff/ts/Data-Processing:/home/douff/ts/Data-Processing:ro
+      - /home/douff/ts/timeseries-annotator-v2:/home/douff/ts/timeseries-annotator-v2:ro
+      - /home/douff/ts/ChatTS-Training:/home/douff/ts/ChatTS-Training
+      - /home/douff/ilabel/check_outlier:/home/douff/ilabel/check_outlier:ro
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - DATABASE_URL=sqlite:///./data/iteration_loop.db
+    depends_on:
+      - redis
+    command: python -m src.main
+
+  # Redis (Celery Broker)
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+  # Celery Worker (异步任务执行)
+  celery_worker:
+    build: .
+    volumes:
+      - .:/app
+      - /home/douff/ts/Data-Processing:/home/douff/ts/Data-Processing:ro
+      - /home/douff/ts/ChatTS-Training:/home/douff/ts/ChatTS-Training
+      - /home/douff/ilabel/check_outlier:/home/douff/ilabel/check_outlier:ro
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - DATABASE_URL=sqlite:///./data/iteration_loop.db
+    depends_on:
+      - redis
+    command: celery -A src.core.tasks worker --loglevel=info
+
+  # Celery Flower (任务监控界面，可选)
+  flower:
+    build: .
+    ports:
+      - "5555:5555"
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      - redis
+      - celery_worker
+    command: celery -A src.core.tasks flower --port=5555
+    profiles:
+      - monitoring
+
+volumes:
+  redis_data:

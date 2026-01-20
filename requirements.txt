@@ -1,0 +1,28 @@
+# FastAPI
+fastapi>=0.104.0
+uvicorn>=0.24.0
+pydantic>=2.5.0
+pydantic-settings>=2.1.0
+
+# 数据库
+sqlalchemy>=2.0.0
+aiosqlite>=0.19.0
+
+# 任务队列
+celery>=5.3.0
+redis>=5.0.0
+
+# HTTP 客户端 (标注服务代理)
+httpx>=0.25.0
+
+# 工具
+python-multipart>=0.0.6
+python-jose[cryptography]>=3.3.0
+
+# 数据处理 (与 Data-Processing 共享)
+pandas>=2.0.0
+numpy>=1.24.0
+
+# Gradio (微调界面)
+gradio>=4.0.0
+
