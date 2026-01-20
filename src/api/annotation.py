@@ -87,39 +87,45 @@ async def import_inference_results(inference_file: str):
     用于迭代循环中的反馈机制
     """
     try:
-        import json
-        from pathlib import Path
-        
-        file_path = Path(inference_file)
-        if not file_path.exists():
-            raise HTTPException(status_code=404, detail=f"文件不存在: {inference_file}")
-        
-        with open(file_path, "r", encoding="utf-8") as f:
-            inference_data = json.load(f)
-        
-        # 转换为标注工具可接受的格式并导入
-        imported_count = 0
-        for item in inference_data:
-            filename = item.get("filename")
-            annotations = item.get("annotations", [])
-            
-            if filename and annotations:
-                # 调用标注工具 API 保存
-                async with httpx.AsyncClient() as client:
-                    resp = await client.post(
-                        f"{ANNOTATOR_API}/api/annotations/{filename}",
-                        json={"annotations": annotations}
-                    )
-                    if resp.status_code == 200:
-                        imported_count += 1
-        
+        result = await import_inference_results_internal(inference_file)
         return ApiResponse(
             success=True,
-            data={"imported_count": imported_count},
-            message=f"成功导入 {imported_count} 个文件的预标注"
+            data={"imported_count": result["count"]},
+            message=f"成功导入 {result['count']} 个文件的预标注"
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+async def import_inference_results_internal(inference_file: str) -> dict:
+    """内部导入逻辑，支持跨模块调用"""
+    import json
+    from pathlib import Path
+    
+    file_path = Path(inference_file)
+    if not file_path.exists():
+        return {"success": False, "error": f"文件不存在: {inference_file}", "count": 0}
+    
+    with open(file_path, "r", encoding="utf-8") as f:
+        inference_data = json.load(f)
+    
+    # 转换为标注工具可接受的格式并导入
+    imported_count = 0
+    for item in inference_data:
+        filename = item.get("filename")
+        annotations = item.get("annotations", [])
+        
+        if filename and annotations:
+            # 调用标注工具 API 保存
+            async with httpx.AsyncClient() as client:
+                resp = await client.post(
+                    f"{ANNOTATOR_API}/api/annotations/{filename}",
+                    json={"annotations": annotations}
+                )
+                if resp.status_code == 200:
+                    imported_count += 1
+    
+    return {"success": True, "count": imported_count}
 
 
 @router.get("/export/training-data", response_model=ApiResponse)

@@ -71,6 +71,45 @@ def get_loss_plot(model_name: str):
     return None
 
 
+def get_comparison_plot(model_names: List[str]):
+    """获取多个模型的 Loss 对比图 (使用 Matplotlib 动态生成)"""
+    if not model_names or len(model_names) == 0:
+        return None
+    
+    import matplotlib.pyplot as plt
+    import pandas as pd
+    
+    plt.figure(figsize=(10, 6))
+    
+    for name in model_names:
+        models = adapter.list_models()
+        model = next((m for m in models if m["name"] == name), None)
+        if not model:
+            continue
+            
+        logs = adapter.get_training_log(model["path"])
+        if not logs:
+            continue
+            
+        df = pd.DataFrame([{"step": l.get("current_steps", 0), "loss": l.get("loss")} for l in logs if "loss" in l])
+        if not df.empty:
+            plt.plot(df["step"], df["loss"], label=name)
+            
+    plt.xlabel("Steps")
+    plt.ylabel("Loss")
+    plt.title("Model Comparison: Training Loss")
+    plt.legend()
+    plt.grid(True)
+    
+    # 保存到临时文件
+    import tempfile
+    temp_file = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+    plt.savefig(temp_file.name)
+    plt.close()
+    
+    return temp_file.name
+
+
 def start_training(
     config_name: str,
     learning_rate: str,
@@ -225,6 +264,32 @@ def create_training_ui() -> gr.Blocks:
             refresh_models_btn.click(
                 fn=lambda: gr.Dropdown(choices=get_trained_models()),
                 outputs=model_dropdown
+            )
+            
+        with gr.Tab("⚖️ 模型对比"):
+            with gr.Row():
+                with gr.Column(scale=1):
+                    gr.Markdown("### 选择对比模型")
+                    compare_models = gr.CheckboxGroup(
+                        label="模型列表",
+                        choices=get_trained_models()
+                    )
+                    compare_btn = gr.Button("📊 生成对比图", variant="primary")
+                    refresh_compare_btn = gr.Button("🔄 刷新列表")
+                
+                with gr.Column(scale=3):
+                    gr.Markdown("### 对比结果")
+                    comparison_plot = gr.Image(label="Loss Comparison")
+            
+            # 事件绑定
+            compare_btn.click(
+                fn=get_comparison_plot,
+                inputs=compare_models,
+                outputs=comparison_plot
+            )
+            refresh_compare_btn.click(
+                fn=lambda: gr.CheckboxGroup(choices=get_trained_models()),
+                outputs=compare_models
             )
         
         with gr.Tab("⚙️ 配置说明"):

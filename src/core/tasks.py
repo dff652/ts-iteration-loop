@@ -140,6 +140,34 @@ def run_inference_task(self, task_id: str, model: str, algorithm: str, input_fil
             task.result = json.dumps(final_result)
             db.commit()
         
+        # --- 自动反馈逻辑 (Phase 3) ---
+        try:
+            # 1. 将推理结果保存为临时文件或直接传递
+            # 2. 调用转换逻辑
+            temp_anno_file = adapter.convert_to_annotation_format(final_result)
+            
+            # 3. 导入标注系统 (内部调用导入 API 的核心逻辑)
+            from src.api.annotation import import_inference_results_internal
+            import asyncio
+            
+            # 使用 asyncio.run 更加稳妥，它会自动处理事件循环的创建和关闭
+            try:
+                import_result = asyncio.run(import_inference_results_internal(temp_anno_file))
+            except RuntimeError:
+                # 如果当前线程已有运行中的循环 (虽然在 Celery Worker 中较少见)
+                loop = asyncio.get_event_loop()
+                import_result = loop.run_until_complete(import_inference_results_internal(temp_anno_file))
+            
+            # 更新任务结果信息记录导入状态
+            if task:
+                final_result["feedback"] = import_result
+                task.result = json.dumps(final_result)
+                db.commit()
+        except Exception as feedback_error:
+            # 反馈环节失败不应导致任务本身失败，仅记录日志
+            print(f"自动反馈失败: {feedback_error}")
+        # -----------------------------
+        
         return final_result
         
     except Exception as e:
