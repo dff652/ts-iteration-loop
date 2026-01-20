@@ -8,18 +8,18 @@ echo "TS-Iteration-Loop 启动脚本"
 echo "======================================"
 
 # 检查 Redis
-if ! command -v redis-cli &> /dev/null; then
-    echo "⚠️  Redis 未安装，Celery 任务队列将不可用"
-    echo "   请运行: sudo apt install redis-server"
-else
-    # 检查 Redis 服务
-    if ! redis-cli ping &> /dev/null; then
-        echo "🔄 启动 Redis..."
-        redis-server --daemonize yes
-    else
-        echo "✅ Redis 已运行"
-    fi
-fi
+# if ! command -v redis-cli &> /dev/null; then
+#     echo "⚠️  Redis 未安装，Celery 任务队列将不可用"
+#     echo "   请运行: sudo apt install redis-server"
+# else
+#     # 检查 Redis 服务
+#     if ! redis-cli ping &> /dev/null; then
+#         echo "🔄 启动 Redis..."
+#         redis-server --daemonize yes
+#     else
+#         echo "✅ Redis 已运行"
+#     fi
+# fi
 
 # 检查虚拟环境
 if [ -z "$VIRTUAL_ENV" ]; then

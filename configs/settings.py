@@ -31,8 +31,10 @@ class Settings(BaseSettings):
     JWT_SECRET_KEY: str = "your-secret-key"  # 需与标注工具一致
     JWT_ALGORITHM: str = "HS256"
     
-    # Redis (任务队列)
-    REDIS_URL: str = "redis://localhost:6379/0"
+    # Redis (任务队列) - Temporary switch to SQLite for verification
+    # REDIS_URL: str = "redis://localhost:6379/0"
+    CELERY_BROKER_URL: str = "sqla+sqlite:///" + str(PROJECT_ROOT / "data" / "celery_broker.db")
+    CELERY_RESULT_BACKEND: str = "db+sqlite:///" + str(PROJECT_ROOT / "data" / "celery_results.db")
     
     # 版本管理
     VERSIONS_DIR: str = str(PROJECT_ROOT / "data" / "versions")

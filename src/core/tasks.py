@@ -11,8 +11,8 @@ from configs.settings import settings
 # 创建 Celery 应用
 celery_app = Celery(
     "ts_iteration_loop",
-    broker=settings.REDIS_URL,
-    backend=settings.REDIS_URL
+    broker=settings.CELERY_BROKER_URL,
+    backend=settings.CELERY_RESULT_BACKEND
 )
 
 # Celery 配置

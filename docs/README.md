@@ -4,7 +4,7 @@
 
 ## 项目状态
 
-🟢 **Phase 3 完成** - 已实现推理结果自动回传标注端的反馈闭环，并支持多模型版本对比。
+🟢 **MVP 完成** - 已实现完整的迭代循环：数据→标注→微调→推理→再标注
 
 ## 核心流程 (反馈闭环)
 
@@ -19,66 +19,65 @@ graph LR
 
 ## 功能模块
 
-| 模块 | 状态 | 技术实现 |
-|------|------|----------|
-| **数据服务** | ✅ 完成 | 封装 `Data-Processing` 脚本 |
-| **标注服务** | ✅ 完成 | 集成 `timeseries-annotator-v2` |
-| **微调服务** | ✅ 完成 | Gradio UI 封装 `ChatTS-Training`，支持多版本对比 |
-| **推理服务** | ✅ 完成 | 封装 `check_outlier` 项目 |
-| **任务队列** | ✅ 完成 | Celery + Redis 异步执行 |
-| **迭代反馈** | ✅ 完成 | **[New]** 推理结果自动回流标注端作为预标注 |
+| 模块 | 状态 | UI 入口 |
+|------|------|---------|
+| **数据服务** | ✅ 完成 | `/train-ui` → 📁 数据获取 |
+| **标注服务** | ✅ 完成 | `/train-ui` → 🏷️ 标注工具 |
+| **微调服务** | ✅ 完成 | `/train-ui` → 🎯 开始训练 |
+| **推理服务** | ✅ 完成 | `/train-ui` → 🔍 推理监控 |
+| **迭代管理** | ✅ 完成 | `/api/v1/iteration` |
 
 ## 🚀 快速开始
 
-### 方式 1：Docker 部署 (推荐)
+### 本地启动
 
 ```bash
-cd /home/douff/ts/ts-iteration-loop
-docker-compose up -d
-```
-
-### 方式 2：本地启动
-
-```bash
-# 安装依赖 (推荐使用国内镜像源)
+# 安装依赖
 pip install -i https://pypi.tuna.tsinghua.edu.cn/simple -r requirements.txt
 
-# 启动所有服务 (App + Celery Worker)
+# 启动服务
 ./scripts/start.sh all
 ```
 
-访问地址：
-- **微调 & 对比界面**: [http://localhost:8000/train-ui](http://localhost:8000/train-ui)
-- **API 文档**: [http://localhost:8000/docs](http://localhost:8000/docs)
+### 访问地址
 
-## 🏗️ 架构概览
+| 入口 | 地址 |
+|------|------|
+| **统一管理界面** | http://localhost:8000/train-ui |
+| **API 文档** | http://localhost:8000/docs |
+| **标注工具** | http://localhost:5000 |
 
-- **Backend**: FastAPI (Python)
-- **Forwarding UI**: Gradio (微调状态、进度监控、多模型 Loss 曲线对比)
-- **Worker**: Celery (处理耗时训练/推理)
-- **Storage**: SQLite (任务状态管理) + Redis (任务 Broker)
+## 📊 UI 界面
 
-## 📁 主要目录
+| Tab | 功能 |
+|-----|------|
+| 📁 数据获取 | 数据集列表、曲线预览、采集配置 |
+| 🔍 推理监控 | 任务创建、状态监控 |
+| 🏷️ 标注工具 | 跳转到标注工具 |
+| 🎯 开始训练 | 微调参数配置 |
+| 📊 已训练模型 | 模型详情、Loss 曲线 |
+| ⚖️ 模型对比 | 多模型对比图 |
 
-```text
+## 🏗️ 技术栈
+
+- **Backend**: FastAPI + Python 3.10+
+- **Frontend**: Gradio
+- **Worker**: Celery
+- **Storage**: SQLite
+
+## 📁 目录结构
+
+```
 ts-iteration-loop/
 ├── src/
-│   ├── api/            # 核心业务接口
-│   ├── adapters/       # 外部子项目适配器
-│   ├── core/           # 任务引擎与进度监控
-│   ├── webui/          # Gradio 训练与对比界面
-│   └── main.py         # 统一入口
-├── scripts/            # 启动脚本与集成测试 (test_feedback_loop.py)
-└── docs/               # 详细开发文档与 API 说明
+│   ├── api/         # 业务接口 (data, annotation, training, inference, iteration)
+│   ├── adapters/    # 外部项目适配器
+│   ├── core/        # 任务引擎
+│   ├── webui/       # Gradio 界面
+│   └── main.py      # 入口
+└── docs/            # 文档
 ```
 
 ---
 
-## 相关资源
-
-- [开发日志与里程碑](docs/DEVELOPMENT.md)
-- [API 详细说明](docs/API.md)
-- [推理反馈回路设计](docs/DEVELOPMENT.md#phase-3-进展)
-
----
-GitHub: [dff652/ts-iteration-loop](https://github.com/dff652/ts-iteration-loop)
+- [开发文档](DEVELOPMENT.md) | [API 说明](API.md) | [更新日志](CHANGELOG.md)

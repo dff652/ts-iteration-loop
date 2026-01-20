@@ -40,6 +40,10 @@ app.include_router(annotation.router, prefix="/api/v1/annotation", tags=["标注
 app.include_router(training.router, prefix="/api/v1/training", tags=["微调服务"])
 app.include_router(inference.router, prefix="/api/v1/inference", tags=["推理服务"])
 
+# 导入并注册迭代版本管理路由
+from src.api import iteration
+app.include_router(iteration.router, prefix="/api/v1/iteration", tags=["迭代管理"])
+
 # 挂载 Gradio 微调界面到 /train-ui
 app = gr.mount_gradio_app(app, training_ui, path="/train-ui")
 
