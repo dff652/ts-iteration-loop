@@ -22,3 +22,15 @@ def apply_loss_kwargs_patch():
 
 # 在模块加载时自动应用
 apply_loss_kwargs_patch()
+
+# 诊断信息：检查环境和模块路径
+try:
+    import sys
+    import os
+    print(f"[Patch] sys.path: {sys.path}", flush=True)
+    print(f"[Patch] patch_transformers path: {os.path.abspath(__file__)}", flush=True)
+    
+    import chatts_detect
+    print(f"[Patch] chatts_detect loaded from: {chatts_detect.__file__}", flush=True)
+except Exception as e:
+    print(f"[Patch] Diagnostic failed: {e}", flush=True)
