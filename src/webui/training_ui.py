@@ -355,11 +355,36 @@ def start_inference_task(
         return
     
     import uuid
-    task_id = str(uuid.uuid4())[:8]
+    task_id = str(uuid.uuid4())
+    
+    # 保存任务到数据库
+    from datetime import datetime
+    from src.db.database import SessionLocal, Task
+    db = SessionLocal()
+    try:
+        task = Task(
+            id=task_id,
+            type="inference",
+            status="running",
+            config=json.dumps({
+                "algorithm": algorithm,
+                "files": files,
+                "base_model_path": base_model_path,
+                "lora_adapter_path": lora_adapter_path
+            }),
+            created_at=datetime.utcnow(),
+            started_at=datetime.utcnow()
+        )
+        db.add(task)
+        db.commit()
+    except Exception as e:
+        print(f"[DB Error] Failed to save task: {e}")
+    finally:
+        db.close()
     
     yield (
-        f"🚀 任务已启动 (ID: {task_id})\n正在处理 {len(file_paths)} 个文件...", 
-        f"🚀 任务已启动 (ID: {task_id})",
+        f"🚀 任务已启动 (ID: {task_id[:8]})\\n正在处理 {len(file_paths)} 个文件...", 
+        f"🚀 任务已启动 (ID: {task_id[:8]})",
         gr.update(visible=True), # Show stop button
         gr.update(visible=False), # Hide submit button
         task_id, # Return task_id to state
@@ -429,6 +454,19 @@ def start_inference_task(
         # 我们在 adapter 中增加了 yield {"file_name": ...} 逻辑
         # 这里需要处理它。
         
+        # 更新数据库任务状态为完成
+        db = SessionLocal()
+        try:
+            task = db.query(Task).filter(Task.id == task_id).first()
+            if task:
+                task.status = "completed"
+                task.completed_at = datetime.utcnow()
+                db.commit()
+        except Exception as e:
+            print(f"[DB Error] Failed to update task: {e}")
+        finally:
+            db.close()
+        
         yield (
             accumulated_log + "\n✅ 所有任务已完成", 
             "✅ 任务完成",
@@ -441,6 +479,21 @@ def start_inference_task(
     except Exception as e:
         import traceback
         traceback.print_exc()
+        
+        # 更新数据库任务状态为失败
+        db = SessionLocal()
+        try:
+            task = db.query(Task).filter(Task.id == task_id).first()
+            if task:
+                task.status = "failed"
+                task.error = str(e)
+                task.completed_at = datetime.utcnow()
+                db.commit()
+        except Exception as db_e:
+            print(f"[DB Error] Failed to update task: {db_e}")
+        finally:
+            db.close()
+        
         yield (
             f"❌ 发生错误: {str(e)}", 
             f"❌ 错误: {str(e)}",
