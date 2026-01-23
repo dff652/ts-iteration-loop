@@ -3,6 +3,7 @@ check_outlier 项目适配器
 封装推理检测功能
 """
 import os
+import time
 import sys
 import json
 import subprocess
