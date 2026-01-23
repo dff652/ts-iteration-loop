@@ -189,24 +189,31 @@ def map_anomalies_to_original(
     
     mapped = []
     for a in anomalies:
-        if "range" not in a:
-            print(f"[ChatTS][Warning] Skipping anomaly without 'range' field: {a}")
-            continue
+        try:
+            if "range" not in a:
+                print(f"[ChatTS][Warning] Skipping anomaly without 'range' field: {a}")
+                continue
+                
+            ds_start, ds_end = a["range"]
             
-        ds_start, ds_end = a["range"]
-        
-        # 边界检查
-        ds_start = max(0, min(ds_start, len(idx_array) - 1))
-        ds_end = max(0, min(ds_end, len(idx_array) - 1))
-        
-        # 通过 position_index 映射到原始位置索引
-        orig_start = int(idx_array[ds_start])
-        orig_end = int(idx_array[ds_end])
-        
-        mapped_anomaly = a.copy()
-        mapped_anomaly["range"] = [orig_start, orig_end]
-        mapped_anomaly["downsampled_range"] = [a["range"][0], a["range"][1]]
-        mapped.append(mapped_anomaly)
+            # 边界检查
+            ds_start = max(0, min(ds_start, len(idx_array) - 1))
+            ds_end = max(0, min(ds_end, len(idx_array) - 1))
+            
+            # 通过 position_index 映射到原始位置索引
+            orig_start = int(idx_array[ds_start])
+            orig_end = int(idx_array[ds_end])
+            
+            mapped_anomaly = a.copy()
+            mapped_anomaly["range"] = [orig_start, orig_end]
+            mapped_anomaly["downsampled_range"] = [a["range"][0], a["range"][1]]
+            mapped.append(mapped_anomaly)
+        except KeyError as e:
+            print(f"[ChatTS][Error] KeyError processing anomaly {a}: {e}")
+            continue
+        except Exception as e:
+            print(f"[ChatTS][Error] Unexpected error processing anomaly {a}: {e}")
+            continue
     
     return mapped
 
@@ -227,12 +234,18 @@ def create_mask_from_anomalies(
     """
     mask = np.zeros(data_length, dtype=int)
     for a in anomalies:
-        if "range" not in a:
+        try:
+            if "range" not in a:
+                continue
+            start, end = a["range"]
+            start = max(0, min(start, data_length - 1))
+            end = max(0, min(end, data_length - 1))
+            mask[start:end+1] = 1
+        except KeyError:
+             continue
+        except Exception as e:
+            print(f"[ChatTS][Error] Unexpected error in mask creation for anomaly {a}: {e}")
             continue
-        start, end = a["range"]
-        start = max(0, min(start, data_length - 1))
-        end = max(0, min(end, data_length - 1))
-        mask[start:end+1] = 1
     return mask
 
 
