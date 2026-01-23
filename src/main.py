@@ -1,6 +1,14 @@
 """
 TS-Iteration-Loop 主入口
 """
+import os
+import getpass
+
+# 设置 Gradio 临时目录，避免与其他用户冲突
+gradio_temp_dir = f"/tmp/{getpass.getuser()}/gradio"
+os.makedirs(gradio_temp_dir, exist_ok=True)
+os.environ["GRADIO_TEMP_DIR"] = gradio_temp_dir
+
 import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
