@@ -20,6 +20,21 @@ if _cuda_env is not None and _cuda_env == '':
     del os.environ['CUDA_VISIBLE_DEVICES']
 # ================================================================
 
+# ========== Monkey Patch for transformers 4.54+ Compatibility ==========
+# 某些依赖库可能会尝试从 transformers.utils 导入 LossKwargs，
+# 但该类在 transformers 4.54+ 中已被移除。此处进行兼容性修复。
+try:
+    import transformers.utils
+    if not hasattr(transformers.utils, "LossKwargs"):
+        class LossKwargs:
+            pass
+        transformers.utils.LossKwargs = LossKwargs
+        import sys
+        sys.modules["transformers.utils.LossKwargs"] = LossKwargs
+except ImportError:
+    pass
+# =======================================================================
+
 from iotdb.Session import Session
 import pandas as pd
 import numpy as np
