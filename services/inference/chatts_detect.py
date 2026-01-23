@@ -14,6 +14,7 @@ from typing import List, Tuple, Optional, Dict, Any
 import re
 import json
 import time
+import patch_transformers # Monkey Patch for transformers 4.54+
 
 # Prompt模板缓存
 _prompt_templates_cache: Optional[Dict] = None
