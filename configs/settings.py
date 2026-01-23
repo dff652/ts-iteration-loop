@@ -32,27 +32,27 @@ class Settings(BaseSettings):
     LOCAL_DATA_PROCESSING_PATH: str = str(PROJECT_ROOT / "services" / "data_processing")
     LOCAL_ANNOTATOR_PATH: str = str(PROJECT_ROOT / "services" / "annotator")
     
-    # 外部模块路径（兼容旧配置，USE_LOCAL_MODULES=False 时使用）
-    EXTERNAL_DATA_PROCESSING_PATH: str = "/home/douff/ts/Data-Processing"
-    EXTERNAL_ANNOTATOR_PATH: str = "/home/douff/ts/timeseries-annotator-v2"
-    EXTERNAL_CHATTS_TRAINING_PATH: str = "/home/douff/ts/ChatTS-Training"
-    EXTERNAL_CHECK_OUTLIER_PATH: str = "/home/douff/ilabel/check_outlier"
+    # 外部模块路径（已禁用：代码已整合，避免修改外部独立项目）
+    # EXTERNAL_DATA_PROCESSING_PATH: str = "/home/douff/ts/Data-Processing"
+    # EXTERNAL_ANNOTATOR_PATH: str = "/home/douff/ts/timeseries-annotator-v2"
+    # EXTERNAL_CHATTS_TRAINING_PATH: str = "/home/douff/ts/ChatTS-Training"
+    # EXTERNAL_CHECK_OUTLIER_PATH: str = str(PROJECT_ROOT / "services" / "inference")
     
     @property
     def DATA_PROCESSING_PATH(self) -> str:
-        return self.LOCAL_DATA_PROCESSING_PATH if self.USE_LOCAL_MODULES else self.EXTERNAL_DATA_PROCESSING_PATH
+        return self.LOCAL_DATA_PROCESSING_PATH
     
     @property
     def ANNOTATOR_PATH(self) -> str:
-        return self.LOCAL_ANNOTATOR_PATH if self.USE_LOCAL_MODULES else self.EXTERNAL_ANNOTATOR_PATH
+        return self.LOCAL_ANNOTATOR_PATH
     
     @property
     def CHATTS_TRAINING_PATH(self) -> str:
-        return self.LOCAL_TRAINING_PATH if self.USE_LOCAL_MODULES else self.EXTERNAL_CHATTS_TRAINING_PATH
+        return self.LOCAL_TRAINING_PATH
     
     @property
     def CHECK_OUTLIER_PATH(self) -> str:
-        return self.LOCAL_CHECK_OUTLIER_PATH if self.USE_LOCAL_MODULES else self.EXTERNAL_CHECK_OUTLIER_PATH
+        return self.LOCAL_CHECK_OUTLIER_PATH
     
     # ========== Python 解释器配置 ==========
     # 统一环境 Python 解释器（优先使用环境变量或当前解释器）

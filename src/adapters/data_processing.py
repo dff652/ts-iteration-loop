@@ -36,7 +36,7 @@ class DataProcessingAdapter:
         
         return datasets
     
-    def preview_csv(self, filename: str, limit: int = 100) -> List[Dict]:
+    def preview_csv(self, filename: str, limit: int = 5000) -> List[Dict]:
         """预览 CSV 文件"""
         file_path = self.data_path / filename
         if not file_path.exists():

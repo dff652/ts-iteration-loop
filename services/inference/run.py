@@ -20,6 +20,20 @@ if _cuda_env is not None and _cuda_env == '':
     del os.environ['CUDA_VISIBLE_DEVICES']
 # ================================================================
 
+# ========== 抑制常见警告（必须在导入 torch/transformers 之前） ==========
+import warnings
+import os as _warn_os
+# 设置环境变量抑制 PEFT 警告
+_warn_os.environ.setdefault('HF_HUB_DISABLE_SYMLINKS_WARNING', '1')
+_warn_os.environ.setdefault('TRANSFORMERS_NO_ADVISORY_WARNINGS', '1')
+# 抑制 torch.jit.script_method 弃用警告（来自 PyTorch/Transformers 内部）
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", category=UserWarning, message=".*peft_config.*")
+warnings.filterwarnings("ignore", message=".*torch.jit.script_method.*")
+warnings.filterwarnings("ignore", message=".*is deprecated.*")
+# ================================================================
+
 # ========== Monkey Patch for transformers 4.54+ Compatibility ==========
 import patch_transformers
 # =======================================================================
@@ -75,9 +89,15 @@ from perf_logger import PerfLogger, PerfMetrics, Timer, get_perf_logger
 
 print("当前工作目录:", os.getcwd())
 import logging
+import os as _os
+
+# 确保日志目录存在
+_logs_dir = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), 'logs')
+if not _os.path.exists(_logs_dir):
+    _os.makedirs(_logs_dir)
 
 logging.basicConfig(
-    filename="./function_timer.log",  # 日志文件名
+    filename=_os.path.join(_logs_dir, "function_timer.log"),  # 日志文件名
     level=logging.INFO,  # 日志级别
     format="%(asctime)s - %(message)s"  # 日志格式
 )
@@ -600,6 +620,9 @@ def process_sensor(sensor_info, args):
     if os.path.exists(file_path):
         logging.info(f"Results already exist for {sensor_info}, skipping processing")
         print(f"Results already exist for {sensor_info}, skipping processing")
+        # 仍然输出文件信息，让前端适配器能够捕获已存在的结果文件
+        print(f"Saving results to: {folder_path}")
+        print(f"保存结果: {file_name}")
         metrics.status = "skipped"
         metrics.total_time = time.perf_counter() - total_start_time
         perf_logger.log_metrics(metrics)
@@ -628,14 +651,21 @@ def process_sensor(sensor_info, args):
                     print("Warning: No time column found, using auto-generated index")
                 
                 # 如果指定了列名但不在数据中，尝试使用第一列
+                # 注意：保留原始 column（点位名）用于文件命名，使用 data_column 读取数据
+                original_point_name = column  # 保留原始点位名
+                data_column = column  # 实际读取数据的列名
+                
                 if column not in raw_data.columns and not raw_data.empty:
                     # 排除时间列（如果它是列而不是索引）
                     numeric_cols = raw_data.select_dtypes(include=[np.number]).columns
                     if len(numeric_cols) > 0:
-                        print(f"Column '{column}' not found, using '{numeric_cols[0]}'")
-                        column = numeric_cols[0]
-                        # 更新 sensor_info 以反映实际使用的列名
-                        sensor_info = (path, column, st, et)
+                        print(f"Column '{column}' not found in CSV, using '{numeric_cols[0]}' for data")
+                        print(f"Keeping original point name '{original_point_name}' for result filename")
+                        data_column = numeric_cols[0]
+                        # 重命名列以统一处理
+                        raw_data = raw_data.rename(columns={data_column: original_point_name})
+                        data_column = original_point_name
+                        # sensor_info 保持不变，使用原始点位名
             
             except Exception as e:
                 print(f"Error reading CSV: {e}")
@@ -1193,10 +1223,12 @@ def main():
     
     if args.input:
         print(f"Running in single file mode: {args.input}")
-        # 在单文件模式下，创建一个虚拟的 sensor_info
+        # 在单文件模式下，从输入文件名提取唯一标识符
         # (path, column, st, et)
-        # 具体的列名和时间会在 process_sensor 中从 CSV 读取并更新
-        sensor_infos.append(('manual', 'value', '2023-01-01', '2024-01-01'))
+        # 使用文件名作为 column，确保每个文件生成唯一的结果文件名
+        from pathlib import Path
+        input_stem = Path(args.input).stem  # e.g., "ZHLH_4C_1216_FI_49102.PV"
+        sensor_infos.append(('csv_input', input_stem, '2023-01-01', '2024-01-01'))
     else:
         point_config = load_config(args.config_file)
         

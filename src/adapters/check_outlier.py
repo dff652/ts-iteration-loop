@@ -3,7 +3,6 @@ check_outlier 项目适配器
 封装推理检测功能
 """
 import os
-import time
 import sys
 import json
 import subprocess
@@ -35,7 +34,8 @@ class CheckOutlierAdapter:
             except Exception as e:
                 print(f"Error stopping task {task_id}: {e}")
                 return False
-        return False
+        # If not in active_processes, we still marked it as cancelled, so return True
+        return True
     
     def run_batch_inference(
         self,
@@ -287,7 +287,6 @@ class CheckOutlierAdapter:
             arg_name = f"--{k}"
             cmd.extend([arg_name, str(v)])
             
-        yield f"[SYSTEM CHECK] Code Version: DEBUG-001 (Time: {time.strftime('%H:%M:%S')})\n"
         yield f"Running command: `{' '.join(cmd[:10])}...`\n"
 
         process = None
@@ -351,6 +350,12 @@ class CheckOutlierAdapter:
                          yield f"- {stripped_line}\n"
                     elif "Error" in stripped_line or "Exception" in stripped_line:
                          yield f"❌ **{stripped_line}**\n"
+                    # 3. 允许更多调试信息通过
+                    elif any(k in stripped_line for k in ["Traceback", "File \"", "line ", "KeyError", "ValueError", "DEBUG", "INFO"]):
+                        yield f"```\n{stripped_line}\n```\n"
+                    # 4. 默认显示其他非空行 (作为引言，避免太乱)
+                    else:
+                        yield f"> {stripped_line}\n"
             
             process.wait()
             

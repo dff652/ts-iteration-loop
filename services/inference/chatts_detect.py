@@ -374,8 +374,14 @@ class ChatTSAnalyzer:
         self.device = self._get_model_input_device()
 
     def _build_prompt(self, timeseries_len: int, system_prompt: str, task_prompt_tpl: str) -> str:
-        # 仅替换 {ts_len}，不影响占位符
-        user_prompt = task_prompt_tpl.format(ts_len=timeseries_len)
+        # 使用 replace 而不是 format，避免 JSON 示例中的花括号被误认为是占位符
+        # 仅替换 {ts_len}，不影响其他内容
+        if "{ts_len}" in task_prompt_tpl:
+            user_prompt = task_prompt_tpl.replace("{ts_len}", str(timeseries_len))
+        else:
+            # 兼容可能的旧模板（虽然不推荐，但防止 crash）
+            user_prompt = task_prompt_tpl
+            
         # 统一占位符为 <ts><ts/>
         if "<ts><ts/>" not in user_prompt:
             # 兼容老写法 <ts></ts>
@@ -846,10 +852,11 @@ def chatts_detect(
     # 解析结果
     try:
         anomalies = extract_anomalies(text)
+        print(f"[ChatTS][DEBUG] Raw anomalies: {anomalies}")
         print(f"[ChatTS] 检测到 {len(anomalies)} 个异常区间")
     except ValueError as e:
         print(f"[ChatTS] 解析结果失败: {e}")
-        print(f"[ChatTS] 模型输出: {text[:500]}...")
+        print(f"[ChatTS][DEBUG] Raw output text: {text[:1000]}") # 打印更多字符
         anomalies = []
     
     # 映射到原始索引

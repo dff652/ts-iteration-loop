@@ -20,8 +20,32 @@ def apply_loss_kwargs_patch():
     except Exception as e:
         print(f"[Patch] Failed to apply LossKwargs patch: {e}")
 
+def apply_dynamic_cache_patch():
+    """
+    Fix for AttributeError: 'DynamicCache' object has no attribute 'seen_tokens'
+    Caused by transformers >= 4.45 compatibility issues with older Qwen models
+    """
+    try:
+        from transformers.cache_utils import DynamicCache
+        if not hasattr(DynamicCache, "seen_tokens"):
+            # Map seen_tokens to get_seq_length()
+            # Note: get_seq_length() returns the number of tokens currently in the cache
+            print("[Patch] DynamicCache.seen_tokens is missing, patching it to use get_seq_length()")
+            
+            @property
+            def seen_tokens(self):
+                return self.get_seq_length()
+                
+            DynamicCache.seen_tokens = seen_tokens
+            print("[Patch] Applied transformers.cache_utils.DynamicCache.seen_tokens patch")
+    except ImportError:
+        pass
+    except Exception as e:
+        print(f"[Patch] Failed to apply DynamicCache patch: {e}")
+
 # 在模块加载时自动应用
 apply_loss_kwargs_patch()
+apply_dynamic_cache_patch()
 
 # 诊断信息：检查环境和模块路径
 try:

@@ -6,6 +6,7 @@ import gradio as gr
 from pathlib import Path
 from typing import List, Dict, Optional
 import json
+import time
 import pandas as pd
 
 from configs.settings import settings
@@ -21,6 +22,102 @@ inference_adapter = CheckOutlierAdapter()
 
 # 为了兼容性保留旧变量名
 adapter = training_adapter
+
+# 结果文件目录
+RESULTS_BASE_PATH = Path("/home/share/results/data")
+
+
+def get_existing_results(method: str = "chatts") -> List[str]:
+    """获取已有的结果文件列表"""
+    results_dir = RESULTS_BASE_PATH / "global" / method
+    if not results_dir.exists():
+        return []
+    
+    # 获取所有 CSV 文件，按修改时间排序（最新的在前）
+    csv_files = list(results_dir.glob("*.csv"))
+    csv_files.sort(key=lambda x: x.stat().st_mtime, reverse=True)
+    return [str(f) for f in csv_files[:20]]  # 最多返回 20 个
+
+
+def delete_selected_files(method: str, filenames: List[str]) -> tuple:
+    """批量删除选中的结果文件"""
+    if not filenames:
+        return (
+            gr.CheckboxGroup(choices=get_result_filenames(method)), 
+            gr.File(value=None), 
+            "⚠️ 请先选择要删除的文件"
+        )
+    
+    results_dir = RESULTS_BASE_PATH / "global" / method
+    deleted_count = 0
+    errors = []
+    
+    for fname in filenames:
+        file_path = results_dir / fname.strip()  # Strip whitespace just in case
+        print(f"DEBUG: Attempting to delete {file_path}")
+        if file_path.exists():
+            try:
+                file_path.unlink()
+                deleted_count += 1
+                print(f"DEBUG: Deleted {file_path}")
+            except Exception as e:
+                errors.append(f"{fname}: {str(e)}")
+                print(f"DEBUG: Error deleting {file_path}: {e}")
+        else:
+            print(f"DEBUG: File not found {file_path}")
+            # Try verify if it's a encoding issue or partial path
+            errors.append(f"{fname}: File not found")
+    
+    # 刷新列表
+    time.sleep(0.5)  # 等待文件系统同步
+    new_choices = get_result_filenames(method)
+    
+    status_msg = f"✅ 已删除 {deleted_count} 个文件"
+    if errors:
+        status_msg += f"\n❌ 错误: {'; '.join(errors)}"
+        
+    return (
+        gr.update(choices=new_choices, value=[]), 
+        gr.update(value=None, label="📥 下载区域 (请先选择文件)"),
+        status_msg
+    )
+
+
+def prepare_download_files(method: str, filenames: List[str]) -> tuple:
+    """准备下载选中的文件"""
+    if not filenames:
+        return None, "⚠️ 请先选择要下载的文件"
+    
+    results_dir = RESULTS_BASE_PATH / "global" / method
+    paths = []
+    for fname in filenames:
+        p = results_dir / fname.strip()
+        if p.exists():
+            paths.append(str(p))
+            
+    if not paths:
+        return gr.update(value=None), "❌ 未找到选中的文件"
+        
+    return (
+        gr.update(value=paths, label="📥 点击此处下载 / Click to Download", visible=True),
+        f"✅ 已准备好 {len(paths)} 个文件，请点击下方下载区域进行下载"
+    )
+
+
+def get_result_filenames(method: str = "chatts") -> List[str]:
+    """获取结果文件名列表（用于下拉框）"""
+    results_dir = RESULTS_BASE_PATH / "global" / method
+    if not results_dir.exists():
+        return []
+    
+    csv_files = list(results_dir.glob("*.csv"))
+    csv_files.sort(key=lambda x: x.stat().st_mtime, reverse=True)
+    return [f.name for f in csv_files[:20]]
+
+
+def delete_result_file(method: str, filename: str) -> tuple:
+    # 已弃用，使用 delete_selected_files
+    pass
 
 
 def get_training_configs() -> List[str]:
@@ -177,7 +274,7 @@ def preview_dataset(filename: str) -> tuple:
     try:
         # 获取预览数据
         print(f"[DEBUG] Calling preview_csv for: {filename}")
-        data = data_adapter.preview_csv(filename, limit=200)
+        data = data_adapter.preview_csv(filename, limit=5000)
         print(f"[DEBUG] preview_csv returned {len(data)} records")
         
         df = pd.DataFrame(data)
@@ -248,7 +345,7 @@ def update_plot_from_selection(filename: str, selected_cols: list):
         return None
     
     try:
-        data = data_adapter.preview_csv(filename, limit=200)
+        data = data_adapter.preview_csv(filename, limit=5000)
         df = pd.DataFrame(data)
         df = df.loc[:, ~df.columns.str.contains('^Unnamed|^category', case=False)]
         return generate_plot(df, filename, selected_cols)
@@ -503,11 +600,15 @@ def start_inference_task(
 
 def stop_task_action(task_id_state):
     """实际执行停止动作"""
+    print(f"DEBUG: Stop requested for task ID: {task_id_state}")
     if task_id_state:
         if inference_adapter.stop_inference_task(task_id_state):
+            print(f"DEBUG: Stop successful for {task_id_state}")
             return "🛑 任务已请求停止", gr.update(visible=False), gr.update(visible=True), None, None
         else:
-            return "❌ 停止失败或任务不存在", gr.update(visible=True), gr.update(visible=False), task_id_state, None
+            print(f"DEBUG: Stop failed for {task_id_state} (not found or error)")
+            return f"❌ 停止失败: 任务 {task_id_state} 不存在或已结束", gr.update(visible=True), gr.update(visible=False), task_id_state, None
+    print("DEBUG: No active task ID found")
     return "⚠️ 无活动任务", gr.update(visible=False), gr.update(visible=True), None, None
 
 
@@ -533,6 +634,19 @@ def get_task_status_table() -> pd.DataFrame:
         return pd.DataFrame(rows)
     except Exception as e:
         return pd.DataFrame({"错误": [str(e)]})
+
+
+def clear_task_history() -> tuple:
+    """清空任务历史记录"""
+    try:
+        from src.db.database import SessionLocal, Task
+        db = SessionLocal()
+        deleted = db.query(Task).delete()
+        db.commit()
+        db.close()
+        return pd.DataFrame(columns=["ID", "类型", "状态", "创建时间"]), f"✅ 已清空 {deleted} 条历史记录"
+    except Exception as e:
+        return get_task_status_table(), f"❌ 清空失败: {str(e)}"
 
 
 def start_training(
@@ -657,7 +771,7 @@ def create_training_ui() -> gr.Blocks:
             with gr.Row():
                 preview_plot = gr.Image(label="Curve Preview", height=350)
             
-            with gr.Accordion("📋 Data Table (first 200 rows)", open=False):
+            with gr.Accordion("📋 Data Table (first 5000 rows)", open=False):
                 preview_table = gr.Dataframe(
                     label="",
                     interactive=False
@@ -797,15 +911,54 @@ def create_training_ui() -> gr.Blocks:
                                 autoscroll=True
                             )
                         with gr.Tab("任务结果"):
+                             # 当前任务状态
                              inference_result_md = gr.Markdown(value="等待任务完成...")
-                             download_files = gr.File(label="下载结果文件", file_count="multiple", interactive=False)
+                             download_files = gr.File(label="当前任务结果", file_count="multiple", interactive=False, visible=False)
+                             
+                             # 整合的结果文件管理区
+                             gr.Markdown("### 📂 结果文件管理")
+                             with gr.Row():
+                                 results_method_select = gr.Dropdown(
+                                     label="筛选方法",
+                                     choices=["chatts", "timer", "adtk_hbos"],
+                                     value="chatts",
+                                     scale=1
+                                 )
+                                 refresh_results_btn = gr.Button("🔄 刷新列表", size="sm", scale=0)
+                             
+                             # 统一文件列表（多选）
+                             file_manager_list = gr.CheckboxGroup(
+                                 label="文件列表 (文件名 | 较新的在前)",
+                                 choices=get_result_filenames("chatts"),
+                                 value=[],
+                                 interactive=True
+                             )
+                             
+                             with gr.Row():
+                                 download_selected_btn = gr.Button("⬇️ 下载选中", size="sm")
+                                 delete_selected_btn = gr.Button("🗑️ 删除选中", variant="stop", size="sm")
+
+                             operation_status = gr.Markdown(value="")
+
+                             # 下载区域 (动态显示)
+                             history_download_files = gr.File(
+                                 label="📥 下载区域 (请先选择文件并点击“下载选中”)",
+                                 file_count="multiple",
+                                 interactive=False,
+                                 visible=True
+                             )
                     
-                    refresh_tasks_btn = gr.Button("🔄 刷新状态")
-                    task_table = gr.Dataframe(
-                        headers=["ID", "类型", "状态", "创建时间"],
-                        value=[],
-                        interactive=False
-                    )
+                    # 任务历史记录 - 放入可折叠区域
+                    with gr.Accordion("📋 任务历史记录", open=False):
+                        with gr.Row():
+                            refresh_tasks_btn = gr.Button("🔄 刷新状态", size="sm")
+                            clear_tasks_btn = gr.Button("🗑️ 清空历史", size="sm", variant="stop")
+                        clear_status = gr.Markdown(value="", visible=True)
+                        task_table = gr.Dataframe(
+                            headers=["ID", "类型", "状态", "创建时间"],
+                            value=[],
+                            interactive=False
+                        )
             
             # 事件绑定 - 推理监控
             
@@ -857,6 +1010,41 @@ def create_training_ui() -> gr.Blocks:
             refresh_tasks_btn.click(
                 fn=lambda: gr.Dropdown(choices=get_inference_models()),
                 outputs=lora_adapter_select
+            )
+            
+            # 清空历史记录
+            clear_tasks_btn.click(
+                fn=clear_task_history,
+                outputs=[task_table, clear_status]
+            )
+            
+            # 历史结果文件刷新
+            refresh_results_btn.click(
+                fn=lambda m: gr.CheckboxGroup(choices=get_result_filenames(m)),
+                inputs=results_method_select,
+                outputs=file_manager_list
+            )
+            
+            # 切换方法时刷新结果列表
+            results_method_select.change(
+                fn=lambda m: gr.CheckboxGroup(choices=get_result_filenames(m)),
+                inputs=results_method_select,
+                outputs=file_manager_list
+            )
+            
+            # 删除选中文件
+            delete_selected_btn.click(
+                fn=delete_selected_files,
+                inputs=[results_method_select, file_manager_list],
+                outputs=[file_manager_list, history_download_files, operation_status]
+            )
+            
+            # 下载选中文件
+            # 下载选中文件
+            download_selected_btn.click(
+                fn=prepare_download_files,
+                inputs=[results_method_select, file_manager_list],
+                outputs=[history_download_files, operation_status]
             )
             
             # 算法切换事件：控制参数组显示

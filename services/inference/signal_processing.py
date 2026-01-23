@@ -24,9 +24,13 @@ except ImportError:
     from wavelet import reconstruct_residuals
     
     
-# 配置日志文件
+# 配置日志文件 - 统一写入 logs 目录
+import os as _os
+_logs_dir = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), 'logs')
+if not _os.path.exists(_logs_dir):
+    _os.makedirs(_logs_dir)
 logging.basicConfig(
-    filename="./function_timer.log",  # 日志文件名
+    filename=_os.path.join(_logs_dir, "function_timer.log"),  # 日志文件名
     level=logging.INFO,  # 日志级别
     format="%(asctime)s - %(message)s"  # 日志格式
 )
