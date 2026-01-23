@@ -1,0 +1,169 @@
+{
+  "custom_labels": [],
+  "local_change": {
+    "anomaly": {
+      "labels": [
+        {
+          "color": "#a855f7",
+          "id": "anomaly_segment",
+          "text": "震荡区间"
+        },
+        {
+          "color": "#f59e0b",
+          "id": "label_1766468646084",
+          "text": "点异常"
+        },
+        {
+          "color": "#84cc16",
+          "id": "label_1766472954139",
+          "text": "区间异常"
+        },
+        {
+          "color": "#10b981",
+          "id": "label_1766476471039",
+          "text": "上下文异常"
+        }
+      ],
+      "name": "特殊异常段"
+    },
+    "cat_1766476898204": {
+      "color": "#6b7280",
+      "labels": [
+        {
+          "id": "label_1767155042913",
+          "text": "上峰",
+          "color": "#06b6d4"
+        }
+      ],
+      "name": "其他"
+    },
+    "drift": {
+      "labels": [
+        {
+          "color": "#3b82f6",
+          "id": "gradual_drift",
+          "text": "缓慢漂移"
+        },
+        {
+          "color": "#6366f1",
+          "id": "sudden_drift",
+          "text": "突然漂移"
+        }
+      ],
+      "name": "漂移类"
+    },
+    "spike": {
+      "labels": [
+        {
+          "color": "#ef4444",
+          "id": "upward_spike",
+          "text": "上行尖峰"
+        },
+        {
+          "color": "#f97316",
+          "id": "downward_spike",
+          "text": "下行尖峰"
+        },
+        {
+          "color": "#eab308",
+          "id": "double_spike",
+          "text": "双向尖峰"
+        }
+      ],
+      "name": "尖峰类"
+    },
+    "step": {
+      "labels": [
+        {
+          "color": "#22c55e",
+          "id": "step_up",
+          "text": "阶跃上升"
+        },
+        {
+          "color": "#14b8a6",
+          "id": "step_down",
+          "text": "阶跃下降"
+        }
+      ],
+      "name": "阶跃类"
+    }
+  },
+  "overall_attribute": {
+    "frequency": {
+      "labels": [
+        {
+          "id": "high_freq",
+          "text": "高频"
+        },
+        {
+          "id": "low_freq",
+          "text": "低频"
+        }
+      ],
+      "name": "频率"
+    },
+    "noise": {
+      "labels": [
+        {
+          "id": "noisy",
+          "text": "高"
+        },
+        {
+          "id": "clean",
+          "text": "中"
+        },
+        {
+          "id": "almost_no_noise",
+          "text": "低"
+        },
+        {
+          "id": "label_1766469170459",
+          "text": "无"
+        }
+      ],
+      "name": "噪声水平"
+    },
+    "seasonal": {
+      "labels": [
+        {
+          "id": "has_periodic",
+          "text": "有周期"
+        },
+        {
+          "id": "no_periodic",
+          "text": "无周期"
+        },
+        {
+          "id": "label_1766475567943",
+          "text": "局部有周期"
+        }
+      ],
+      "name": "周期性"
+    },
+    "trend": {
+      "labels": [
+        {
+          "id": "increase",
+          "text": "上升"
+        },
+        {
+          "id": "decrease",
+          "text": "下降"
+        },
+        {
+          "id": "stable",
+          "text": "平稳"
+        },
+        {
+          "id": "multiple",
+          "text": "多段式"
+        },
+        {
+          "id": "label_1766469189296",
+          "text": "无明显趋势"
+        }
+      ],
+      "name": "趋势"
+    }
+  }
+}

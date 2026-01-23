@@ -1,0 +1,7 @@
+{
+  "admin": {
+    "password_hash": "scrypt:32768:8:1$gPZL4wmPa7d1tRsD$f3b50510cd74ce6df8bea99ee4e5b2e7a75b90b46beb8bb93a0e931ce7d98de4859097d3c9c10bd1b72f7fea0caa8e0c24ca09e79fb7fcee21fcbccfbcc08866",
+    "name": "Administrator",
+    "data_path": "/home"
+  }
+}
