@@ -58,16 +58,25 @@ case $MODE in
         ;;
     all)
         echo "🚀 启动所有服务..."
-        # 后台启动 Celery Worker
+        
+        # 1. 启动 Celery Worker
+        echo "   Starting Celery Worker..."
         celery -A src.core.tasks worker --loglevel=info &
         CELERY_PID=$!
-        echo "   Celery Worker PID: $CELERY_PID"
         
-        # 前台启动主应用
+        # 2. 启动标注服务 (Annotator Backend)
+        echo "   Starting Annotator Service..."
+        python services/annotator/backend/app.py > services/annotator/backend/annotator.log 2>&1 &
+        ANNOTATOR_PID=$!
+        echo "   Annotator PID: $ANNOTATOR_PID (Log: services/annotator/backend/annotator.log)"
+
+        # 3. 启动主应用 (FastAPI + Gradio)
+        echo "   Starting Main App..."
         python -m src.main
         
         # 清理
         kill $CELERY_PID 2>/dev/null
+        kill $ANNOTATOR_PID 2>/dev/null
         ;;
     *)
         echo "用法: $0 [app|worker|all]"

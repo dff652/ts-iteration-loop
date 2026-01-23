@@ -31,3 +31,7 @@ tsdownsample>=0.1.0
 apache-iotdb>=1.0.0
 matplotlib>=3.7.0
 
+
+# 标注服务
+Flask>=2.0.0
+Flask-Cors>=3.0.0

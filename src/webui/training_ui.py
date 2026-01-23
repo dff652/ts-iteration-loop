@@ -562,6 +562,25 @@ def start_inference_task(
         finally:
             db.close()
         
+        # 自动将结果文件链接到用户数据目录，以便标注工具默认可见
+        try:
+            user_data_path = data_adapter.data_path
+            for res_file in generated_files:
+                res_path = Path(res_file)
+                # 如果是相对路径或文件名，尝试在结果目录查找
+                if not res_path.exists():
+                    res_path = RESULTS_BASE_PATH / "global" / algorithm / res_file
+                
+                if res_path.exists():
+                    target_link = user_data_path / res_path.name
+                    # 如果链接不存在或已断裂，重新创建
+                    if target_link.is_symlink() or target_link.exists():
+                        target_link.unlink()
+                    target_link.symlink_to(res_path)
+                    print(f"[Auto-Link] Created symlink for {res_path.name} in {user_data_path}")
+        except Exception as e:
+            print(f"[Auto-Link Error] Failed to link results: {e}")
+        
         yield (
             accumulated_log + "\n✅ 所有任务已完成", 
             "✅ 任务完成",
@@ -1061,7 +1080,7 @@ def create_training_ui() -> gr.Blocks:
 > [!NOTE]
 > 标注工具运行在独立服务上，点击下方链接跳转。
 
-**标注工具地址**: [http://localhost:5000](http://localhost:5000)
+**标注工具地址**: [http://192.168.199.126:5000](http://192.168.199.126:5000)
 
 ---
 
@@ -1085,7 +1104,7 @@ def create_training_ui() -> gr.Blocks:
                 gr.Markdown("""
 <script>
 function openAnnotator() {
-    window.open('http://localhost:5000', '_blank');
+    window.open('http://192.168.199.126:5000', '_blank');
 }
 </script>
 """, visible=False)
@@ -1109,7 +1128,7 @@ function openAnnotator() {
             
             # JavaScript 跳转 (Gradio 限制，使用 HTML)
             open_annotator_btn.click(
-                fn=lambda: "✅ 请在新标签页中查看标注工具 (http://localhost:5000)",
+                fn=lambda: "✅ 请在新标签页中查看标注工具 (http://192.168.199.126:5000)",
                 outputs=annotator_status
             )
         

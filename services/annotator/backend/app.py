@@ -458,6 +458,9 @@ def get_current_user(current_user):
 def get_annotations(filename, current_user):
     """Get annotations for a file (user-specific)"""
     try:
+        with open('/tmp/debug_anno.log', 'a') as debug_f:
+             debug_f.write(f"\n[DEBUG] Request for file: {filename}\n")
+        
         # User-specific annotation directory
         user_ann_dir = os.path.join(ANNOTATIONS_DIR, current_user)
         os.makedirs(user_ann_dir, exist_ok=True)
@@ -489,10 +492,53 @@ def get_annotations(filename, current_user):
                     continue
         
         if not annotation_file:
+            # Check for global_mask in CSV and auto-generate annotations
+            auto_annotations = []
+            try:
+                from auth import load_users
+                users = load_users()
+                user_path = users.get(current_user, {}).get('data_path', DATA_DIR)
+                csv_path = os.path.join(user_path, filename)
+                
+                if os.path.exists(csv_path):
+                     try:
+                         # Read only necessary columns to speed up
+                         df_head = pd.read_csv(csv_path, nrows=1)
+                         if 'global_mask' in df_head.columns:
+                             df = pd.read_csv(csv_path, usecols=['global_mask'])
+                             # Find continuous regions of 1s
+                             mask = df['global_mask'].fillna(0).astype(int)
+                             
+                             # Logic to find start/end indices of 1s sequences
+                             # 0 1 1 1 0 -> diff: 1 0 0 -1
+                             # Pad with 0 to handle edge cases
+                             padded = np.concatenate(([0], mask.values, [0]))
+                             diff = np.diff(padded)
+                             starts = np.where(diff == 1)[0]
+                             ends = np.where(diff == -1)[0] - 1
+                             
+                             for i, (start, end) in enumerate(zip(starts, ends)):
+                                 auto_annotations.append({
+                                     "id": f"auto_{int(time.time())}_{i}",
+                                     "segments": [[int(start), int(end)]],
+                                     "local_change": {
+                                          "trend": "其他",
+                                          "label": "chatts_detected",
+                                          "confidence": "high",
+                                          "desc": "ChatTS Auto-Detection"
+                                     }
+                                 })
+                             print(f"Auto-generated {len(auto_annotations)} annotations from global_mask")
+                     except Exception as e:
+                         print(f"Error reading CSV for mask: {e}")
+            except Exception as e:
+                print(f"Error in auto-annotation: {e}")
+
+
             return jsonify({
                 'success': True,
                 'filename': filename,
-                'annotations': []
+                'annotations': auto_annotations
             })
         
         # Load data if not already loaded

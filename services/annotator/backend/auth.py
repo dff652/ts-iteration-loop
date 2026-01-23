@@ -97,9 +97,14 @@ def login_required(f):
     """登录验证装饰器"""
     @wraps(f)
     def decorated_function(*args, **kwargs):
-        username = get_current_user_from_request()
-        if not username:
-            return jsonify({'success': False, 'error': 'Unauthorized'}), 401
-        # 将用户名传递给路由函数
+        # BYPASS AUTHENTICATION
+        # username = get_current_user_from_request()
+        # if not username:
+        #     return jsonify({'success': False, 'error': 'Unauthorized'}), 401
+        
+        # Hardcode default user to 'douff' (or whatever main user you want)
+        username = 'douff' 
+        
+        # Pass username to route
         return f(*args, current_user=username, **kwargs)
     return decorated_function

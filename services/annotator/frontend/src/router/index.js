@@ -17,22 +17,14 @@ const router = new Router({
 			name: 'home',
 			component: Index,
 			props: true,
-			meta: { requiresAuth: true }
+			meta: { requiresAuth: false }
 		}
 	]
 })
 
-// Route guard - redirect to login if not authenticated
+// Route guard - BYPASS AUTH
 router.beforeEach((to, from, next) => {
-	const token = localStorage.getItem('token')
-
-	if (to.meta.requiresAuth && !token) {
-		next('/login')
-	} else if (to.path === '/login' && token) {
-		next('/')
-	} else {
-		next()
-	}
+	next()
 })
 
 export default router

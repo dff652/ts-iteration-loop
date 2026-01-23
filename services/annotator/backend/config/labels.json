@@ -1,6 +1,16 @@
 {
   "custom_labels": [],
   "local_change": {
+    "algorithm_results": {
+      "labels": [
+        {
+          "color": "#ec4899",
+          "id": "chatts_detected",
+          "text": "ChatTS"
+        }
+      ],
+      "name": "算法结果"
+    },
     "anomaly": {
       "labels": [
         {
