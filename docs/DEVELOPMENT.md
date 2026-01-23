@@ -4,7 +4,8 @@
 
 - **项目名称**: TS-Iteration-Loop
 - **开发开始日期**: 2026-01-20
-- **当前阶段**: Phase 3 完成 ✅ (MVP 达成)
+- **当前版本**: v0.2.0
+- **当前阶段**: Phase 4 完成 ✅ (Monorepo 整合)
 
 ---
 
@@ -38,6 +39,44 @@
 | **迭代版本管理 API** | ✅ 完成 | CRUD `/api/v1/iteration` |
 | **统一 UI 界面** | ✅ 完成 | 数据/推理/标注/微调 4 大模块 Tab |
 
+### Phase 4: Monorepo 整合 ✅
+
+| 任务 | 状态 | 说明 |
+|------|------|------|
+| 代码整合 | ✅ 完成 | `services/` 目录已包含所有模块 |
+| 路径配置更新 | ✅ 完成 | 添加 `USE_LOCAL_MODULES` 开关 |
+| 统一环境配置 | ✅ 完成 | 创建 `envs/environment.yml` |
+| 开发脚本 | ✅ 完成 | 创建 `scripts/setup_dev.sh` |
+| Docker 配置 | ✅ 完成 | 移除外部目录挂载 |
+
+---
+
+## 快速开始
+
+### 本地开发环境
+
+```bash
+# 一键搭建
+chmod +x scripts/setup_dev.sh
+./scripts/setup_dev.sh
+
+# 激活环境
+conda activate ts-iteration-loop
+
+# 启动应用
+python -m src.main
+```
+
+### Docker 开发环境
+
+```bash
+# 开发模式（热重载）
+docker-compose -f docker-compose.dev.yml up --build
+
+# 生产模式
+docker-compose up --build -d
+```
+
 ---
 
 ## UI 功能
@@ -68,18 +107,73 @@
 
 ---
 
-## 外部依赖
+## 项目结构 (Monorepo)
 
-| 项目 | 路径 | 用途 |
-|------|------|------|
-| Data-Processing | `/home/douff/ts/Data-Processing` | 数据采集、降采样 |
-| timeseries-annotator-v2 | `/home/douff/ts/timeseries-annotator-v2` | Web 标注界面 |
-| ChatTS-Training | `/home/douff/ts/ChatTS-Training` | 模型微调 |
-| check_outlier | `/home/douff/ilabel/check_outlier` | 批量推理 |
+```
+ts-iteration-loop/
+├── src/                    # 核心应用代码
+│   ├── api/                # FastAPI 路由
+│   ├── adapters/           # 模块适配器
+│   ├── core/               # 核心业务逻辑
+│   ├── db/                 # 数据库模块
+│   └── webui/              # Gradio 界面
+│
+├── services/               # 整合的子模块
+│   ├── inference/          # 推理检测 (原 check_outlier)
+│   ├── training/           # 模型训练 (LlamaFactory)
+│   ├── data_processing/    # 数据处理
+│   └── annotator/          # 标注工具
+│
+├── envs/                   # 环境配置
+│   ├── environment.yml     # Conda 环境
+│   └── requirements.txt    # pip 依赖
+│
+├── docker/                 # Docker 配置
+│   ├── Dockerfile.dev      # 开发环境
+│   └── Dockerfile.prod     # 生产环境
+│
+├── scripts/                # 脚本工具
+│   └── setup_dev.sh        # 开发环境搭建
+│
+├── configs/                # 应用配置
+│   └── settings.py         # 路径和环境配置
+│
+├── docker-compose.yml      # 生产部署
+└── docker-compose.dev.yml  # 开发部署
+```
+
+---
+
+## 配置说明
+
+### settings.py 关键配置
+
+| 配置项 | 说明 |
+|--------|------|
+| `USE_LOCAL_MODULES` | `True`: 使用项目内 services/ 目录<br>`False`: 使用外部路径 |
+| `PYTHON_UNIFIED` | 统一模式 Python 解释器 |
+| `LOCAL_*_PATH` | 本地模块路径 |
+| `EXTERNAL_*_PATH` | 外部模块路径（兼容模式） |
+
+### 环境变量
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `DEBUG` | `true` | 调试模式 |
+| `USE_LOCAL_MODULES` | `true` | 使用本地模块 |
+| `PYTHON_UNIFIED` | 当前解释器 | Python 路径 |
 
 ---
 
 ## 开发日志
+
+### 2026-01-22
+
+- ✅ 完成 Monorepo 整合重构
+- ✅ 更新配置支持本地/外部模块切换
+- ✅ 创建统一环境配置
+- ✅ 创建开发环境搭建脚本
+- ✅ 更新 Docker 配置移除外部依赖
 
 ### 2026-01-20
 
@@ -90,3 +184,4 @@
 - ✅ 添加数据获取、推理监控、标注工具 Tab
 - ✅ 实现迭代版本管理 API
 - ✅ **MVP 完成**
+

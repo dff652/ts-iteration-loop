@@ -31,6 +31,11 @@ class DatasetInfo(BaseModel):
 class AcquireTaskRequest(BaseModel):
     """数据采集任务请求"""
     source: str  # IoTDB 路径
+    host: str = "192.168.199.185"
+    port: str = "6667"
+    user: str = "root"
+    password: str = "root"
+    point_name: str = "*"
     target_points: int = 5000  # 降采样目标点数
     start_time: Optional[str] = None
     end_time: Optional[str] = None

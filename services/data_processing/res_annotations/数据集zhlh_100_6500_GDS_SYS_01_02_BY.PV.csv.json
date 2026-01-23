@@ -1,0 +1,165 @@
+{
+  "filename": "数据集zhlh_100_6500_GDS_SYS_01_02_BY.PV.csv",
+  "overall_attribute": {
+    "frequency": "",
+    "noise": "",
+    "seasonal": "",
+    "trend": ""
+  },
+  "annotations": [
+    {
+      "label": {
+        "id": "label_1766472954139",
+        "text": "区间异常",
+        "categoryId": "anomaly",
+        "color": "#84cc16"
+      },
+      "segments": [
+        {
+          "start": 3104,
+          "end": 3175,
+          "count": 72,
+          "minVal": null,
+          "maxVal": null,
+          "mean": null,
+          "label": {
+            "categoryId": "anomaly",
+            "color": "#84cc16",
+            "id": "label_1766472954139",
+            "text": "区间异常"
+          }
+        },
+        {
+          "start": 3207,
+          "end": 3322,
+          "count": 116,
+          "minVal": null,
+          "maxVal": null,
+          "mean": null,
+          "label": {
+            "categoryId": "anomaly",
+            "color": "#84cc16",
+            "id": "label_1766472954139",
+            "text": "区间异常"
+          }
+        },
+        {
+          "start": 3606,
+          "end": 3827,
+          "count": 222,
+          "minVal": null,
+          "maxVal": null,
+          "mean": null,
+          "label": {
+            "categoryId": "anomaly",
+            "color": "#84cc16",
+            "id": "label_1766472954139",
+            "text": "区间异常"
+          }
+        },
+        {
+          "start": 4041,
+          "end": 4343,
+          "count": 303,
+          "minVal": null,
+          "maxVal": null,
+          "mean": null,
+          "label": {
+            "categoryId": "anomaly",
+            "color": "#84cc16",
+            "id": "label_1766472954139",
+            "text": "区间异常"
+          }
+        },
+        {
+          "start": 0,
+          "end": 194,
+          "count": 195,
+          "minVal": null,
+          "maxVal": null,
+          "mean": null,
+          "label": {
+            "categoryId": "anomaly",
+            "color": "#84cc16",
+            "id": "label_1766472954139",
+            "text": "区间异常"
+          }
+        },
+        {
+          "start": 2934,
+          "end": 3242,
+          "count": 309,
+          "minVal": null,
+          "maxVal": null,
+          "mean": null,
+          "label": {
+            "categoryId": "anomaly",
+            "color": "#84cc16",
+            "id": "label_1766472954139",
+            "text": "区间异常"
+          }
+        },
+        {
+          "start": 175,
+          "end": 533,
+          "count": 359
+        }
+      ],
+      "prompt": "123",
+      "expert_output": "123123"
+    },
+    {
+      "label": {
+        "id": "label_1766468646084",
+        "text": "点异常",
+        "categoryId": "anomaly",
+        "color": "#f59e0b"
+      },
+      "segments": [
+        {
+          "start": 4762,
+          "end": 4765,
+          "count": 4,
+          "minVal": null,
+          "maxVal": null,
+          "mean": null,
+          "label": {
+            "categoryId": "anomaly",
+            "color": "#f59e0b",
+            "id": "label_1766468646084",
+            "text": "点异常"
+          }
+        }
+      ],
+      "prompt": "",
+      "expert_output": ""
+    },
+    {
+      "label": {
+        "id": "step_down",
+        "text": "阶跃下降",
+        "categoryId": "step",
+        "color": "#14b8a6"
+      },
+      "segments": [
+        {
+          "start": 194,
+          "end": 514,
+          "count": 321,
+          "minVal": null,
+          "maxVal": null,
+          "mean": null,
+          "label": {
+            "categoryId": "step",
+            "color": "#14b8a6",
+            "id": "step_down",
+            "text": "阶跃下降"
+          }
+        }
+      ],
+      "prompt": "",
+      "expert_output": ""
+    }
+  ],
+  "export_time": "2026-01-06T06:08:27.470Z"
+}

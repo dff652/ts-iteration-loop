@@ -3,9 +3,20 @@
 
 set -e
 
+# 切换到项目根目录（脚本可能从 scripts 目录运行）
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+cd "$PROJECT_ROOT"
+
 echo "======================================"
 echo "TS-Iteration-Loop 启动脚本"
 echo "======================================"
+echo "📂 工作目录: $PROJECT_ROOT"
+
+# 配置 Gradio 临时目录（避免 /tmp/gradio 权限问题）
+export GRADIO_TEMP_DIR="$PROJECT_ROOT/data/gradio_tmp"
+mkdir -p "$GRADIO_TEMP_DIR"
+echo "📁 Gradio 临时目录: $GRADIO_TEMP_DIR"
 
 # 检查 Redis
 # if ! command -v redis-cli &> /dev/null; then

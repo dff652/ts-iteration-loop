@@ -1,0 +1,64 @@
+# TS-Iteration-Loop 开发环境 Docker Compose
+# 
+# 使用方法:
+#   docker-compose -f docker-compose.dev.yml up --build
+#
+# 特点:
+#   - 挂载本地代码实现热重载
+#   - 无需外部目录依赖
+#   - 轻量级，快速启动
+
+version: '3.8'
+
+services:
+  # 主应用 (FastAPI + Gradio)
+  app:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.dev
+    ports:
+      - "8000:8000"
+    volumes:
+      # 挂载本地代码，支持热重载
+      - .:/app
+      # 数据持久化
+      - ./data:/app/data
+    environment:
+      - DEBUG=true
+      - USE_LOCAL_MODULES=true
+      - REDIS_URL=redis://redis:6379/0
+      - DATABASE_URL=sqlite:///./data/iteration_loop.db
+    depends_on:
+      - redis
+    command: python -m src.main
+    restart: unless-stopped
+
+  # Redis (Celery Broker)
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+
+  # Celery Worker (异步任务执行)
+  celery_worker:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.dev
+    volumes:
+      - .:/app
+      - ./data:/app/data
+    environment:
+      - DEBUG=true
+      - USE_LOCAL_MODULES=true
+      - REDIS_URL=redis://redis:6379/0
+      - DATABASE_URL=sqlite:///./data/iteration_loop.db
+    depends_on:
+      - redis
+    command: celery -A src.core.tasks worker --loglevel=info
+    restart: unless-stopped
+
+volumes:
+  redis_data:

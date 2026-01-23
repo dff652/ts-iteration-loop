@@ -1,5 +1,7 @@
 # TS-Iteration-Loop 项目配置
 
+import os
+import sys
 from pathlib import Path
 from pydantic_settings import BaseSettings
 
@@ -11,7 +13,7 @@ class Settings(BaseSettings):
     
     # 应用信息
     APP_NAME: str = "TS-Iteration-Loop"
-    APP_VERSION: str = "0.1.0"
+    APP_VERSION: str = "0.2.0"  # 版本升级：Monorepo 整合
     DEBUG: bool = True
     
     # 服务端口
@@ -20,11 +22,47 @@ class Settings(BaseSettings):
     # 数据库
     DATABASE_URL: str = f"sqlite:///{PROJECT_ROOT}/data/iteration_loop.db"
     
-    # 外部项目路径
-    DATA_PROCESSING_PATH: str = "/home/douff/ts/Data-Processing"
-    ANNOTATOR_PATH: str = "/home/douff/ts/timeseries-annotator-v2"
-    CHATTS_TRAINING_PATH: str = "/home/douff/ts/ChatTS-Training"
-    CHECK_OUTLIER_PATH: str = "/home/douff/ilabel/check_outlier"
+    # ========== 模块路径配置 ==========
+    # 使用本地整合模块（Monorepo 模式）
+    USE_LOCAL_MODULES: bool = True
+    
+    # 本地模块路径（services/ 目录）
+    LOCAL_CHECK_OUTLIER_PATH: str = str(PROJECT_ROOT / "services" / "inference")
+    LOCAL_TRAINING_PATH: str = str(PROJECT_ROOT / "services" / "training")
+    LOCAL_DATA_PROCESSING_PATH: str = str(PROJECT_ROOT / "services" / "data_processing")
+    LOCAL_ANNOTATOR_PATH: str = str(PROJECT_ROOT / "services" / "annotator")
+    
+    # 外部模块路径（兼容旧配置，USE_LOCAL_MODULES=False 时使用）
+    EXTERNAL_DATA_PROCESSING_PATH: str = "/home/douff/ts/Data-Processing"
+    EXTERNAL_ANNOTATOR_PATH: str = "/home/douff/ts/timeseries-annotator-v2"
+    EXTERNAL_CHATTS_TRAINING_PATH: str = "/home/douff/ts/ChatTS-Training"
+    EXTERNAL_CHECK_OUTLIER_PATH: str = "/home/douff/ilabel/check_outlier"
+    
+    @property
+    def DATA_PROCESSING_PATH(self) -> str:
+        return self.LOCAL_DATA_PROCESSING_PATH if self.USE_LOCAL_MODULES else self.EXTERNAL_DATA_PROCESSING_PATH
+    
+    @property
+    def ANNOTATOR_PATH(self) -> str:
+        return self.LOCAL_ANNOTATOR_PATH if self.USE_LOCAL_MODULES else self.EXTERNAL_ANNOTATOR_PATH
+    
+    @property
+    def CHATTS_TRAINING_PATH(self) -> str:
+        return self.LOCAL_TRAINING_PATH if self.USE_LOCAL_MODULES else self.EXTERNAL_CHATTS_TRAINING_PATH
+    
+    @property
+    def CHECK_OUTLIER_PATH(self) -> str:
+        return self.LOCAL_CHECK_OUTLIER_PATH if self.USE_LOCAL_MODULES else self.EXTERNAL_CHECK_OUTLIER_PATH
+    
+    # ========== Python 解释器配置 ==========
+    # 统一环境 Python 解释器（优先使用环境变量或当前解释器）
+    PYTHON_UNIFIED: str = os.getenv("PYTHON_UNIFIED", sys.executable)
+    
+    # 各模块独立环境（兼容模式，USE_LOCAL_MODULES=False 时可能需要）
+    PYTHON_ILABEL: str = "/opt/miniconda3/envs/chatts_test/bin/python"
+    PYTHON_TRAINING: str = "/opt/miniconda3/envs/chatts_tune/bin/python"
+    PYTHON_ANNOTATOR: str = "/opt/miniconda3/envs/test-env/bin/python"
+    PYTHON_DATA_PROCESSING: str = "/opt/conda_envs/douff/ts_iter_loop/bin/python"
     
     # 标注工具配置 (复用 JWT)
     ANNOTATOR_API_URL: str = "http://localhost:5000"
@@ -36,6 +74,9 @@ class Settings(BaseSettings):
     CELERY_BROKER_URL: str = "sqla+sqlite:///" + str(PROJECT_ROOT / "data" / "celery_broker.db")
     CELERY_RESULT_BACKEND: str = "db+sqlite:///" + str(PROJECT_ROOT / "data" / "celery_results.db")
     
+    # 数据处理配置 - 统一降采样参数确保数据链路一致性
+    DEFAULT_DOWNSAMPLE_POINTS: int = 5000  # 与 Data-Processing 的 target_points 保持一致
+    
     # 版本管理
     VERSIONS_DIR: str = str(PROJECT_ROOT / "data" / "versions")
     
@@ -43,3 +84,4 @@ class Settings(BaseSettings):
         env_file = ".env"
 
 settings = Settings()
+

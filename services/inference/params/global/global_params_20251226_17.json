@@ -1,0 +1,13 @@
+{
+    "global": [
+        {
+            "task_name": "global",
+            "fig_type": "combined",
+            "method": "stl_wavelet",
+            "methods": "adtk_hbso,chatts",
+            "n_jobs": 1,
+            "manual_label_path": null,
+            "use_direct_data": true
+        }
+    ]
+}

@@ -147,81 +147,201 @@ def get_dataset_names() -> List[str]:
     return [d["filename"] for d in datasets]
 
 
-def preview_dataset(filename: str) -> tuple:
-    """预览数据集，返回 (表格数据, 曲线图)"""
+def delete_selected_dataset(filename: str):
+    """删除选中的数据集"""
+    print(f"[DEBUG] delete_selected_dataset called with: '{filename}'")
     if not filename:
-        return pd.DataFrame(), None
+        return get_datasets_table(), gr.Dropdown(choices=get_dataset_names(), value=None), "❌ No dataset selected"
+    
+    result = data_adapter.delete_dataset(filename)
+    if result.get("success"):
+        # 刷新列表
+        new_table = get_datasets_table()
+        new_choices = get_dataset_names()
+        return new_table, gr.Dropdown(choices=new_choices, value=None), f"✅ Deleted: {filename}"
+    else:
+        return get_datasets_table(), gr.Dropdown(choices=get_dataset_names()), f"❌ {result.get('error')}"
+
+
+def preview_dataset(filename: str) -> tuple:
+    """预览数据集，返回 (表格数据, 列选择器更新, 曲线图)"""
+    print(f"[DEBUG] preview_dataset called with filename: '{filename}'")
+    
+    if isinstance(filename, list):
+        filename = filename[0] if filename else None
+    
+    if not filename:
+        print("[DEBUG] Empty filename, returning empty")
+        return [], gr.CheckboxGroup(choices=[], value=[]), None
     
     try:
         # 获取预览数据
+        print(f"[DEBUG] Calling preview_csv for: {filename}")
         data = data_adapter.preview_csv(filename, limit=200)
+        print(f"[DEBUG] preview_csv returned {len(data)} records")
+        
         df = pd.DataFrame(data)
+        print(f"[DEBUG] DataFrame created: shape={df.shape}, columns={df.columns.tolist()}")
         
-        # 生成曲线图
-        import matplotlib.pyplot as plt
-        plt.figure(figsize=(12, 4))
+        # 过滤掉 Unnamed 和 category 列
+        df = df.loc[:, ~df.columns.str.contains('^Unnamed|^category', case=False)]
+        print(f"[DEBUG] After filtering: shape={df.shape}, columns={df.columns.tolist()}")
         
-        # 假设第一列是时间或索引，后面的列是数值
+        # 获取数值列作为可选项
         numeric_cols = df.select_dtypes(include=['number']).columns.tolist()
-        if numeric_cols:
-            for col in numeric_cols[:3]:  # 最多显示 3 条曲线
-                plt.plot(df.index, df[col], label=col, alpha=0.8)
-            plt.xlabel("索引")
-            plt.ylabel("值")
-            plt.title(f"数据预览: {filename}")
-            plt.legend()
-            plt.grid(True, alpha=0.3)
+        print(f"[DEBUG] Numeric columns: {numeric_cols}")
         
-        temp_dir = Path("temp_images")
-        temp_dir.mkdir(exist_ok=True)
-        import uuid
-        plot_path = temp_dir / f"preview_{uuid.uuid4().hex[:8]}.png"
-        plt.savefig(str(plot_path), dpi=100, bbox_inches='tight')
-        plt.close()
+        # 默认选中第一个数值列
+        default_selected = numeric_cols[:1] if numeric_cols else []
+        print(f"[DEBUG] Default selected: {default_selected}")
         
-        return df, str(plot_path)
+        # 生成默认曲线图
+        plot_path = generate_plot(df, filename, default_selected)
+        print(f"[DEBUG] Plot generated: {plot_path}")
+        
+        # 转换为列表格式，确保 Gradio 6.x 兼容
+        # 使用 values 列表 + headers 的方式
+        table_data = df.values.tolist()
+        headers = df.columns.tolist()
+        print(f"[DEBUG] Table data rows: {len(table_data)}, headers: {headers}")
+        
+        return gr.Dataframe(value=table_data, headers=headers), gr.CheckboxGroup(choices=numeric_cols, value=default_selected), plot_path
     except Exception as e:
-        return pd.DataFrame({"错误": [str(e)]}), None
+        import traceback
+        print(f"[DEBUG ERROR] Exception: {e}")
+        traceback.print_exc()
+        return [], gr.CheckboxGroup(choices=[], value=[]), None
 
 
-def start_acquire_task(source: str, target_points: int) -> str:
-    """启动数据采集任务"""
-    if not source:
-        return "❌ 请输入 IoTDB 源路径"
+def generate_plot(df: pd.DataFrame, filename: str, selected_cols: list):
+    """根据选择的列生成曲线图"""
+    if df.empty or not selected_cols:
+        return None
+    
+    import matplotlib.pyplot as plt
+    plt.figure(figsize=(12, 4))
+    
+    for col in selected_cols:
+        if col in df.columns:
+            plt.plot(df.index, df[col], label=col, alpha=0.8)
+    
+    plt.xlabel("Index")
+    plt.ylabel("Value")
+    plt.title(f"Data Preview: {filename}")
+    if selected_cols:
+        plt.legend()
+    plt.grid(True, alpha=0.3)
+    
+    temp_dir = Path("temp_images")
+    temp_dir.mkdir(exist_ok=True)
+    import uuid
+    plot_path = temp_dir / f"preview_{uuid.uuid4().hex[:8]}.png"
+    plt.savefig(str(plot_path), dpi=100, bbox_inches='tight')
+    plt.close()
+    
+    return str(plot_path)
+
+
+def update_plot_from_selection(filename: str, selected_cols: list):
+    """根据用户选择的列更新曲线图"""
+    if not filename or not selected_cols:
+        return None
     
     try:
-        result = data_adapter.run_acquire_task(
-            task_id="manual",
-            source=source,
-            target_points=int(target_points)
-        )
-        if result.get("success"):
-            return f"✅ 采集任务完成\n\n{result.get('stdout', '')[:500]}"
-        else:
-            return f"❌ 采集失败: {result.get('error', result.get('stderr', '未知错误'))}"
-    except Exception as e:
-        return f"❌ 启动失败: {str(e)}"
+        data = data_adapter.preview_csv(filename, limit=200)
+        df = pd.DataFrame(data)
+        df = df.loc[:, ~df.columns.str.contains('^Unnamed|^category', case=False)]
+        return generate_plot(df, filename, selected_cols)
+    except:
+        return None
+
+
+def start_acquire_task(
+    source: str, 
+    host: str,
+    port: str,
+    user: str,
+    password: str,
+    point_name: str,
+    start_time: str,
+    end_time: str,
+    target_points: int
+):
+    """启动数据采集任务（流式输出日志）"""
+    if not source:
+        yield "❌ Please enter IoTDB source path"
+        return
+    
+    # 使用流式输出版本
+    for log in data_adapter.run_acquire_task_streaming(
+        task_id="manual",
+        source=source,
+        host=host,
+        port=port,
+        user=user,
+        password=password,
+        point_name=point_name,
+        target_points=int(target_points),
+        start_time=start_time,
+        end_time=end_time
+    ):
+        yield log
 
 
 # ==================== 推理监控辅助函数 ====================
 
 def get_algorithms() -> List[str]:
     """获取可用算法列表"""
-    return ["chatts", "adtk_hbos", "ensemble"]
+    return ["chatts", "adtk_hbos", "ensemble", "timer"]
 
 
 def get_inference_models() -> List[str]:
     """获取可用于推理的模型列表"""
+    # 过滤 lora 模型（假设 ChatTS 推理主要用 LoRA）
     models = training_adapter.list_models()
-    return [m["name"] for m in models]
+    return [m["path"] for m in models] # 直接返回路径，方便 adapter 处理
 
+def toggle_algo_params(algorithm: str):
+    """根据选择的算法切换参数组可见性"""
+    show_chatts = (algorithm == "chatts")
+    show_timer = (algorithm == "timer")
+    show_adtk = (algorithm == "adtk_hbos")
+    return (
+        gr.update(visible=show_chatts), 
+        gr.update(visible=show_timer), 
+        gr.update(visible=show_adtk)
+    )
 
-def start_inference_task(algorithm: str, model: str, files: List[str]) -> str:
+def start_inference_task(
+    algorithm: str, 
+    base_model_path: str,
+    lora_adapter_path: str,
+    files: List[str],
+    n_downsample: int,
+    threshold: float,
+    # ChatTS args
+    load_in_4bit: str,
+    prompt_template: str,
+    max_new_tokens: int,
+    chatts_device: str,
+    chatts_use_cache: str,
+    # Timer args
+    timer_device: str,
+    timer_lookback: int,
+    timer_threshold_k: float,
+    timer_method: str,
+    timer_streaming: bool,
+    # ADTK args
+    adtk_bin_nums: int,
+    adtk_hbos_ratio: float
+):
     """启动推理任务"""
     if not algorithm:
-        return "❌ 请选择算法"
+        yield "❌ 请选择算法", "❌ 请选择算法"
+        return
     if not files:
-        return "❌ 请选择输入文件"
+        yield "❌ 请选择输入文件", "❌ 请选择输入文件"
+        return
     
     # 将选中的文件名转换为完整路径
     file_paths = []
@@ -231,24 +351,113 @@ def start_inference_task(algorithm: str, model: str, files: List[str]) -> str:
             file_paths.append(str(full_path))
     
     if not file_paths:
-        return "❌ 未找到有效的输入文件"
+        yield "❌ 未找到有效的输入文件", "❌ 未找到有效的输入文件"
+        return
     
     import uuid
     task_id = str(uuid.uuid4())[:8]
     
+    yield (
+        f"🚀 任务已启动 (ID: {task_id})\n正在处理 {len(file_paths)} 个文件...", 
+        f"🚀 任务已启动 (ID: {task_id})",
+        gr.update(visible=True), # Show stop button
+        gr.update(visible=False), # Hide submit button
+        task_id, # Return task_id to state
+        None # download_files
+    )
+    
     try:
-        # 这里应该调用异步任务，目前返回提示
-        return f"""✅ 推理任务已提交
+        # 准备高级参数
+        advanced_args = {
+            "n_downsample": n_downsample,
+            "threshold": threshold,
+            "base_model_path": base_model_path,
+            "lora_adapter_path": lora_adapter_path, 
+            # ChatTS
+            "chatts_load_in_4bit": load_in_4bit,
+            "chatts_prompt_template": prompt_template,
+            "chatts_max_new_tokens": max_new_tokens,
+            "chatts_device": chatts_device,
+            "chatts_use_cache": chatts_use_cache,
+            # Timer
+            "timer_device": timer_device,
+            "timer_lookback_length": timer_lookback,
+            "timer_threshold_k": timer_threshold_k,
+            "timer_method": timer_method,
+            "timer_streaming": timer_streaming,
+            # ADTK
+            "bin_nums": adtk_bin_nums,
+            "hbos_ratio": adtk_hbos_ratio
+        }
+        
+        generated_files = []
+        
+        # 执行推理（流式）
+        accumulated_log = ""
+        for log_chunk in inference_adapter.run_batch_inference_streaming(
+            task_id=task_id,
+            model=lora_adapter_path, # 兼容旧接口命名，实际逻辑在 adapter 中已处理
+            algorithm=algorithm,
+            input_files=file_paths,
+            **advanced_args
+        ):
+            # 检查是否包含文件路径返回
+            if isinstance(log_chunk, dict) and "file_name" in log_chunk:
+                # 尝试构造完整路径（这里假设在 output 目录或者 data_path 下）
+                # 由于 adapter 仅返回了文件名，我们需要确认其位置。
+                # 暂时假设在默认数据输出目录 /home/share/results/data/<task_name>/<method>/...
+                # 简单起见，我们让 user 去找，或者这里尝试 glob
+                # 更好的方式是 adapter 返回绝对路径。
+                # 鉴于 adapter 修改限制，我们先忽略文件下载列表的自动构建，或者假定在当前目录
+                generated_files.append(log_chunk["file_name"])
+            elif isinstance(log_chunk, dict):
+                 pass # 其他结构化消息
+            else:
+                accumulated_log += log_chunk
+                yield (
+                    accumulated_log, 
+                    "🔄 正在执行...",
+                    gr.update(visible=True),
+                    gr.update(visible=False),
+                    task_id,
+                    None
+                )
+        
+        # 任务结束，尝试查找生成的结果文件
+        # 假设保存在 /home/share/results/data/<method> 下，按时间最新查找？
+        # 这比较 hacky。更好的方法是 adapter 返回。
+        # 我们在 adapter 中增加了 yield {"file_name": ...} 逻辑
+        # 这里需要处理它。
+        
+        yield (
+            accumulated_log + "\n✅ 所有任务已完成", 
+            "✅ 任务完成",
+             gr.update(visible=False),
+             gr.update(visible=True),
+             task_id,
+             generated_files # TODO: 填充 output files if capture logic works perfectly
+        )
 
-**任务 ID**: {task_id}
-**算法**: {algorithm}
-**模型**: {model or '默认模型'}
-**文件数**: {len(file_paths)}
-
-请通过 API `/api/v1/inference/status/{task_id}` 查询进度。
-"""
     except Exception as e:
-        return f"❌ 启动失败: {str(e)}"
+        import traceback
+        traceback.print_exc()
+        yield (
+            f"❌ 发生错误: {str(e)}", 
+            f"❌ 错误: {str(e)}",
+            gr.update(visible=False),
+            gr.update(visible=True),
+            None,
+            None
+        )
+
+def stop_task_action(task_id_state):
+    """实际执行停止动作"""
+    if task_id_state:
+        if inference_adapter.stop_inference_task(task_id_state):
+            return "🛑 任务已请求停止", gr.update(visible=False), gr.update(visible=True), None, None
+        else:
+            return "❌ 停止失败或任务不存在", gr.update(visible=True), gr.update(visible=False), task_id_state, None
+    return "⚠️ 无活动任务", gr.update(visible=False), gr.update(visible=True), None, None
 
 
 def get_task_status_table() -> pd.DataFrame:
@@ -341,35 +550,67 @@ def create_training_ui() -> gr.Blocks:
                         choices=get_dataset_names(),
                         interactive=True
                     )
+                    with gr.Row():
+                        delete_dataset_btn = gr.Button("🗑️ 删除选中", variant="stop", size="sm")
+                        delete_status = gr.Textbox(label="", visible=False)
+                    
+                    column_selector = gr.CheckboxGroup(
+                        label="Select columns to plot",
+                        choices=[],
+                        interactive=True
+                    )
                 
                 with gr.Column(scale=2):
                     gr.Markdown("### 数据采集配置")
+                    
+                    with gr.Accordion("IoTDB 连接配置", open=False):
+                        with gr.Row():
+                            host_input = gr.Textbox(label="Host", value="192.168.199.185")
+                            port_input = gr.Textbox(label="Port", value="6667")
+                        with gr.Row():
+                            user_input = gr.Textbox(label="User", value="root")
+                            pwd_input = gr.Textbox(label="Password", value="root", type="password")
+
+                    gr.Markdown("### 查询参数")
+                    source_input = gr.Textbox(
+                        label="IoTDB 源路径 (Path)",
+                        placeholder="root.zhlh_202307_202412.ZHLH_4C_1216",
+                        value="root.zhlh_202307_202412.ZHLH_4C_1216",
+                        scale=2
+                    )
+                    
                     with gr.Row():
-                        source_input = gr.Textbox(
-                            label="IoTDB 源路径",
-                            placeholder="root.xxx.yyy.zzz",
-                            scale=2
+                         point_input = gr.Textbox(
+                            label="点位名称 (Point Name)",
+                            placeholder="FI_10401C.PV (留空查询所有*)",
+                            value="FI_10401C.PV"
                         )
-                        target_points = gr.Slider(
-                            label="目标点数",
-                            minimum=1000,
-                            maximum=10000,
-                            value=5000,
-                            step=500,
-                            scale=1
-                        )
+                    
+                    with gr.Row():
+                        start_time_input = gr.Textbox(label="开始时间", value="2023-07-18 12:00:00")
+                        end_time_input = gr.Textbox(label="结束时间", value="2024-11-05 23:59:59")
+
+                    target_points = gr.Slider(
+                        label="目标点数",
+                        minimum=1000,
+                        maximum=10000,
+                        value=5000,
+                        step=500,
+                        scale=1
+                    )
+                    
                     acquire_btn = gr.Button("📥 开始采集", variant="primary")
                     acquire_output = gr.Markdown(value="等待采集...")
             
-            # 数据预览区域
+            # 数据预览区域 - 图表优先，表格可折叠
             with gr.Row():
-                with gr.Column(scale=1):
-                    preview_table = gr.Dataframe(
-                        label="数据预览 (前200行)",
-                        interactive=False
-                    )
-                with gr.Column(scale=1):
-                    preview_plot = gr.Image(label="曲线预览")
+                preview_plot = gr.Image(label="Curve Preview", height=350)
+            
+            with gr.Accordion("📋 Data Table (first 200 rows)", open=False):
+                preview_table = gr.Dataframe(
+                    label="",
+                    interactive=False
+                )
             
             # 事件绑定 - 数据获取
             refresh_datasets_btn.click(
@@ -380,14 +621,27 @@ def create_training_ui() -> gr.Blocks:
                 fn=lambda: gr.Dropdown(choices=get_dataset_names()),
                 outputs=preview_dropdown
             )
+            delete_dataset_btn.click(
+                fn=delete_selected_dataset,
+                inputs=preview_dropdown,
+                outputs=[datasets_table, preview_dropdown, delete_status]
+            )
             preview_dropdown.change(
                 fn=preview_dataset,
                 inputs=preview_dropdown,
-                outputs=[preview_table, preview_plot]
+                outputs=[preview_table, column_selector, preview_plot]
+            )
+            column_selector.change(
+                fn=update_plot_from_selection,
+                inputs=[preview_dropdown, column_selector],
+                outputs=preview_plot
             )
             acquire_btn.click(
                 fn=start_acquire_task,
-                inputs=[source_input, target_points],
+                inputs=[
+                    source_input, host_input, port_input, user_input, pwd_input,
+                    point_input, start_time_input, end_time_input, target_points
+                ],
                 outputs=acquire_output
             )
         
@@ -402,35 +656,145 @@ def create_training_ui() -> gr.Blocks:
                         value="chatts",
                         interactive=True
                     )
-                    model_select = gr.Dropdown(
-                        label="选择模型 (可选)",
-                        choices=get_inference_models(),
-                        interactive=True
-                    )
+                    
+                    # 模型配置组
+                    with gr.Group():
+                        base_model_input = gr.Textbox(
+                            label="Base Model Path (Base Model)", 
+                            value="/home/share/llm_models/bytedance-research/ChatTS-8B",
+                            info="基础模型路径"
+                        )
+                        lora_adapter_select = gr.Dropdown(
+                            label="LoRA Adapter Path (可选)",
+                            choices=get_inference_models(), # 返回的是 LoRA 路径列表
+                            interactive=True,
+                            info="微调后的 LoRA 适配器路径"
+                        )
+                        
                     files_select = gr.CheckboxGroup(
                         label="选择输入文件",
                         choices=get_dataset_names()
                     )
-                    submit_inference_btn = gr.Button("🚀 提交任务", variant="primary")
-                    inference_output = gr.Markdown(value="等待提交...")
+                    
+                    with gr.Accordion("⚙️ 高级配置 (可选)", open=False):
+                        with gr.Row():
+                            n_downsample_input = gr.Slider(
+                                label="降采样点数 (n_downsample)", 
+                                minimum=100, maximum=10000, step=100, value=settings.DEFAULT_DOWNSAMPLE_POINTS
+                            )
+                            threshold_input = gr.Number(
+                                label="异常阈值 (threshold)", value=8.0
+                            )
+                        
+                        # ChatTS 专属参数
+                        with gr.Group(visible=True) as chatts_group:
+                            gr.Markdown("#### ChatTS 配置")
+                            with gr.Row():
+                                load_in_4bit_input = gr.Dropdown(
+                                    label="4-bit 量化", choices=["auto", "true", "false"], value="auto",
+                                    info="显存不足时建议开启(true)"
+                                )
+                                prompt_template_input = gr.Dropdown(
+                                    label="Prompt 模板",
+                                    choices=["default", "detailed", "minimal", "industrial", "english"],
+                                    value="default"
+                                )
+                            with gr.Row():
+                                chatts_device_input = gr.Textbox(label="Device", value="cuda:1")
+                                chatts_use_cache_input = gr.Dropdown(
+                                    label="Use Cache (KV)", choices=["auto", "true", "false"], value="auto"
+                                )
+                            max_new_tokens_input = gr.Number(
+                                label="最大生成长度 (Max New Tokens)", value=4096, precision=0
+                            )
+
+                        # Timer 专属参数
+                        with gr.Group(visible=False) as timer_group:
+                            gr.Markdown("#### Timer 配置")
+                            with gr.Row():
+                                timer_device_input = gr.Textbox(label="Device", value="cuda:0")
+                                timer_lookback_input = gr.Number(label="Lookback Length", value=256, precision=0)
+                            with gr.Row():
+                                timer_threshold_k_input = gr.Number(label="Threshold K", value=3.5)
+                                timer_method_input = gr.Dropdown(label="Method", choices=["mad", "sigma"], value="mad")
+                            timer_streaming_input = gr.Checkbox(label="Enable Streaming Mode", value=False)
+                            
+                        # ADTK 专属参数
+                        with gr.Group(visible=False) as adtk_group:
+                            gr.Markdown("#### ADTK HBOS 配置")
+                            with gr.Row():
+                                adtk_bin_nums_input = gr.Number(label="Bin Nums (分箱数)", value=20, precision=0)
+                                adtk_hbos_ratio_input = gr.Number(label="HBOS Ratio (跳变阈值)", value=None)
+
+                    with gr.Row():
+                        submit_inference_btn = gr.Button("🚀 提交任务", variant="primary")
+                        stop_inference_btn = gr.Button("🛑 停止任务", variant="stop", visible=False)
+                    
+                    # 隐藏的状态组件，用于存储 current task id
+                    current_task_id_state = gr.State("")
                 
                 with gr.Column(scale=2):
-                    gr.Markdown("### 任务状态")
+                    gr.Markdown("### 任务状态 & 日志")
+                    with gr.Tabs():
+                        with gr.Tab("实时日志"):
+                            inference_logs = gr.Textbox(
+                                value="",
+                                label="Execution Logs",
+                                interactive=False,
+                                lines=20,
+                                max_lines=20,
+                                autoscroll=True
+                            )
+                        with gr.Tab("任务结果"):
+                             inference_result_md = gr.Markdown(value="等待任务完成...")
+                             download_files = gr.File(label="下载结果文件", file_count="multiple", interactive=False)
+                    
+                    refresh_tasks_btn = gr.Button("🔄 刷新状态")
                     task_table = gr.Dataframe(
-                        value=get_task_status_table(),
-                        label="最近 20 条任务",
+                        headers=["ID", "类型", "状态", "创建时间"],
+                        value=[],
                         interactive=False
                     )
-                    with gr.Row():
-                        refresh_tasks_btn = gr.Button("🔄 刷新状态")
-                        # auto_refresh = gr.Checkbox(label="自动刷新 (5s)", value=False)
             
             # 事件绑定 - 推理监控
-            submit_inference_btn.click(
+            
+            # 提交任务
+            submit_event = submit_inference_btn.click(
                 fn=start_inference_task,
-                inputs=[algo_dropdown, model_select, files_select],
-                outputs=inference_output
+                inputs=[
+                    algo_dropdown, base_model_input, lora_adapter_select, files_select,
+                    # 通用参数
+                    n_downsample_input, threshold_input,
+                    # ChatTS 参数
+                    load_in_4bit_input, prompt_template_input, max_new_tokens_input, chatts_device_input, chatts_use_cache_input,
+                    # Timer 参数
+                    timer_device_input, timer_lookback_input, timer_threshold_k_input, timer_method_input, timer_streaming_input,
+                    # ADTK 参数
+                    adtk_bin_nums_input, adtk_hbos_ratio_input
+                ],
+                outputs=[
+                    inference_logs, 
+                    inference_result_md, 
+                    stop_inference_btn, 
+                    submit_inference_btn, 
+                    current_task_id_state, 
+                    download_files
+                ]
             )
+            
+            # 停止任务
+            stop_inference_btn.click(
+                fn=stop_task_action,
+                inputs=[current_task_id_state],
+                outputs=[
+                    inference_result_md, 
+                    stop_inference_btn, 
+                    submit_inference_btn, 
+                    current_task_id_state, 
+                    download_files
+                ]
+            )
+            
             refresh_tasks_btn.click(
                 fn=get_task_status_table,
                 outputs=task_table
@@ -441,7 +805,14 @@ def create_training_ui() -> gr.Blocks:
             )
             refresh_tasks_btn.click(
                 fn=lambda: gr.Dropdown(choices=get_inference_models()),
-                outputs=model_select
+                outputs=lora_adapter_select
+            )
+            
+            # 算法切换事件：控制参数组显示
+            algo_dropdown.change(
+                fn=toggle_algo_params,
+                inputs=algo_dropdown,
+                outputs=[chatts_group, timer_group, adtk_group]
             )
         
         # ==================== 标注工具 Tab ====================
@@ -670,6 +1041,20 @@ function openAnnotator() {
 可用的训练配置来自 `/home/douff/ts/ChatTS-Training/scripts/lora/` 目录。
 """)
     
+        # 初始化加载
+        demo.load(
+            fn=get_dataset_names,
+            outputs=preview_dropdown
+        ).then(
+            fn=lambda x: x[0] if x else None,
+            inputs=preview_dropdown,
+            outputs=preview_dropdown
+        ).then(
+            fn=preview_dataset,
+            inputs=preview_dropdown,
+            outputs=[preview_table, column_selector, preview_plot]
+        )
+            
     return demo
 
 

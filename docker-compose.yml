@@ -1,23 +1,40 @@
+# TS-Iteration-Loop 生产环境 Docker Compose
+#
+# 使用方法:
+#   docker-compose up --build -d
+#
+# 特点:
+#   - 使用整合的 Monorepo 代码
+#   - 无需外部目录挂载
+#   - 适用于生产部署
+
 version: '3.8'
 
 services:
   # 主应用 (FastAPI + Gradio)
   app:
-    build: .
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.prod
     ports:
       - "8000:8000"
     volumes:
-      - .:/app
-      - /home/douff/ts/Data-Processing:/home/douff/ts/Data-Processing:ro
-      - /home/douff/ts/timeseries-annotator-v2:/home/douff/ts/timeseries-annotator-v2:ro
-      - /home/douff/ts/ChatTS-Training:/home/douff/ts/ChatTS-Training
-      - /home/douff/ilabel/check_outlier:/home/douff/ilabel/check_outlier:ro
+      # 仅挂载数据目录，代码已在镜像内
+      - ./data:/app/data
     environment:
+      - DEBUG=false
+      - USE_LOCAL_MODULES=true
       - REDIS_URL=redis://redis:6379/0
       - DATABASE_URL=sqlite:///./data/iteration_loop.db
     depends_on:
       - redis
     command: python -m src.main
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
   # Redis (Celery Broker)
   redis:
@@ -26,25 +43,30 @@ services:
       - "6379:6379"
     volumes:
       - redis_data:/data
+    restart: unless-stopped
 
   # Celery Worker (异步任务执行)
   celery_worker:
-    build: .
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.prod
     volumes:
-      - .:/app
-      - /home/douff/ts/Data-Processing:/home/douff/ts/Data-Processing:ro
-      - /home/douff/ts/ChatTS-Training:/home/douff/ts/ChatTS-Training
-      - /home/douff/ilabel/check_outlier:/home/douff/ilabel/check_outlier:ro
+      - ./data:/app/data
     environment:
+      - DEBUG=false
+      - USE_LOCAL_MODULES=true
       - REDIS_URL=redis://redis:6379/0
       - DATABASE_URL=sqlite:///./data/iteration_loop.db
     depends_on:
       - redis
     command: celery -A src.core.tasks worker --loglevel=info
+    restart: unless-stopped
 
   # Celery Flower (任务监控界面，可选)
   flower:
-    build: .
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.prod
     ports:
       - "5555:5555"
     environment:
@@ -55,6 +77,8 @@ services:
     command: celery -A src.core.tasks flower --port=5555
     profiles:
       - monitoring
+    restart: unless-stopped
 
 volumes:
   redis_data:
+

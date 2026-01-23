@@ -26,3 +26,8 @@ numpy>=1.24.0
 # Gradio (微调界面)
 gradio>=4.0.0
 
+# 采集与可视化
+tsdownsample>=0.1.0
+apache-iotdb>=1.0.0
+matplotlib>=3.7.0
+

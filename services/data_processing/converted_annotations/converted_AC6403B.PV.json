@@ -1,0 +1,13 @@
+{
+  "image": "/home/douff/数据标注/data/picture_data/zhlh_100_AC6403B.PV.jpg",
+  "conversations": [
+    {
+      "from": "user",
+      "value": "<image>\n你是一位时间序列异常检测专家。请分析图中的时间序列数据,识别异常区间。\n\n异常类型：\n1. 尖峰类：上行尖峰、下行尖峰、双向尖峰\n2. 阶跃类：阶跃上升、阶跃下降\n3. 漂移类：突然漂移、缓慢漂移\n4. 特殊异常段：点异常、区间异常、震荡区间、上下文异常\n\n请基于全局信号特征识别异常。输出必须是标准JSON格式：\n\n{\"status\":\"success\",\"detected_anomalies\":[{\"interval\":[start,end],\"type\":\"类型\",\"reason\":\"原因\"}]}\n\n若无异常：\n{\"status\":\"success\",\"detected_anomalies\":[]}\n\n请精确标注异常区间的起止索引。"
+    },
+    {
+      "from": "assistant",
+      "value": "{\"status\": \"success\", \"detected_anomalies\": [{\"interval\": [4041, 4041], \"type\": \"点异常\", \"reason\": \"索引位置4041处数据出现竖直尖峰，与数据上下文形成鲜明对比\"}]},{\"status\": \"success\", \"detected_anomalies\": [{\"interval\": [2054, 2054], \"type\": \"上行尖峰\", \"reason\": \"索引位置2054处数据出现竖直尖峰，与数据上下文形成鲜明对比\"}]},{\"status\": \"success\", \"detected_anomalies\": [{\"interval\": [0, 2049], \"type\": \"突然漂移\", \"reason\": \"索引区域内数据发生阶跃突变，数据水平快速跃迁\"}]},{\"overall_attribute\": {\"frequency\": \"low_freq\", \"noise\": \"almost_no_noise\", \"seasonal\": \"no_periodic\", \"trend\": \"stable\"}}"
+    }
+  ]
+}

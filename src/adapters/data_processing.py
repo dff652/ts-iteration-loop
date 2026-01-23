@@ -45,10 +45,27 @@ class DataProcessingAdapter:
         df = pd.read_csv(file_path, nrows=limit)
         return df.to_dict(orient="records")
     
+    def delete_dataset(self, filename: str) -> Dict:
+        """删除数据集文件"""
+        file_path = self.data_path / filename
+        if not file_path.exists():
+            return {"success": False, "error": f"文件不存在: {filename}"}
+        
+        try:
+            file_path.unlink()
+            return {"success": True, "message": f"已删除: {filename}"}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+    
     def run_acquire_task(
         self,
         task_id: str,
         source: str,
+        host: str = "192.168.199.185",
+        port: str = "6667",
+        user: str = "root",
+        password: str = "root",
+        point_name: str = "*",
         target_points: int = 5000,
         start_time: Optional[str] = None,
         end_time: Optional[str] = None
@@ -62,12 +79,20 @@ class DataProcessingAdapter:
         if not script_path.exists():
             return {"success": False, "error": f"脚本不存在: {script_path}"}
         
-        # 构建命令
+        # 构建命令 - 使用 Python 解释器（统一模式使用 PYTHON_UNIFIED）
+        python_exe = settings.PYTHON_UNIFIED if settings.USE_LOCAL_MODULES else settings.PYTHON_DATA_PROCESSING
         cmd = [
-            "python", str(script_path),
+            python_exe, str(script_path),
             "--source", source,
+            "--host", host,
+            "--port", port,
+            "--user", user,
+            "--password", password,
             "--target-points", str(target_points)
         ]
+        
+        if point_name and point_name != "*":
+             cmd.extend(["--column", point_name])
         
         if start_time:
             cmd.extend(["--start-time", start_time])
@@ -94,6 +119,78 @@ class DataProcessingAdapter:
         except Exception as e:
             return {"success": False, "error": str(e)}
     
+    def run_acquire_task_streaming(
+        self,
+        task_id: str,
+        source: str,
+        host: str = "192.168.199.185",
+        port: str = "6667",
+        user: str = "root",
+        password: str = "root",
+        point_name: str = "*",
+        target_points: int = 5000,
+        start_time: Optional[str] = None,
+        end_time: Optional[str] = None
+    ):
+        """
+        执行数据采集任务（流式输出版）
+        使用生成器 yield 实时输出日志
+        """
+        script_path = self.scripts_path / "acquisition" / "get_downsampled.py"
+        
+        if not script_path.exists():
+            yield f"❌ 脚本不存在: {script_path}"
+            return
+        
+        # 构建命令
+        python_exe = settings.PYTHON_UNIFIED if settings.USE_LOCAL_MODULES else settings.PYTHON_DATA_PROCESSING
+        cmd = [
+            python_exe, str(script_path),
+            "--source", source,
+            "--host", host,
+            "--port", port,
+            "--user", user,
+            "--password", password,
+            "--target-points", str(target_points)
+        ]
+        
+        if point_name and point_name != "*":
+            cmd.extend(["--column", point_name])
+        if start_time:
+            cmd.extend(["--start-time", start_time])
+        if end_time:
+            cmd.extend(["--end-time", end_time])
+        
+        yield f"🚀 Starting acquisition...\n\n**Command:** `{' '.join(cmd[:3])}...`\n\n---\n"
+        
+        try:
+            process = subprocess.Popen(
+                cmd,
+                cwd=str(self.project_path),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1
+            )
+            
+            output_lines = []
+            for line in iter(process.stdout.readline, ''):
+                if line:
+                    output_lines.append(line.rstrip())
+                    # 只显示最近 20 行日志，避免输出过多
+                    display_lines = output_lines[-20:]
+                    yield f"🔄 **Acquiring data...**\n\n```\n" + "\n".join(display_lines) + "\n```"
+            
+            process.wait()
+            
+            if process.returncode == 0:
+                yield f"✅ **Acquisition completed!**\n\n```\n" + "\n".join(output_lines[-10:]) + "\n```"
+            else:
+                yield f"❌ **Acquisition failed** (code: {process.returncode})\n\n```\n" + "\n".join(output_lines[-20:]) + "\n```"
+                
+        except Exception as e:
+            yield f"❌ **Error:** {str(e)}"
+    
     def convert_annotations(self, input_dir: str, output_path: str) -> Dict:
         """
         转换标注格式
@@ -104,8 +201,9 @@ class DataProcessingAdapter:
         if not script_path.exists():
             return {"success": False, "error": f"脚本不存在: {script_path}"}
         
+        python_exe = settings.PYTHON_UNIFIED if settings.USE_LOCAL_MODULES else settings.PYTHON_DATA_PROCESSING
         cmd = [
-            "python", str(script_path),
+            python_exe, str(script_path),
             "--input-dir", input_dir,
             "--output", output_path
         ]

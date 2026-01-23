@@ -57,6 +57,11 @@ async def start_acquire_task(
         adapter.run_acquire_task,
         task_id=task_id,
         source=request.source,
+        host=request.host,
+        port=request.port,
+        user=request.user,
+        password=request.password,
+        point_name=request.point_name,
         target_points=request.target_points,
         start_time=request.start_time,
         end_time=request.end_time
