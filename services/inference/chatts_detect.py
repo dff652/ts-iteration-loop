@@ -189,6 +189,10 @@ def map_anomalies_to_original(
     
     mapped = []
     for a in anomalies:
+        if "range" not in a:
+            print(f"[ChatTS][Warning] Skipping anomaly without 'range' field: {a}")
+            continue
+            
         ds_start, ds_end = a["range"]
         
         # 边界检查
@@ -223,6 +227,8 @@ def create_mask_from_anomalies(
     """
     mask = np.zeros(data_length, dtype=int)
     for a in anomalies:
+        if "range" not in a:
+            continue
         start, end = a["range"]
         start = max(0, min(start, data_length - 1))
         end = max(0, min(end, data_length - 1))
