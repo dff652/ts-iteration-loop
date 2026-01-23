@@ -45,6 +45,7 @@ dependencies:
       - statsmodels>=0.14.0
       - adtk>=0.6.2
       - kneed>=0.8.0
+      - PyWavelets>=1.4.0
       
       # ===== 深度学习核心 =====
       # PyTorch 需单独安装：pip install torch --index-url https://download.pytorch.org/whl/cu124
