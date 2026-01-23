@@ -188,7 +188,8 @@ def map_anomalies_to_original(
     idx_array = np.asarray(position_index)
     
     mapped = []
-    for a in anomalies:
+    print(f"[ChatTS][Debug] map_anomalies_to_original received {len(anomalies)} items.")
+    for i, a in enumerate(anomalies):
         try:
             if "range" not in a:
                 print(f"[ChatTS][Warning] Skipping anomaly without 'range' field: {a}")
@@ -209,10 +210,10 @@ def map_anomalies_to_original(
             mapped_anomaly["downsampled_range"] = [a["range"][0], a["range"][1]]
             mapped.append(mapped_anomaly)
         except KeyError as e:
-            print(f"[ChatTS][Error] KeyError processing anomaly {a}: {e}")
+            print(f"[ChatTS][Error] KeyError anomaly[{i}] type={type(a)} keys={list(a.keys()) if isinstance(a, dict) else 'N/A'}: {e}")
             continue
         except Exception as e:
-            print(f"[ChatTS][Error] Unexpected error processing anomaly {a}: {e}")
+            print(f"[ChatTS][Error] Unexpected error anomaly[{i}]: {e}")
             continue
     
     return mapped
@@ -233,7 +234,8 @@ def create_mask_from_anomalies(
         与原始数据等长的整数掩码（0=正常，1=异常）
     """
     mask = np.zeros(data_length, dtype=int)
-    for a in anomalies:
+    print(f"[ChatTS][Debug] create_mask_from_anomalies received {len(anomalies)} items.")
+    for i, a in enumerate(anomalies):
         try:
             if "range" not in a:
                 continue
@@ -241,10 +243,11 @@ def create_mask_from_anomalies(
             start = max(0, min(start, data_length - 1))
             end = max(0, min(end, data_length - 1))
             mask[start:end+1] = 1
-        except KeyError:
+        except KeyError as e:
+             print(f"[ChatTS][Error] KeyError mask creation anomaly[{i}]: {e}")
              continue
         except Exception as e:
-            print(f"[ChatTS][Error] Unexpected error in mask creation for anomaly {a}: {e}")
+            print(f"[ChatTS][Error] Unexpected error in mask creation for anomaly[{i}] {a}: {e}")
             continue
     return mask
 
