@@ -286,6 +286,7 @@ class CheckOutlierAdapter:
             arg_name = f"--{k}"
             cmd.extend([arg_name, str(v)])
             
+        yield f"[SYSTEM CHECK] Code Version: DEBUG-001 (Time: {time.strftime('%H:%M:%S')})\n"
         yield f"Running command: `{' '.join(cmd[:10])}...`\n"
 
         process = None
