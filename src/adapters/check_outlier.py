@@ -312,35 +312,29 @@ class CheckOutlierAdapter:
                     stripped_line = line.rstrip()
                     output_lines.append(stripped_line)
                     
-                    # 捕获结果文件路径
-                    # Log format: Saving results to /path/to/file with shape ...
-                    if "Saving results to" in stripped_line:
-                         # 尝试提取路径
-                         # Saving results for ... (run.py output logic varies, let's look for known path pattern mostly)
-                         # run.py line 1054: print(f"Saving results for {sensor_info} with shape {data.shape}")
-                         # Wait, looking at run.py...
-                         pass
+                    # 捕获结果文件目录
+                    # Log format: "Saving results to: /path/to/dir"
+                    if "Saving results to:" in stripped_line:
+                        parts = stripped_line.split("Saving results to:")
+                        if len(parts) >= 2:
+                            result_dir = parts[-1].strip()
+                            # 存储目录供后续使用
+                            if not hasattr(self, '_current_result_dir'):
+                                self._current_result_dir = result_dir
 
-                    # 捕获实际保存的文件名（run.py没有直接打印完整绝对路径，通常打印目录或相对路径）
-                    # 我们可以根据 data_path 参数猜测，或者修改 run.py 打印路径
-                    # 这里我们尝试从日志解析，或者直接在 _build_algorithm_args 中预知路径？
-                    # 简单起见，我们只能 Parse "Saving results to: ..." if available or we construct it.
-                    # run.py line: print(f"Saving results to: {save_path}") (NOT IN run.py snippet)
-                    # Snippet shows: print(f"Saving results for {sensor_info} with shape {data.shape}")
-                    # But wait, looking at user logs: "Saving results for ('root...', ...) with shape..."
-                    # Then "Saving results to: /home/share/results/data/global/chatts" (directory)
-                    # "保存结果: global_chatts_...csv" (filename)
+                    # 捕获实际保存的文件名
+                    # Log format: "保存结果: filename.csv"
                     if "保存结果" in stripped_line and ".csv" in stripped_line:
-                         # Extraction logic: "保存结果 : filename.csv"
-                         parts = stripped_line.split(":")
-                         if len(parts) >= 2:
-                             filename = parts[-1].strip()
-                             # 假设保存在 default data_path / method / filename?
-                             # 根据 run.py, data_path 默认为 /home/share/results/data
-                             # method subfolder? 
-                             # 日志有一行: Saving results to: /home/share/results/data/global/chatts
-                             # 我们可以大致推断路径，或者 yield 这个 filename 让 UI 去找
-                             yield {"file_name": filename}
+                        parts = stripped_line.split(":")
+                        if len(parts) >= 2:
+                            filename = parts[-1].strip()
+                            # 构建完整路径
+                            if hasattr(self, '_current_result_dir'):
+                                full_path = f"{self._current_result_dir}/{filename}"
+                            else:
+                                # 默认目录
+                                full_path = f"/home/share/results/data/global/chatts/{filename}"
+                            yield {"file_path": full_path, "file_name": filename}
 
                     # 过滤并格式化有用信息
                     # 1. 进度条 (tqdm)

@@ -427,13 +427,11 @@ def start_inference_task(
             **advanced_args
         ):
             # 检查是否包含文件路径返回
-            if isinstance(log_chunk, dict) and "file_name" in log_chunk:
-                # 尝试构造完整路径（这里假设在 output 目录或者 data_path 下）
-                # 由于 adapter 仅返回了文件名，我们需要确认其位置。
-                # 暂时假设在默认数据输出目录 /home/share/results/data/<task_name>/<method>/...
-                # 简单起见，我们让 user 去找，或者这里尝试 glob
-                # 更好的方式是 adapter 返回绝对路径。
-                # 鉴于 adapter 修改限制，我们先忽略文件下载列表的自动构建，或者假定在当前目录
+            if isinstance(log_chunk, dict) and "file_path" in log_chunk:
+                # adapter 返回了完整路径
+                generated_files.append(log_chunk["file_path"])
+            elif isinstance(log_chunk, dict) and "file_name" in log_chunk:
+                # 兼容旧格式，仅有文件名
                 generated_files.append(log_chunk["file_name"])
             elif isinstance(log_chunk, dict):
                  pass # 其他结构化消息
