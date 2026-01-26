@@ -176,67 +176,114 @@
         
         <!-- 📝 标注工作区 -->
         <div class="panel-section workspace-section">
-          <h3 class="section-title">📝 标注工作区</h3>
-          
-          <!-- 标签 -->
-          <div class="form-group">
-            <label>标签</label>
-            <div class="chart-labels-container" v-if="chartLabelStats.length > 0">
-              <div v-for="stat in chartLabelStats" :key="stat.text" 
-                   class="chart-label-tag" 
-                   :class="{ 'active': activeChartLabel === stat.text }"
-                   :style="{ backgroundColor: stat.color }"
-                   @click="selectChartLabel(stat)">
-                <span class="label-text">{{ stat.text }}</span>
-                <span class="label-count">({{ stat.count }})</span>
-                <button class="label-remove" @click.stop="clearLabelFromChart(stat.text)" title="清除">×</button>
-              </div>
-            </div>
-            <div v-else class="empty-message">← 左侧选择标签后在图中框选</div>
+          <div class="section-header">
+            <h3 class="section-title">📝 标注工作区</h3>
+            <!-- Edit/Complete toggle button (only show when annotation loaded) -->
+            <template v-if="workspaceState !== 'empty'">
+              <button v-if="workspaceState === 'view'" 
+                      class="btn btn-sm" 
+                      @click="enterWorkspaceEditMode"
+                      title="进入编辑">
+                ✏️ 编辑
+              </button>
+              <button v-else 
+                      class="btn btn-sm btn-primary" 
+                      @click="finishWorkspaceEdit"
+                      title="完成编辑并保存">
+                ✓ 完成
+              </button>
+              <button class="btn btn-sm" @click="clearWorkspace" title="清空工作区">🗑️</button>
+            </template>
           </div>
           
-          <!-- 数据段索引（显示当前选中标签的段） -->
-          <div class="form-group">
-            <label v-if="activeChartLabel">数据段索引 ({{ activeSegments.length }})</label>
-            <label v-else>数据段索引</label>
-            <div class="segment-index-area">
-              <div v-if="activeChartLabel && activeSegments.length > 0" class="segments-list">
-                <div v-for="(seg, idx) in activeSegments" :key="idx" class="segment-item clickable" @click="navigateToSegment(seg)" :style="{ borderLeft: '3px solid ' + activeLabelColor }">
-                  <span class="segment-range" :style="{ color: activeLabelColor }">{{ seg.start }} - {{ seg.end }}</span>
-                  <span class="segment-count">({{ seg.count }}点)</span>
-                  <button class="btn-icon-sm" @click.stop="removeSegmentByRange(seg)" title="删除">×</button>
+          <!-- ========== 空状态 ========== -->
+          <template v-if="workspaceState === 'empty'">
+            <div class="empty-workspace">
+              <p>点击下方「标注结果」中的标签或索引加载标注</p>
+              <p class="hint">或在左侧选择标签后于图中框选新建</p>
+            </div>
+          </template>
+          
+          <!-- ========== 查看/编辑状态 ========== -->
+          <template v-else-if="workspaceData">
+            <!-- 标签类型 -->
+            <div class="form-group">
+              <label>标签类型 <span v-if="workspaceState === 'edit'" class="edit-mode-badge">编辑中</span></label>
+              <!-- Edit mode: dropdown -->
+              <div v-if="workspaceState === 'edit'" class="edit-label-row">
+                <select v-model="workspaceData.label.id" @change="onWorkspaceLabelChange" class="label-select">
+                  <option v-for="label in flatAllLabels" :key="label.id" :value="label.id">{{ label.text }}</option>
+                </select>
+                <span class="label-preview" :style="{ backgroundColor: workspaceData.label.color }">{{ workspaceData.label.text }}</span>
+              </div>
+              <!-- View mode: just display the label -->
+              <div v-else class="label-display">
+                <span class="label-tag" :style="{ backgroundColor: workspaceData.label.color }">{{ workspaceData.label.text }}</span>
+              </div>
+            </div>
+            
+            <!-- 数据段索引 -->
+            <div class="form-group">
+              <label>数据段索引 ({{ workspaceData.segments.length }})</label>
+              <div class="segment-index-area">
+                <div v-if="workspaceData.segments.length > 0" class="segments-list">
+                  <div v-for="(seg, idx) in workspaceData.segments" :key="idx" class="segment-item" :style="{ borderLeft: '3px solid ' + workspaceData.label.color }">
+                    <!-- Edit mode: editable inputs -->
+                    <template v-if="workspaceState === 'edit'">
+                      <input 
+                        v-if="editingSegmentKey === 'ws_' + idx" 
+                        type="text" 
+                        class="segment-edit-input"
+                        :value="seg.start + '-' + seg.end" 
+                        @blur="finishEditWorkspaceSegment(idx, $event.target.value)"
+                        @keyup.enter="finishEditWorkspaceSegment(idx, $event.target.value)"
+                        autofocus>
+                      <span v-else class="segment-range clickable" :style="{ color: workspaceData.label.color }" @click="startEditWorkspaceSegment(idx)" title="点击编辑范围">
+                        {{ seg.start }} - {{ seg.end }}
+                      </span>
+                      <span class="segment-count">({{ seg.count || seg.end - seg.start + 1 }}点)</span>
+                      <button class="btn-icon-sm" @click.stop="removeWorkspaceSegment(idx)" title="删除">×</button>
+                    </template>
+                    <!-- View mode: click to navigate -->
+                    <template v-else>
+                      <span class="segment-range clickable" :style="{ color: workspaceData.label.color }" @click="navigateToSegment(seg)" title="点击定位">
+                        {{ seg.start }} - {{ seg.end }}
+                      </span>
+                      <span class="segment-count">({{ seg.count || seg.end - seg.start + 1 }}点)</span>
+                    </template>
+                  </div>
+                </div>
+                <div v-else class="empty-placeholder">暂无数据段</div>
+                
+                <!-- Add Segment Button (Edit Mode Only) -->
+                <div v-if="workspaceState === 'edit'" class="add-segment-row">
+                  <button class="btn btn-sm btn-outline-primary full-width" @click="addNewWorkspaceSegment">
+                    + 添加数据段
+                  </button>
                 </div>
               </div>
-              <div v-else-if="activeChartLabel" class="empty-placeholder">该标签暂无数据段</div>
-              <div v-else-if="chartLabelStats.length > 0" class="empty-placeholder">↑ 点击标签查看数据段</div>
-              <div v-else class="empty-placeholder">← 选择标签框选，或直接输入问题和分析</div>
             </div>
-          </div>
-          
-          <!-- 问题和评价 - 始终显示 -->
-          <div class="form-group">
-            <label>问题</label>
-            <textarea v-model="currentAnnotation.prompt" 
-                      rows="2" 
-                      placeholder="描述发现的问题..."></textarea>
-          </div>
-          <div class="form-group">
-            <label>评价</label>
-            <textarea v-model="currentAnnotation.expertOutput" 
-                      rows="2" 
-                      placeholder="评价..."></textarea>
-          </div>
-          
-          <!-- 操作按钮 - 始终显示 -->
-          <div class="form-actions">
-            <button class="btn btn-primary" 
-                    @click="saveActiveLabel" 
-                    :disabled="!canSaveCurrentAnnotation">
-              {{ editingAnnotationIndex !== null ? '更新标注' : '添加标注' }}
-            </button>
-            <button class="btn" 
-                    @click="resetCurrentAnnotation">重置</button>
-          </div>
+            
+            <!-- 问题 -->
+            <div class="form-group" v-if="workspaceState === 'edit'">
+              <label>问题</label>
+              <textarea v-model="workspaceData.prompt" rows="2" placeholder="描述发现的问题..."></textarea>
+            </div>
+            <div class="form-group" v-else-if="workspaceData.prompt">
+              <label>问题</label>
+              <div class="readonly-text">{{ workspaceData.prompt }}</div>
+            </div>
+            
+            <!-- 评价 -->
+            <div class="form-group" v-if="workspaceState === 'edit'">
+              <label>评价</label>
+              <textarea v-model="workspaceData.expertOutput" rows="2" placeholder="评价..."></textarea>
+            </div>
+            <div class="form-group" v-else-if="workspaceData.expertOutput">
+              <label>评价</label>
+              <div class="readonly-text">{{ workspaceData.expertOutput }}</div>
+            </div>
+          </template>
         </div>
 
         <!-- 📋 标注结果 -->
@@ -249,17 +296,18 @@
             </div>
           </div>
           <div class="annotation-list">
-            <div v-for="(ann, idx) in savedAnnotations" :key="ann.id" class="annotation-item" :class="{ 'editing': editingAnnotationIndex === idx }">
+            <div v-for="(ann, idx) in savedAnnotations" :key="ann.id" class="annotation-item clickable-card" :class="{ 'active': workspaceAnnIndex === idx }" @click="loadToWorkspace(idx)">
               <div class="annotation-header">
-                <span class="label-tag clickable" :style="{ backgroundColor: ann.label.color }" @click="cycleAnnotationSegments(idx)" :title="'点击定位数据段'">{{ ann.label.text }}</span>
+                <!-- Label -->
+                <span class="label-tag" :style="{ backgroundColor: ann.label.color }">{{ ann.label.text }}</span>
                 <span class="segment-summary">({{ ann.segments.length }}段)</span>
                 <div class="annotation-actions">
-                  <button class="btn-icon-sm" @click="editAnnotation(idx)" title="编辑">✏️</button>
-                  <button class="btn-delete" @click="deleteAnnotation(idx)" title="删除">×</button>
+                  <button class="btn-delete" @click.stop="deleteAnnotation(idx)" title="删除">×</button>
                 </div>
               </div>
               <div class="annotation-segments">
-                <span v-for="(seg, sidx) in ann.segments" :key="sidx" class="segment-badge clickable" @click="navigateToAnnotationSegment(ann, sidx)">
+                <!-- Segment: Click to load to workspace and navigate -->
+                <span v-for="(seg, sidx) in ann.segments" :key="sidx" class="segment-badge clickable" @click.stop="loadToWorkspace(idx, sidx)" title="点击加载并定位">
                   {{ seg.start }}-{{ seg.end }}
                 </span>
               </div>
@@ -460,14 +508,22 @@ export default {
       // Label settings modal state
       labelSettingsTab: 'overall',
       
-      // Editing state: index of annotation being edited, null if creating new
-      editingAnnotationIndex: null,
+      // ========== Workspace State (Refactored) ==========
+      // Workspace mode: 'empty' = nothing loaded, 'view' = read-only, 'edit' = can modify
+      workspaceState: 'empty',
+      // Index of annotation loaded into workspace (null if empty)
+      workspaceAnnIndex: null,
+      // Deep copy of annotation being viewed/edited (null if empty)
+      workspaceData: null,
       
       // Track segment cycle position for each annotation (key: annotation index)
       annotationCyclePositions: {},
       
-      // Currently active label in workspace (for viewing its segments)
-      activeChartLabel: null
+      // Currently active label in workspace (for viewing its segments) - used in create mode
+      activeChartLabel: null,
+      
+      // Inline editing state for segment range
+      editingSegmentKey: null       // Key like 'ws_segIdx' for segment being edited
     }
   },
   computed: {
@@ -478,6 +534,25 @@ export default {
     localCategories() {
       // Return direct reference for display (read-only)
       return this.labels.local_change || {};
+    },
+    // Flatten all local_change labels into a single array for dropdown
+    flatAllLabels() {
+      const result = [];
+      const lc = this.labels.local_change || {};
+      Object.keys(lc).forEach(catId => {
+        const cat = lc[catId];
+        if (cat.labels && Array.isArray(cat.labels)) {
+          cat.labels.forEach(label => {
+            result.push({
+              id: label.id,
+              text: label.text,
+              color: label.color,
+              categoryId: catId
+            });
+          });
+        }
+      });
+      return result;
     },
     canSaveAnnotation() {
       return this.currentAnnotation.label !== null && this.currentAnnotation.segments.length > 0;
@@ -604,9 +679,8 @@ export default {
     }
   },
   watch: {
-    selectedLabel(val) {
-      if (plottingApp) plottingApp.selectedLabel = val;
-    }
+    // selectedLabel watcher removed to prevent chart color reset side effects
+    // We handle plottingApp updates manually where needed
   },
   mounted() {
     // Expose Vue instance to window for D3 direct access
@@ -856,6 +930,10 @@ export default {
         setTimeout(() => {
           try {
             LabelerD3.drawLabeler(plottingApp);
+            // Fix: Apply annotations after chart is drawn
+            this.$nextTick(() => {
+              this.applyAnnotationsToChart();
+            });
           } catch (e) {
             console.error('Chart draw error:', e);
             this.showToast('图表绘制失败: ' + e.message, 'error');
@@ -1280,6 +1358,171 @@ export default {
       this.$set(this.annotationCyclePositions, annIdx, (currentPos + 1) % ann.segments.length);
     },
     
+    // ============ Inline Editing: Label Dropdown ============
+    startEditLabel(annIdx) {
+      this.editingLabelAnnIndex = annIdx;
+    },
+    
+    finishEditLabel(annIdx, newLabelId) {
+      const newLabel = this.flatAllLabels.find(l => l.id === newLabelId);
+      if (!newLabel) {
+        this.editingLabelAnnIndex = null;
+        return;
+      }
+      
+      // Update the annotation's label object
+      const ann = this.savedAnnotations[annIdx];
+      this.$set(ann, 'label', {
+        id: newLabel.id,
+        text: newLabel.text,
+        color: newLabel.color,
+        categoryId: newLabel.categoryId
+      });
+      
+      // Also update each segment's embedded label
+      ann.segments.forEach(seg => {
+        this.$set(seg, 'label', { ...ann.label });
+      });
+      
+      this.editingLabelAnnIndex = null;
+      
+      // Refresh chart colors
+      this.applyAnnotationsToChart();
+      this.saveAnnotationsToServer();
+      this.showToast(`标签已更换为: ${newLabel.text}`, 'success');
+    },
+    
+    // ============ Inline Editing: Segment Range ============
+    startEditSegment(annIdx, segIdx) {
+      this.editingSegmentKey = annIdx + '_' + segIdx;
+    },
+    
+    finishEditSegment(annIdx, segIdx, newValue) {
+      this.editingSegmentKey = null;
+      
+      // Parse input like "start-end"
+      const match = newValue.trim().match(/^(\d+)\s*[-~]\s*(\d+)$/);
+      if (!match) {
+        this.showToast('格式错误，请输入如: 100-200', 'error');
+        return;
+      }
+      
+      const newStart = parseInt(match[1], 10);
+      const newEnd = parseInt(match[2], 10);
+      
+      if (isNaN(newStart) || isNaN(newEnd) || newStart >= newEnd) {
+        this.showToast('范围无效: 起始值必须小于结束值', 'error');
+        return;
+      }
+      
+      // Update segment
+      const seg = this.savedAnnotations[annIdx].segments[segIdx];
+      this.$set(seg, 'start', newStart);
+      this.$set(seg, 'end', newEnd);
+      this.$set(seg, 'count', newEnd - newStart + 1);
+      
+      // Refresh chart colors
+      this.applyAnnotationsToChart();
+      this.saveAnnotationsToServer();
+      this.showToast(`范围已更新: ${newStart}-${newEnd}`, 'success');
+    },
+    
+    // ============ Workspace Editing Methods ============
+    // Handle label change in workspace dropdown
+    onWorkspaceLabelChange() {
+      const newLabelId = this.currentAnnotation.label.id;
+      const newLabel = this.flatAllLabels.find(l => l.id === newLabelId);
+      if (!newLabel) return;
+      
+      // Update the current annotation's label object
+      this.$set(this.currentAnnotation, 'label', {
+        id: newLabel.id,
+        text: newLabel.text,
+        color: newLabel.color,
+        categoryId: newLabel.categoryId
+      });
+      
+      // Also update each segment's embedded label
+      this.currentAnnotation.segments.forEach(seg => {
+        this.$set(seg, 'label', { ...this.currentAnnotation.label });
+      });
+      
+      this.showToast(`标签已更改为: ${newLabel.text}`, 'info');
+    },
+    
+    // Add a new empty segment to workspace
+    addNewWorkspaceSegment() {
+      if (this.workspaceState !== 'edit' || !this.workspaceData) return;
+      
+      // Determine a reasonable default start/end
+      let start = 0;
+      let end = 100;
+      
+      if (this.workspaceData.segments.length > 0) {
+        const lastSeg = this.workspaceData.segments[this.workspaceData.segments.length - 1];
+        start = parseInt(lastSeg.end) + 20;
+        end = start + 50;
+      } else if (window.plottingApp && window.plottingApp.xDomain) {
+        start = Math.floor(window.plottingApp.xDomain[0]);
+        end = start + 100;
+      }
+      
+      const newSeg = {
+        start: start,
+        end: end,
+        count: end - start + 1,
+        label: { ...this.workspaceData.label }
+      };
+      
+      this.workspaceData.segments.push(newSeg);
+      
+      this.$nextTick(() => {
+        this.startEditWorkspaceSegment(this.workspaceData.segments.length - 1);
+        this.panChartToRange(start, end);
+      });
+    },
+    
+    // Start editing a segment range in workspace
+    startEditWorkspaceSegment(idx) {
+      if (this.workspaceState !== 'edit') return;
+      this.editingSegmentKey = 'ws_' + idx;
+    },
+    
+    // Finish editing a segment range in workspace
+    finishEditWorkspaceSegment(idx, newValue) {
+      this.editingSegmentKey = null;
+      if (!this.workspaceData) return;
+      
+      const match = newValue.trim().match(/^(\d+)\s*[-~]\s*(\d+)$/);
+      if (!match) {
+        this.showToast('格式错误，请输入如: 100-200', 'error');
+        return;
+      }
+      
+      const newStart = parseInt(match[1], 10);
+      const newEnd = parseInt(match[2], 10);
+      
+      if (isNaN(newStart) || isNaN(newEnd) || newStart >= newEnd) {
+        this.showToast('范围无效: 起始值必须小于结束值', 'error');
+        return;
+      }
+      
+      // Update segment in workspaceData
+      const seg = this.workspaceData.segments[idx];
+      this.$set(seg, 'start', newStart);
+      this.$set(seg, 'end', newEnd);
+      this.$set(seg, 'count', newEnd - newStart + 1);
+      
+      this.showToast(`范围已更新: ${newStart}-${newEnd}`, 'info');
+    },
+    
+    // Remove a segment from workspace
+    removeWorkspaceSegment(idx) {
+      if (!this.workspaceData) return;
+      this.workspaceData.segments.splice(idx, 1);
+      this.showToast('已删除数据段', 'info');
+    },
+    
     // Pan chart to show a specific range
     panChartToRange(start, end) {
       if (!plottingApp || !plottingApp.plot || !plottingApp.context_brush) {
@@ -1302,6 +1545,28 @@ export default {
       } catch (e) {
         console.error('Error panning chart:', e);
       }
+    },
+    
+    // Auto-focus chart on the first anomaly segment when loading a file
+    focusOnFirstAnomaly() {
+      if (!this.savedAnnotations || this.savedAnnotations.length === 0) return;
+      if (!plottingApp || !plottingApp.context_xscale) {
+        console.log('Chart not ready for auto-focus');
+        return;
+      }
+      
+      // Find first segment from first annotation
+      const firstAnn = this.savedAnnotations[0];
+      if (!firstAnn || !firstAnn.segments || firstAnn.segments.length === 0) return;
+      
+      const firstSeg = firstAnn.segments[0];
+      const start = Number(firstSeg.start);
+      const end = Number(firstSeg.end);
+      
+      if (isNaN(start) || isNaN(end)) return;
+      
+      console.log(`Auto-focusing on first anomaly: [${start}, ${end}]`);
+      this.panToSegment(start, end);
     },
     
     // Navigate to points with a specific label on the chart
@@ -1451,34 +1716,95 @@ export default {
       // Auto-save after deletion
       this.saveAnnotationsToServer();
     },
+    // ========== Workspace State Methods (Refactored) ==========
     
-    // Edit an existing annotation - load it into current editing area
-    editAnnotation(idx) {
-      const ann = this.savedAnnotations[idx];
+    // Load an annotation from result area into workspace (view mode)
+    loadToWorkspace(annIdx, segIdx = 0) {
+      const ann = this.savedAnnotations[annIdx];
       if (!ann) return;
       
-      // Set active chart label so the workspace becomes visible
-      this.activeChartLabel = ann.label.text;
+      // Deep copy annotation data
+      this.workspaceData = JSON.parse(JSON.stringify(ann));
+      this.workspaceAnnIndex = annIdx;
+      this.workspaceState = 'view';
+      this.editingSegmentKey = null;
       
-      // Load annotation into current editing state
-      this.currentAnnotation = {
-        label: { ...ann.label },
-        segments: [...ann.segments],
-        prompt: ann.prompt || '',
-        expertOutput: ann.expertOutput || ''
-      };
-      this.selectedLocalLabels = [ann.label];
-      
-      // Update plottingApp
-      if (plottingApp) {
-        plottingApp.selectedLabel = ann.label.text;
-        plottingApp.labelColor = ann.label.color;
+      // Navigate to specified segment
+      if (ann.segments && ann.segments.length > segIdx) {
+        const seg = ann.segments[segIdx];
+        this.panChartToRange(seg.start, seg.end);
       }
       
-      // Store editing index for update
-      this.editingAnnotationIndex = idx;
+      this.showToast(`已加载: ${ann.label.text}`, 'info');
       
-      this.showToast('已加载标注进行编辑', 'info');
+      // Update plottingApp: Clear selectedLabel to ensure all colors are shown
+      if (window.plottingApp) {
+        window.plottingApp.selectedLabel = ''; 
+        // Force redraw to remove any highlighting
+        this.recolorChartPoints();
+      }
+    },
+    
+    // Enter edit mode in workspace
+    enterWorkspaceEditMode() {
+      if (this.workspaceState !== 'view') return;
+      this.workspaceState = 'edit';
+      this.editingSegmentKey = null;
+    },
+    
+    // Finish editing and sync changes to savedAnnotations
+    finishWorkspaceEdit() {
+      if (this.workspaceState !== 'edit' || this.workspaceAnnIndex === null) return;
+      
+      // Sync workspaceData back to savedAnnotations
+      this.$set(this.savedAnnotations, this.workspaceAnnIndex, JSON.parse(JSON.stringify(this.workspaceData)));
+      
+      this.workspaceState = 'view';
+      this.editingSegmentKey = null;
+      
+      // Refresh chart colors and save
+      this.applyAnnotationsToChart();
+      this.saveAnnotationsToServer();
+      
+      this.showToast('修改已保存', 'success');
+    },
+    
+    // Clear workspace and return to empty state
+    clearWorkspace() {
+      this.workspaceState = 'empty';
+      this.workspaceAnnIndex = null;
+      this.workspaceData = null;
+      this.editingSegmentKey = null;
+    },
+    
+    // Handle label change in workspace dropdown (edit mode)
+    onWorkspaceLabelChange() {
+      if (!this.workspaceData) return;
+      
+      const newLabelId = this.workspaceData.label.id;
+      const newLabel = this.flatAllLabels.find(l => l.id === newLabelId);
+      if (!newLabel) return;
+      
+      // Update workspaceData label
+      this.$set(this.workspaceData, 'label', {
+        id: newLabel.id,
+        text: newLabel.text,
+        color: newLabel.color,
+        categoryId: newLabel.categoryId
+      });
+      
+      // Update segment embedded labels
+      this.workspaceData.segments.forEach(seg => {
+        this.$set(seg, 'label', { ...this.workspaceData.label });
+      });
+    },
+    
+    // Backward compatibility alias
+    loadAnnotationToWorkspace(idx) {
+      this.loadToWorkspace(idx);
+    },
+    editAnnotation(idx) {
+      this.loadToWorkspace(idx);
     },
     
     // Get authorization headers
@@ -1522,6 +1848,15 @@ export default {
           
           this.savedAnnotations = annotations;
           console.log('Loaded and normalized annotations:', this.savedAnnotations);
+
+          // Fix: Apply annotations to chart data points so they are colored
+          // Fix: Apply annotations to chart data points so they are colored
+          this.applyAnnotationsToChart();
+          
+          // Auto-focus on first anomaly region if available
+          this.$nextTick(() => {
+            this.focusOnFirstAnomaly();
+          });
 
           if (this.savedAnnotations.length > 0) {
             this.showToast(`已加载 ${this.savedAnnotations.length} 个标注`, 'success');
@@ -1754,6 +2089,88 @@ export default {
     
     triggerRecolor() {
       // Trigger point recolor
+      this.recolorChartPoints();
+    },
+
+    // Apply saved annotations to the chart data model and view
+    applyAnnotationsToChart() {
+      if (!window.plottingApp || !window.plottingApp.allData) {
+        console.log('applyAnnotationsToChart: plottingApp not ready');
+        return;
+      }
+      if (this.savedAnnotations.length === 0) {
+        console.log('applyAnnotationsToChart: no annotations to apply, clearing chart');
+        // Continue execution to clear existing labels
+      }
+
+      console.log('Applying annotations to chart visual...', this.savedAnnotations.length, 'annotations found');
+      
+      // 0. RESET all points labels first to avoid "ghost" points when deleting/modifying
+      if (window.plottingApp.allData) {
+        window.plottingApp.allData.forEach(d => {
+           d.label = ''; // Reset to empty string, do NOT delete (causes undefined issues in D3)
+        });
+      }
+      
+      let appliedCount = 0;
+      
+      // Ensure labelList exists
+      if (!window.plottingApp.labelList) window.plottingApp.labelList = [];
+      
+      // 1. Update data model and ensure labels are in labelList
+      this.savedAnnotations.forEach(ann => {
+        const labelText = ann.label.text;
+        if (!labelText) return;
+        
+        // Ensure this label has a color mapping in labelList
+        let labelEntry = window.plottingApp.labelList.find(l => l.name === labelText);
+        if (!labelEntry) {
+          console.log(`Adding unknown label to labelList: ${labelText}`);
+          const newColor = ann.label.color || this.getNextColor();
+          labelEntry = { name: labelText, color: newColor };
+          window.plottingApp.labelList.push(labelEntry);
+        }
+        
+        ann.segments.forEach(seg => {
+          // Robust matching with Number conversion
+          const sStart = Number(seg.start);
+          const sEnd = Number(seg.end);
+          
+          window.plottingApp.allData.forEach(d => {
+             // LabelerD3 uses d.time as index (numeric)
+             const t = Number(d.time); 
+             if (!isNaN(t) && t >= sStart && t <= sEnd) {
+               d.label = labelText;
+               appliedCount++;
+             }
+          });
+        });
+      });
+      console.log(`Applied ${appliedCount} points to chart.`);
+      
+      // 2. Update view (Recolor)
+      this.recolorChartPoints();
+    },
+
+    // Update the visual style of chart points based on their labels
+    recolorChartPoints() {
+       if (!window.plottingApp) return;
+       const updatePointStyle = function(d) {
+        if (d.label) {
+          const labelInfo = (window.plottingApp.labelList || []).find(l => l.name === d.label);
+          const color = labelInfo?.color || '#7E4C64';
+          return `fill: ${color}; stroke: ${color}; opacity: 0.75;`;
+        }
+        return 'fill: black; stroke: none; opacity: 1;';
+      };
+      
+      if (window.plottingApp.main) {
+        window.plottingApp.main.selectAll('.point').attr('style', updatePointStyle);
+      }
+      if (window.plottingApp.context) {
+        window.plottingApp.context.selectAll('.point').attr('style', updatePointStyle);
+      }
+      this.chartDataVersion++;
     },
     
     clearSeries() {
@@ -1763,15 +2180,10 @@ export default {
     },
     
     updateSelectionRange() {
-      // Called by D3 when brush selection changes - add segment to current annotation
+      // Called by D3 when brush selection changes - add segment
       console.log('=== updateSelectionRange called ===');
       
-      if (!plottingApp.selection) {
-        console.log('No selection data from plottingApp');
-        return;
-      }
-      
-      console.log('plottingApp.selection:', plottingApp.selection);
+      if (!plottingApp.selection) return;
       
       // Parse and validate numeric values
       const start = parseInt(plottingApp.selection.start);
@@ -1780,15 +2192,82 @@ export default {
       const minVal = parseFloat(plottingApp.selection.minVal);
       const maxVal = parseFloat(plottingApp.selection.maxVal);
       const mean = parseFloat(plottingApp.selection.mean);
-      const std = parseFloat(plottingApp.selection.std);
-      const range = parseFloat(plottingApp.selection.range);
       
-      // Validate that we have valid numbers
       if (isNaN(start) || isNaN(end)) {
-        console.error('Invalid selection range:', { start, end });
         this.showToast('框选数据错误', 'error');
         return;
       }
+      
+      // ==========================================================
+      // GUARD: If we are in VIEW or EDIT mode, we NEVER want the D3 brush
+      // to automatically repaint points (destructive 'search' op).
+      // We only allow this when constructing a NEW annotation (empty state).
+      // ==========================================================
+      if (this.workspaceState !== 'empty') {
+         if (window.plottingApp) {
+           window.plottingApp.preventBrushSearch = true;
+         }
+      }
+      
+      // ==========================================================
+      // CASE 1: WORKSPACE EDIT MODE
+      // ==========================================================
+      if (this.workspaceState === 'edit' && this.workspaceData) {
+        
+        // TELL D3 TO STOP SEARCHING/LABELING (prevent color change)
+        if (window.plottingApp) {
+          window.plottingApp.preventBrushSearch = true;
+        }
+
+        // SMART FILL: If user is currently editing a segment input box,
+        // update THAT segment instead of creating a new one.
+        if (this.editingSegmentKey && this.editingSegmentKey.startsWith('ws_')) {
+          const editIdx = parseInt(this.editingSegmentKey.replace('ws_', ''));
+          if (!isNaN(editIdx) && this.workspaceData.segments[editIdx]) {
+             // Modify existing segment
+             const targetSeg = this.workspaceData.segments[editIdx];
+             this.$set(targetSeg, 'start', start);
+             this.$set(targetSeg, 'end', end);
+             this.$set(targetSeg, 'count', end - start + 1);
+             // Keep its existing label or update? Keep existing.
+             
+             this.showToast(`已更新当前选中段范围: ${start}-${end}`, 'info');
+             
+             // Clear brush
+             try {
+                if (plottingApp.plot && plottingApp.plot.brush) {
+                  plottingApp.plot.brush.call(plottingApp.brush.move, null);
+                }
+             } catch(e) {}
+             return; // EXIT, do not add new segment
+          }
+        }
+
+        // Otherwise, append new segment
+        const segment = {
+          start,
+          end,
+          count: end - start + 1,
+          label: { ...this.workspaceData.label }
+        };
+        
+        this.workspaceData.segments.push(segment);
+        this.showToast(`已添加到工作区: ${start}-${end}`, 'success');
+        
+        // Clear the brush selection box visually (optional, but good UX)
+        // We typically want to clear it so user can select again
+        try {
+          if (plottingApp.plot && plottingApp.plot.brush) {
+            plottingApp.plot.brush.call(plottingApp.brush.move, null);
+          }
+        } catch(e) { console.error('Error clearing brush', e); }
+        
+        return; // EXIT HERE, do not proceed to create mode logic
+      }
+      
+      // ==========================================================
+      // CASE 2: NORMAL/CREATE MODE - Add to activeSegments
+      // ==========================================================
       
       // Store selection stats for display - use $set to ensure reactivity
       this.$set(this, 'selectionStats', {
@@ -1797,29 +2276,22 @@ export default {
         count: isNaN(count) ? 0 : count,
         minVal: isNaN(minVal) ? 0 : minVal,
         maxVal: isNaN(maxVal) ? 0 : maxVal,
-        mean: isNaN(mean) ? 0 : mean,
-        std: isNaN(std) ? 0 : std,
-        range: isNaN(range) ? 0 : range
+        mean: isNaN(mean) ? 0 : mean
       });
       
-      console.log('selectionStats set to:', this.selectionStats);
-      
-      // Determine the label to use - current label from UI or from plottingApp
+      // Determine the label to use
       let labelToUse = this.currentAnnotation.label;
       if (!labelToUse && plottingApp.selectedLabel) {
-        console.log('Syncing label from plottingApp:', plottingApp.selectedLabel);
         labelToUse = this.findLabelByText(plottingApp.selectedLabel);
-        console.log('Found label:', labelToUse);
       }
       
       if (!labelToUse) {
-        console.log('No label selected');
         this.selectionRange = `${start} - ${end} (${count}点) - 请先选择标签`;
         this.showToast('请先选择一个标签', 'warning');
         return;
       }
       
-      // Create segment object WITH its label info - each segment remembers which label was active
+      // Create segment object WITH its label info
       const segment = {
         start,
         end,
@@ -1827,14 +2299,12 @@ export default {
         minVal: isNaN(minVal) ? 0 : minVal,
         maxVal: isNaN(maxVal) ? 0 : maxVal,
         mean: isNaN(mean) ? 0 : mean,
-        label: { ...labelToUse }  // Store the label with the segment!
+        label: { ...labelToUse }
       };
       
-      // Create new segments array with the new segment using $set for reactivity
+      // Add to currentAnnotation
       const newSegments = [...this.currentAnnotation.segments, segment];
       
-      // Use $set for all nested properties to ensure full reactivity
-      // Keep currentAnnotation.label as the last selected label (for UI display)
       this.$set(this, 'currentAnnotation', {
         label: labelToUse,
         segments: newSegments,
@@ -1842,28 +2312,15 @@ export default {
         expertOutput: this.currentAnnotation.expertOutput || ''
       });
       
-      // Increment version to trigger computed property updates
       this.annotationVersion++;
-      this.chartDataVersion++;
       
       // Auto-switch to show this label's segments in workspace
       if (labelToUse && labelToUse.text) {
         this.activeChartLabel = labelToUse.text;
       }
       
-      console.log('NEW segment with label:', JSON.stringify(segment));
-      console.log('Total segments:', newSegments.length);
-      this.selectionRange = `已添加 ${newSegments.length} 段`;
       this.showToast(`已添加数据段: ${segment.start}-${segment.end} (${labelToUse.text})`, 'success');
-      
-      // Trigger chartLabelStats reactivity update
-      this.chartDataVersion++;
-      
-      // Force Vue to re-render after D3 hidden button trigger
-      this.$nextTick(() => {
-        this.$forceUpdate();
-        console.log('Vue forceUpdate triggered');
-      });
+      this.$forceUpdate();
     },
     
     // Helper to find label by text
@@ -2234,6 +2691,22 @@ textarea:disabled { background-color: #f5f5f5; color: #999; cursor: not-allowed;
 .file-badge { color: #22c55e; font-weight: bold; margin-left: 4px; }
 
 /* Navbar File Name */
+
+/* Workspace New Styles */
+.empty-workspace { display: flex; flex-direction: column; align-items: center; justify-content: center; height: 200px; text-align: center; color: #888; font-size: 0.875rem; padding: 20px; border: 1px dashed #ddd; border-radius: 6px; background: #f9f9f9; }
+.empty-workspace .hint { margin-top: 8px; font-size: 0.75rem; color: #aaa; }
+.readonly-text { padding: 6px 8px; background: #f5f5f5; border-radius: 4px; font-size: 0.8125rem; color: #555; min-height: 28px; white-space: pre-wrap; }
+.edit-mode-badge { font-size: 0.6rem; background: #7E4C64; color: white; padding: 1px 4px; border-radius: 3px; margin-left: 4px; vertical-align: middle; }
+.edit-label-row { display: flex; align-items: center; gap: 8px; }
+.edit-label-row .label-select { flex: 1; padding: 4px 8px; border-radius: 4px; border: 1px solid #7E4C64; font-size: 0.8rem; }
+.label-preview { font-size: 0.7rem; color: white; padding: 2px 8px; border-radius: 4px; flex-shrink: 0; }
+.segment-edit-input { font-size: 0.75rem; padding: 2px 6px; border-radius: 4px; border: 1px solid #7E4C64; background: #fff; color: #333; width: 90px; text-align: center; }
+.label-display { display: flex; align-items: center; height: 32px; }
+.add-segment-row { margin-top: 8px; }
+.btn-outline-primary { border: 1px dashed #7E4C64; color: #7E4C64; background: transparent; transition: all 0.2s; }
+.btn-outline-primary:hover { background: #f8f4f6; }
+.full-width { width: 100%; display: block; }
+
 .navbar-file { color: rgba(255,255,255,0.8); font-size: 0.875rem; margin-left: auto; }
 
 /* Legacy compatibility */
@@ -2248,16 +2721,24 @@ textarea:disabled { background-color: #f5f5f5; color: #999; cursor: not-allowed;
 /* Annotations */
 .annotation-list { max-height: 250px; overflow-y: auto; margin-bottom: 16px; }
 .annotation-item { padding: 10px; border: 1px solid #eee; border-radius: 6px; margin-bottom: 8px; background: #fafafa; transition: all 0.2s; }
+.clickable-card { cursor: pointer; }
 .annotation-item:hover { border-color: #ddd; background: #f5f5f5; }
-.annotation-item.editing { border-color: #7E4C64; background: #f8f4f6; box-shadow: 0 0 0 2px rgba(126,76,100,0.1); }
+.annotation-item.active { border-color: #7E4C64; background: #f8f4f6; box-shadow: 0 0 0 2px rgba(126,76,100,0.1); }
 .annotation-header { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
 .annotation-actions { display: flex; gap: 4px; margin-left: auto; }
 .annotation-segments { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 4px; }
 .annotation-text { color: #666; font-size: 0.75rem; line-height: 1.3; }
 .segment-summary { font-size: 0.75rem; color: #888; }
 .segment-badge { font-size: 0.7rem; color: #666; padding: 2px 6px; border-radius: 4px; background: #e5e7eb; }
-.label-tag { font-size: 0.7rem; color: white; padding: 2px 6px; border-radius: 4px; }
-.label-count { font-size: 0.65rem; opacity: 0.9; margin-left: 2px; }
+.label-tag { font-size: 0.7rem; color: white; padding: 2px 6px; border-radius: 4px; cursor: pointer; }
+.label-tag:hover { opacity: 0.85; }
+.label-select-inline { font-size: 0.7rem; padding: 2px 4px; border-radius: 4px; border: 1px solid #7E4C64; background: #fff; color: #333; max-width: 120px; }
+.segment-input-inline { font-size: 0.7rem; padding: 2px 6px; border-radius: 4px; border: 1px solid #7E4C64; background: #fff; color: #333; width: 80px; text-align: center; }
+.edit-mode-badge { font-size: 0.6rem; background: #7E4C64; color: white; padding: 1px 4px; border-radius: 3px; margin-left: 4px; }
+.edit-label-row { display: flex; align-items: center; gap: 8px; }
+.edit-label-row .label-select { flex: 1; padding: 4px 8px; border-radius: 4px; border: 1px solid #7E4C64; font-size: 0.8rem; }
+.label-preview { font-size: 0.7rem; color: white; padding: 2px 8px; border-radius: 4px; }
+.segment-edit-input { font-size: 0.75rem; padding: 2px 6px; border-radius: 4px; border: 1px solid #7E4C64; background: #fff; color: #333; width: 90px; text-align: center; }
 .selected-labels { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; min-height: 28px; padding: 6px 8px; border: 1px solid #eee; border-radius: 6px; }
 .no-label { color: #aaa; font-size: 0.8125rem; }
 .annotation-form { border-top: 1px solid #eee; padding-top: 16px; }

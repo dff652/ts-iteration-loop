@@ -637,7 +637,14 @@ export function drawLabeler(plottingApp) {
       }
     }
 
-    search(plottingApp.quadtree, xmin, ymin, xmax, ymax);
+    // Check if Vue requested to skip the labeling search (e.g. in Edit Mode)
+    if (plottingApp.preventBrushSearch) {
+      console.log('  - preventing brush search as requested by Vue');
+      plottingApp.preventBrushSearch = false; // Reset flag
+    } else {
+      search(plottingApp.quadtree, xmin, ymin, xmax, ymax);
+    }
+
     updateSelection();
     plottingApp.plot.main_brush.call(plottingApp.main_brush.move, null);
   }
@@ -830,7 +837,7 @@ export function drawLabeler(plottingApp) {
 
   /* return true if label is not null */
   function isSelected(d) {
-    if (d.label == '') {
+    if (!d.label || d.label === '') {
       return false
     }
     return true
@@ -952,6 +959,8 @@ export function drawLabeler(plottingApp) {
       if (!color) {
         color = '#7E4C64';  // Default theme color
       }
+
+
 
       return "fill: " + color + "; stroke: " + color + "; opacity: 0.75;"
     } else {
