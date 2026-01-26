@@ -34,8 +34,19 @@ def get_existing_results(method: str = "chatts") -> List[str]:
         return []
     
     # 获取所有 CSV 文件，按修改时间排序（最新的在前）
-    csv_files = list(results_dir.glob("*.csv"))
-    csv_files.sort(key=lambda x: x.stat().st_mtime, reverse=True)
+    csv_files = []
+    for f in results_dir.glob("*.csv"):
+        if f.exists(): # 只包含存在的文件（过滤掉断裂的符号链接）
+            csv_files.append(f)
+            
+    # 安全排序：如果 stat 失败（例如竞态条件），使用 0 作为时间戳
+    def safe_get_mtime(p):
+        try:
+            return p.stat().st_mtime
+        except OSError:
+            return 0
+            
+    csv_files.sort(key=safe_get_mtime, reverse=True)
     return [str(f) for f in csv_files[:20]]  # 最多返回 20 个
 
 
@@ -55,18 +66,31 @@ def delete_selected_files(method: str, filenames: List[str]) -> tuple:
     for fname in filenames:
         file_path = results_dir / fname.strip()  # Strip whitespace just in case
         print(f"DEBUG: Attempting to delete {file_path}")
-        if file_path.exists():
-            try:
+        
+        # 处理符号链接和普通文件
+        # is_file() 对符号链接如果指向存在文件则为真
+        # is_symlink() 判断是否为符号链接
+        # exists() 如果是断裂符号链接则为假
+        
+        try:
+            # 尝试删除（如果是符号链接则删除链接，如果是文件则删除文件）
+            if file_path.is_symlink() or file_path.exists():
                 file_path.unlink()
                 deleted_count += 1
                 print(f"DEBUG: Deleted {file_path}")
-            except Exception as e:
-                errors.append(f"{fname}: {str(e)}")
-                print(f"DEBUG: Error deleting {file_path}: {e}")
-        else:
-            print(f"DEBUG: File not found {file_path}")
-            # Try verify if it's a encoding issue or partial path
-            errors.append(f"{fname}: File not found")
+            else:
+                # 再次检查是否是“断裂的符号链接”（exists()返回False但链接本身存在）
+                # Path.is_symlink() 即使目标不存在也返回 True
+                if file_path.is_symlink():
+                     file_path.unlink()
+                     deleted_count += 1
+                     print(f"DEBUG: Deleted broken symlink {file_path}")
+                else:
+                     print(f"DEBUG: File not found {file_path}")
+                     # 此时可能用户选了一个已经不存在的文件（缓存问题），不报错，只记录
+        except Exception as e:
+            errors.append(f"{fname}: {str(e)}")
+            print(f"DEBUG: Error deleting {file_path}: {e}")
     
     # 刷新列表
     time.sleep(0.5)  # 等待文件系统同步
@@ -110,8 +134,19 @@ def get_result_filenames(method: str = "chatts") -> List[str]:
     if not results_dir.exists():
         return []
     
-    csv_files = list(results_dir.glob("*.csv"))
-    csv_files.sort(key=lambda x: x.stat().st_mtime, reverse=True)
+    csv_files = []
+    for f in results_dir.glob("*.csv"):
+        # 安全检查：如果是断裂的符号链接，f.exists() 会返回 False
+        if f.exists() or f.is_symlink():
+            csv_files.append(f)
+            
+    def safe_get_mtime(p):
+        try:
+            return p.stat().st_mtime
+        except OSError:
+            return 0
+
+    csv_files.sort(key=safe_get_mtime, reverse=True)
     return [f.name for f in csv_files[:20]]
 
 

@@ -25,14 +25,21 @@ class DataProcessingAdapter:
         
         if self.data_path.exists():
             for f in self.data_path.glob("*.csv"):
-                stat = f.stat()
-                datasets.append({
-                    "name": f.stem,
-                    "filename": f.name,
-                    "path": str(f),
-                    "size_bytes": stat.st_size,
-                    "modified_time": stat.st_mtime
-                })
+                try:
+                    if not f.exists():
+                        continue
+                        
+                    stat = f.stat()
+                    datasets.append({
+                        "name": f.stem,
+                        "filename": f.name,
+                        "path": str(f),
+                        "size_bytes": stat.st_size,
+                        "modified_time": stat.st_mtime
+                    })
+                except OSError:
+                    # Skip files that cause errors (e.g. deleted during iteration)
+                    continue
         
         return datasets
     

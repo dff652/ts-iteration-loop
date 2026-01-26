@@ -310,6 +310,8 @@ def get_data(filename, current_user):
         if val_col is None and len(columns) >= 1:
             val_col = columns[-1]  # Use last column
         
+        print(f"=== [DEBUG] get_data for {filename} ===")
+        print(f"Columns: {columns}")
         print(f"[Column Detection] time={time_col}, value={val_col}, series={series_col}, label={label_col}")
         
         # ============ Parse Time Column ============
@@ -340,11 +342,12 @@ def get_data(filename, current_user):
                 x_arr = np.arange(original_len, dtype=np.float64)
                 y_arr = df[val_col].values.astype(np.float64)
                 
-                # M4 returns indices that preserve local min/max
+                # M4 returns positions that preserve local min/max
                 downsampler = M4Downsampler()
                 indices = downsampler.downsample(x_arr, y_arr, n_out=MAX_ROWS)
                 
-                df = df.iloc[indices].reset_index(drop=True)
+                # Keep original index after filtering
+                df = df.iloc[indices] # Don't reset index here
                 downsampled = True
                 print(f"[M4 Downsampling] {original_len} rows -> {len(df)} rows")
             except Exception as e:
@@ -357,9 +360,9 @@ def get_data(filename, current_user):
         data = []
         series_set = set()
         
-        for idx, row in df.iterrows():
-            # Use row index as x-axis value
-            index_value = idx
+        for original_idx, row in df.iterrows():
+            # Use the original DataFrame index (preserves link to raw file row)
+            index_value = int(original_idx)
             
             # Value
             val_value = float(row[val_col]) if pd.notna(row[val_col]) else 0.0
@@ -378,8 +381,8 @@ def get_data(filename, current_user):
                 label_value = ''
             
             data.append({
-                'idx': index_value,           # Numeric index for X-axis
-                'time': index_value,          # Keep as index for D3 compatibility
+                'idx': index_value,           # Original row index
+                'time': index_value,          # Original row index
                 'val': val_value,
                 'series': series_value,
                 'label': label_value
@@ -458,6 +461,7 @@ def get_current_user(current_user):
 def get_annotations(filename, current_user):
     """Get annotations for a file (user-specific)"""
     try:
+        print(f"=== [DEBUG] get_annotations for {filename} (user: {current_user}) ===")
         with open('/tmp/debug_anno.log', 'a') as debug_f:
              debug_f.write(f"\n[DEBUG] Request for file: {filename}\n")
         
@@ -517,18 +521,36 @@ def get_annotations(filename, current_user):
                              starts = np.where(diff == 1)[0]
                              ends = np.where(diff == -1)[0] - 1
                              
+                             # Merge all segments into a single annotation
+                             label_obj = {
+                                 "id": "chatts_detected",
+                                 "text": "ChatTS",
+                                 "color": "#ec4899",
+                                 "categoryId": "algorithm_results"
+                             }
+                             all_segments = []
                              for i, (start, end) in enumerate(zip(starts, ends)):
+                                 all_segments.append({
+                                     "start": int(start),
+                                     "end": int(end),
+                                     "count": int(end) - int(start) + 1,
+                                     "label": label_obj
+                                 })
+                             
+                             if all_segments:
                                  auto_annotations.append({
-                                     "id": f"auto_{int(time.time())}_{i}",
-                                     "segments": [[int(start), int(end)]],
+                                     "id": f"auto_{int(time.time())}_chatts",
+                                     "label": label_obj,
+                                     "segments": all_segments,
                                      "local_change": {
                                           "trend": "其他",
-                                          "label": "chatts_detected",
                                           "confidence": "high",
                                           "desc": "ChatTS Auto-Detection"
                                      }
                                  })
-                             print(f"Auto-generated {len(auto_annotations)} annotations from global_mask")
+                             print(f"[DEBUG] Auto-generated 1 annotation with {len(all_segments)} segments from global_mask")
+                             if all_segments:
+                                print(f"[DEBUG] First segment sample: {all_segments[0]}")
                      except Exception as e:
                          print(f"Error reading CSV for mask: {e}")
             except Exception as e:
