@@ -21,7 +21,22 @@ from typing import TYPE_CHECKING, Optional
 
 import numpy as np
 import torch
-from transformers.utils import is_jieba_available, is_nltk_available
+import torch
+# from transformers.utils import is_jieba_available, is_nltk_available
+
+def is_jieba_available():
+    try:
+        import jieba
+        return True
+    except ImportError:
+        return False
+
+def is_nltk_available():
+    try:
+        import nltk
+        return True
+    except ImportError:
+        return False
 
 from ...extras.constants import IGNORE_INDEX
 from ...extras.misc import numpify

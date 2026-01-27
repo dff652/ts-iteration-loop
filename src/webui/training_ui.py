@@ -8,11 +8,14 @@ from typing import List, Dict, Optional
 import json
 import time
 import pandas as pd
+import tempfile
+import os
 
 from configs.settings import settings
 from src.adapters.chatts_training import ChatTSTrainingAdapter
 from src.adapters.data_processing import DataProcessingAdapter
 from src.adapters.check_outlier import CheckOutlierAdapter
+from src.utils.iotdb_config import load_iotdb_config
 
 
 # 初始化适配器
@@ -23,13 +26,77 @@ inference_adapter = CheckOutlierAdapter()
 # 为了兼容性保留旧变量名
 adapter = training_adapter
 
-# 结果文件目录
-RESULTS_BASE_PATH = Path("/home/share/results/data")
+# 结果文件目录（使用标准化路径）
+RESULTS_BASE_PATH = Path(settings.DATA_INFERENCE_DIR)
+
+# 统一数据源：使用 data_adapter 的实际路径
+# 注意：这里不再硬编码路径，而是使用与数据获取页面相同的路径
+
+# 文件名到完整路径的映射 (用于在UI显示文件名，内部使用完整路径)
+_unified_file_mapping: Dict[str, str] = {}
+
+
+def get_unified_file_list() -> List[str]:
+    """
+    获取统一的文件列表（与数据获取页面相同数据源）
+    返回完整路径列表
+    """
+    global _unified_file_mapping
+    all_files = []
+    _unified_file_mapping.clear()
+    
+    # 使用与数据获取页面相同的数据路径
+    data_path = data_adapter.data_path
+    if data_path.exists():
+        for f in data_path.glob("*.csv"):
+            if f.exists():
+                # 过滤掉推理结果文件 (global_chatts_ 开头, chatts_ 开头, timer_ 开头, 以及包含 _trend_resid 的文件)
+                if f.name.startswith(("global_chatts_", "chatts_", "_chatts_", "timer_")):
+                    continue
+                if "_trend_resid" in f.name:
+                    continue
+                full_path = str(f)
+                all_files.append(full_path)
+                _unified_file_mapping[f.name] = full_path
+    
+    # 按修改时间排序（最新在前）
+    def safe_mtime(p):
+        try:
+            return Path(p).stat().st_mtime
+        except OSError:
+            return 0
+    
+    all_files.sort(key=safe_mtime, reverse=True)
+    return all_files[:50]  # 最多返回 50 个
+
+
+def get_unified_file_names() -> List[str]:
+    """获取统一文件列表的文件名（不含路径）"""
+    # 确保映射已更新
+    get_unified_file_list()
+    return list(_unified_file_mapping.keys())
+
+
+def resolve_filenames_to_paths(filenames: List[str]) -> List[str]:
+    """将文件名列表转换为完整路径列表"""
+    global _unified_file_mapping
+    if not _unified_file_mapping:
+        get_unified_file_list()
+    
+    paths = []
+    for name in filenames:
+        if name in _unified_file_mapping:
+            paths.append(_unified_file_mapping[name])
+        elif Path(name).exists():
+            # 如果已经是完整路径
+            paths.append(name)
+    return paths
+
 
 
 def get_existing_results(method: str = "chatts") -> List[str]:
     """获取已有的结果文件列表"""
-    results_dir = RESULTS_BASE_PATH / "global" / method
+    results_dir = RESULTS_BASE_PATH / method
     if not results_dir.exists():
         return []
     
@@ -59,7 +126,7 @@ def delete_selected_files(method: str, filenames: List[str]) -> tuple:
             "⚠️ 请先选择要删除的文件"
         )
     
-    results_dir = RESULTS_BASE_PATH / "global" / method
+    results_dir = RESULTS_BASE_PATH / method
     deleted_count = 0
     errors = []
     
@@ -78,6 +145,29 @@ def delete_selected_files(method: str, filenames: List[str]) -> tuple:
                 file_path.unlink()
                 deleted_count += 1
                 print(f"DEBUG: Deleted {file_path}")
+                
+                # 同步删除关联的符号链接 (在 downsampled 和用户目录中)
+                try:
+                    # 1. 删除 downsampled 目录下的同名链接
+                    symlink_path = Path(settings.DATA_DOWNSAMPLED_DIR) / fname.strip()
+                    if symlink_path.is_symlink():
+                        symlink_path.unlink()
+                        print(f"DEBUG: Deleted symlink {symlink_path}")
+                        
+                    # 2. 删除 Annotator 用户目录下的同名链接
+                    annotator_users_file = Path(settings.DATA_PROCESSING_PATH).parent / "annotator" / "backend" / "users.json"
+                    if annotator_users_file.exists():
+                        import json
+                        with open(annotator_users_file, 'r') as f:
+                            users = json.load(f)
+                        for u_info in users.values():
+                            if 'data_path' in u_info:
+                                u_link = Path(u_info['data_path']) / fname.strip()
+                                if u_link.is_symlink():
+                                    u_link.unlink()
+                                    print(f"DEBUG: Deleted user symlink {u_link}")
+                except Exception as e_link:
+                    print(f"DEBUG: Error cleaning up symlinks: {e_link}")
             else:
                 # 再次检查是否是“断裂的符号链接”（exists()返回False但链接本身存在）
                 # Path.is_symlink() 即使目标不存在也返回 True
@@ -112,7 +202,7 @@ def prepare_download_files(method: str, filenames: List[str]) -> tuple:
     if not filenames:
         return None, "⚠️ 请先选择要下载的文件"
     
-    results_dir = RESULTS_BASE_PATH / "global" / method
+    results_dir = RESULTS_BASE_PATH / method
     paths = []
     for fname in filenames:
         p = results_dir / fname.strip()
@@ -130,7 +220,7 @@ def prepare_download_files(method: str, filenames: List[str]) -> tuple:
 
 def get_result_filenames(method: str = "chatts") -> List[str]:
     """获取结果文件名列表（用于下拉框）"""
-    results_dir = RESULTS_BASE_PATH / "global" / method
+    results_dir = RESULTS_BASE_PATH / method  # 新目录结构：/home/share/data/inference/{method}
     if not results_dir.exists():
         return []
     
@@ -475,12 +565,8 @@ def start_inference_task(
         yield "❌ 请选择输入文件", "❌ 请选择输入文件"
         return
     
-    # 将选中的文件名转换为完整路径
-    file_paths = []
-    for f in files:
-        full_path = data_adapter.data_path / f
-        if full_path.exists():
-            file_paths.append(str(full_path))
+    # 将选中的文件名转换为完整路径（使用统一数据源映射）
+    file_paths = resolve_filenames_to_paths(files)
     
     if not file_paths:
         yield "❌ 未找到有效的输入文件", "❌ 未找到有效的输入文件"
@@ -599,20 +685,49 @@ def start_inference_task(
         
         # 自动将结果文件链接到用户数据目录，以便标注工具默认可见
         try:
-            user_data_path = data_adapter.data_path
+            # 目标目录列表：data_adapter 目录 + Annotator 用户目录
+            target_dirs = [data_adapter.data_path]
+            
+            # 尝试读取 Annotator 用户配置
+            try:
+                annotator_users_file = Path(settings.DATA_PROCESSING_PATH).parent / "annotator" / "backend" / "users.json"
+                if annotator_users_file.exists():
+                    import json
+                    with open(annotator_users_file, 'r') as f:
+                        users = json.load(f)
+                    # 遍历所有用户，将结果链接到每个用户的 data_path
+                    for username, user_info in users.items():
+                        if 'data_path' in user_info:
+                            user_dir = Path(user_info['data_path'])
+                            if user_dir.exists() and user_dir not in target_dirs:
+                                target_dirs.append(user_dir)
+            except Exception as e:
+                print(f"[Auto-Link] Warning: Could not read annotator users.json: {e}")
+            
             for res_file in generated_files:
                 res_path = Path(res_file)
                 # 如果是相对路径或文件名，尝试在结果目录查找
                 if not res_path.exists():
-                    res_path = RESULTS_BASE_PATH / "global" / algorithm / res_file
+                    res_path = RESULTS_BASE_PATH / algorithm / res_file
                 
                 if res_path.exists():
-                    target_link = user_data_path / res_path.name
-                    # 如果链接不存在或已断裂，重新创建
-                    if target_link.is_symlink() or target_link.exists():
-                        target_link.unlink()
-                    target_link.symlink_to(res_path)
-                    print(f"[Auto-Link] Created symlink for {res_path.name} in {user_data_path}")
+                    for target_dir in target_dirs:
+                        # 避免自引用链接 (当目标目录就是结果文件所在目录时)
+                        try:
+                            if target_dir.resolve() == res_path.parent.resolve():
+                                continue
+                        except Exception:
+                            pass
+
+                        target_link = target_dir / res_path.name
+                        try:
+                            # 如果链接不存在或已断裂，重新创建
+                            if target_link.is_symlink() or target_link.exists():
+                                target_link.unlink()
+                            target_link.symlink_to(res_path)
+                            print(f"[Auto-Link] Created symlink for {res_path.name} in {target_dir}")
+                        except Exception as link_err:
+                            print(f"[Auto-Link] Failed to link to {target_dir}: {link_err}")
         except Exception as e:
             print(f"[Auto-Link Error] Failed to link results: {e}")
         
@@ -710,38 +825,55 @@ def start_training(
     batch_size: int,
     lora_rank: int,
     lora_alpha: int,
-    output_name: str
+    output_name: str,
+    model_path: Optional[str] = None,
+    dataset_name: Optional[str] = None
 ) -> str:
-    """启动训练"""
+    """启动训练 (Quick Start)"""
     if not config_name:
-        return "❌ 请选择训练配置"
+        return "❌ 请选择训练配置 (模板)"
     
     if not output_name:
         return "❌ 请输入输出目录名称"
     
-    # 调用适配器启动训练
+    # 生成任务ID
     import uuid
-    task_id = str(uuid.uuid4())[:8]
+    task_id = f"job-{str(uuid.uuid4())[:8]}"
     
     try:
-        # 这里应该调用 adapter.run_training，但由于是后台任务，先返回提示
-        return f"""✅ 训练任务已提交
-
+        # 调用后端适配器启动训练
+        result = training_adapter.run_training(
+            task_id=task_id,
+            config_name=config_name,
+            version_tag=output_name,
+            # Quick Start Overrides
+            override_model_path=model_path,
+            override_dataset=dataset_name,
+            override_learning_rate=learning_rate,
+            override_epochs=num_epochs,
+            override_batch_size=batch_size,
+            override_lora_rank=lora_rank,
+            override_lora_alpha=lora_alpha
+        )
+        
+        if result.get("success"):
+            return f"""✅ 训练任务已成功启动!
+            
 **任务 ID**: {task_id}
-**配置**: {config_name}
-**输出目录**: {output_name}
+**输出目录**: `{result.get('output_dir')}`
+**基础模型**: `{model_path or 'Default (from script)'}`
+**数据集**: `{dataset_name or 'Default (from script)'}`
 
-**参数**:
-- 学习率: {learning_rate}
-- 训练轮数: {num_epochs}
-- 批次大小: {batch_size}
-- LoRA Rank: {lora_rank}
-- LoRA Alpha: {lora_alpha}
-
-请通过 API `/api/v1/training/status/{task_id}` 查询进度。
+正在后台运行中... 请留意日志输出或稍后刷新模型列表。
 """
+        else:
+            return f"""❌ 启动失败
+            
+**错误信息**: {result.get('error')}
+"""
+            
     except Exception as e:
-        return f"❌ 启动失败: {str(e)}"
+        return f"❌ 系统错误: {str(e)}"
 
 
 def create_training_ui() -> gr.Blocks:
@@ -783,12 +915,14 @@ def create_training_ui() -> gr.Blocks:
                     gr.Markdown("### 数据采集配置")
                     
                     with gr.Accordion("IoTDB 连接配置", open=False):
+                        # 从共享配置加载默认值
+                        _iotdb_cfg = load_iotdb_config()
                         with gr.Row():
-                            host_input = gr.Textbox(label="Host", value="192.168.199.185")
-                            port_input = gr.Textbox(label="Port", value="6667")
+                            host_input = gr.Textbox(label="Host", value=_iotdb_cfg.get("host", "192.168.199.185"))
+                            port_input = gr.Textbox(label="Port", value=_iotdb_cfg.get("port", "6667"))
                         with gr.Row():
-                            user_input = gr.Textbox(label="User", value="root")
-                            pwd_input = gr.Textbox(label="Password", value="root", type="password")
+                            user_input = gr.Textbox(label="User", value=_iotdb_cfg.get("user", "root"))
+                            pwd_input = gr.Textbox(label="Password", value=_iotdb_cfg.get("password", "root"), type="password")
 
                     gr.Markdown("### 查询参数")
                     source_input = gr.Textbox(
@@ -865,7 +999,7 @@ def create_training_ui() -> gr.Blocks:
             )
         
         # ==================== 推理监控 Tab ====================
-        with gr.Tab("🔍 推理监控"):
+        with gr.Tab("🔍 推理监控") as inference_tab:
             with gr.Row():
                 with gr.Column(scale=1):
                     gr.Markdown("### 新建推理任务")
@@ -892,7 +1026,7 @@ def create_training_ui() -> gr.Blocks:
                         
                     files_select = gr.CheckboxGroup(
                         label="选择输入文件",
-                        choices=get_dataset_names()
+                        choices=get_unified_file_names()
                     )
                     
                     with gr.Accordion("⚙️ 高级配置 (可选)", open=False):
@@ -1058,7 +1192,7 @@ def create_training_ui() -> gr.Blocks:
                 outputs=task_table
             )
             refresh_tasks_btn.click(
-                fn=lambda: gr.CheckboxGroup(choices=get_dataset_names()),
+                fn=lambda: gr.CheckboxGroup(choices=get_unified_file_names()),
                 outputs=files_select
             )
             refresh_tasks_btn.click(
@@ -1066,6 +1200,15 @@ def create_training_ui() -> gr.Blocks:
                 outputs=lora_adapter_select
             )
             
+            # Tab 切换时自动刷新文件列表
+            inference_tab.select(
+                fn=lambda: gr.CheckboxGroup(choices=get_unified_file_names()),
+                outputs=files_select
+            )
+            inference_tab.select(
+                fn=lambda: gr.Dropdown(choices=get_inference_models()),
+                outputs=lora_adapter_select
+            )
             # 清空历史记录
             clear_tasks_btn.click(
                 fn=clear_task_history,
@@ -1110,62 +1253,405 @@ def create_training_ui() -> gr.Blocks:
         
         # ==================== 标注工具 Tab ====================
         with gr.Tab("🏷️ 标注工具"):
-            gr.Markdown("### 时序数据标注")
-            gr.Markdown(f"""
-> [!NOTE]
-> 标注工具运行在独立服务上，点击下方链接跳转。
-
-**标注工具地址**: [http://192.168.199.126:5000](http://192.168.199.126:5000)
-
----
-
-### 使用说明
-
-1. **打开标注工具**: 点击上方链接进入标注界面
-2. **选择数据文件**: 在标注工具中选择要标注的 CSV 文件
-3. **进行标注**: 使用框选工具标记异常区间
-4. **保存标注**: 完成后保存标注结果
-
-### 标注与迭代流程
-
-```
-📁 数据获取 → 🏷️ 人工标注 → 🎯 微调训练 → 🔍 推理检测 → 🏷️ 审核修正 → 🎯 再次微调 → ...
-```
-
-### 快速操作
-""")
             with gr.Row():
-                open_annotator_btn = gr.Button("🔗 打开标注工具 (新标签页)", variant="primary", size="lg")
-                gr.Markdown("""
-<script>
-function openAnnotator() {
-    window.open('http://192.168.199.126:5000', '_blank');
-}
-</script>
-""", visible=False)
+                with gr.Column(scale=3):
+                    gr.Markdown("### 🔗 快速访问")
+                    # 使用 HTML 按钮打开链接，更直观
+                    gr.HTML("""
+                    <div style="padding: 10px; background-color: #f0f9ff; border-radius: 8px; border: 1px solid #bae6fd;">
+                        <p style="margin-bottom: 10px; font-weight: bold; color: #0369a1;">
+                            标注工具运行在独立服务端口 (5000)
+                        </p>
+                        <a href="http://192.168.199.126:5000" target="_blank" style="
+                            display: inline-block;
+                            padding: 10px 20px;
+                            background-color: #0284c7;
+                            color: white;
+                            text-decoration: none;
+                            border-radius: 6px;
+                            font-weight: bold;
+                        ">
+                            🚀 打开标注工具 (Open Annotator)
+                        </a>
+                    </div>
+                    """)
+                
+                with gr.Column(scale=2):
+                    gr.Markdown("### 📊 状态概览")
+                    # 动态获取标注文件数
+                    def get_annotation_stats():
+                        # 使用 Settings
+                        ann_dir = Path(settings.ANNOTATIONS_ROOT) / "douff"
+                        if not ann_dir.exists():
+                            return "暂无标注目录"
+                        count = len(list(ann_dir.glob("*.json")))
+                        return f"已标注文件数: {count}"
+
+                    annotation_stats = gr.Textbox(
+                        value=get_annotation_stats(),
+                        label="当前标注进度",
+                        interactive=False
+                    )
+                    refresh_ann_btn = gr.Button("🔄 刷新状态", size="sm")
+                    refresh_ann_btn.click(fn=get_annotation_stats, outputs=annotation_stats)
+
+            gr.Markdown("---")
+            gr.Markdown("### 🔄 数据转换 (Annotator -> ChatTS)")
             
-            gr.Markdown("### 当前标注状态")
+            with gr.Row():
+                with gr.Column(scale=1):
+                    # 配置区域
+                    with gr.Accordion("⚙️ 路径与参数配置 (Settings)", open=False):
+                        conf_input_dir = gr.Textbox(
+                            label="标注文件来源 (Annotation Dir)", 
+                            value=str(Path(settings.ANNOTATIONS_ROOT) / "douff")
+                        )
+                        conf_image_dir = gr.Textbox(
+                            label="图片文件来源 (Image Dir)", 
+                            value=settings.DATA_DOWNSAMPLED_DIR
+                        )
+                        conf_output_path = gr.Textbox(
+                            label="转换输出路径 (Output Path)", 
+                            value=str(Path(settings.DATA_TRAINING_DIR) / "converted_data.json")
+                        )
+
+                    # 获取标注文件列表
+                    def get_file_choices(ann_dir):
+                        path_obj = Path(ann_dir)
+                        if not path_obj.exists():
+                            return []
+                        try:
+                            files = list(path_obj.glob("*.json"))
+                            # 按修改时间排序
+                            files.sort(key=lambda x: x.stat().st_mtime, reverse=True)
+                            return [f.name for f in files]
+                        except Exception:
+                            return []
+
+                    # 初始加载
+                    # 初始加载
+                    default_ann_dir = str(Path(settings.ANNOTATIONS_ROOT) / "douff")
+                    initial_choices = get_file_choices(default_ann_dir)
+                    initial_val = initial_choices[0] if initial_choices else None
+
+                    ann_file_dropdown = gr.Dropdown(
+                        label="选择要预览/转换的文件",
+                        choices=initial_choices,
+                        value=initial_val,
+                        multiselect=False,
+                        interactive=True,
+                        allow_custom_value=False
+                    )
+                    
+                    def refresh_files(ann_dir):
+                        choices = get_file_choices(ann_dir)
+                        val = choices[0] if choices else None
+                        return gr.Dropdown(choices=choices, value=val)
+                        
+                    refresh_files_btn = gr.Button("🔄 刷新文件列表", size="sm")
+                    
+                    with gr.Row():
+                        convert_curr_btn = gr.Button("🚀 仅转换选中", variant="primary")
+                        convert_all_btn = gr.Button("📦 批量转换所有", variant="secondary")
+                    
+                with gr.Column(scale=2):
+                    convert_status = gr.Textbox(label="操作日志 (Execution Log)", lines=10, interactive=False)
+            
             with gr.Row():
                 with gr.Column():
-                    gr.Markdown("**可标注文件数量**")
-                    annotatable_count = gr.Textbox(
-                        value=f"{len(get_dataset_names())} 个文件",
-                        interactive=False,
-                        show_label=False
-                    )
+                    gr.Markdown("#### 📝 转换前 (Annotator JSON)")
+                    before_json = gr.JSON(label="Source Data", height=400)
                 with gr.Column():
-                    gr.Markdown("**标注工具状态**")
-                    annotator_status = gr.Textbox(
-                        value="请访问标注工具查看",
-                        interactive=False,
-                        show_label=False
+                    gr.Markdown("#### 🎯 转换后 (ChatTS Training Data)")
+                    after_json = gr.JSON(label="Converted Data", height=400)
+                
+            def preview_source_file(selected_file, input_dir_val, image_dir_val):
+                """选择文件时立即预览，并执行真实转换（使用临时文件）"""
+                if not selected_file or not input_dir_val:
+                    return None, None
+                 
+                # 1. 读取源文件
+                src_p = Path(input_dir_val) / selected_file
+                source_content = None
+                
+                try:
+                    if src_p.exists():
+                        with open(src_p, 'r', encoding='utf-8') as f:
+                            source_content = json.load(f)
+                except Exception as e:
+                    source_content = {"error": str(e)}
+                
+                # 2. 执行转换预览 (真实调用适配器)
+                converted_content = None
+                try:
+                    # 使用临时文件作为输出
+                    with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp:
+                        tmp_path = tmp.name
+                    
+                    # 默认 image_dir 如果为空
+                    img_d = image_dir_val if image_dir_val else settings.DATA_DOWNSAMPLED_DIR
+                    
+                    res = data_adapter.convert_annotations(
+                        input_dir=input_dir_val,
+                        output_path=tmp_path,
+                        image_dir=img_d,
+                        filename=selected_file
                     )
-            
-            # JavaScript 跳转 (Gradio 限制，使用 HTML)
-            open_annotator_btn.click(
-                fn=lambda: "✅ 请在新标签页中查看标注工具 (http://192.168.199.126:5000)",
-                outputs=annotator_status
+                    
+                    if res["success"]:
+                        try:
+                            with open(tmp_path, 'r', encoding='utf-8') as f:
+                                converted_content = json.load(f)
+                        except Exception as read_err:
+                            converted_content = {"error": f"Read converted file failed: {read_err}"}
+                    else:
+                        converted_content = {
+                            "error": "Conversion failed", 
+                            "stderr": res.get("stderr", ""),
+                            "stdout": res.get("stdout", "")
+                        }
+                    
+                    # 清理临时文件
+                    try:
+                        Path(tmp_path).unlink(missing_ok=True)
+                    except:
+                        pass
+
+                except Exception as e:
+                    converted_content = {"error": f"Preview failed: {str(e)}"}
+                
+                return source_content, converted_content
+
+            def convert_core(selected_file, input_dir, image_dir, output_path, mode="single"):
+                """核心转换逻辑"""
+                # 创建输出目录
+                try:
+                    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+                except Exception as e:
+                    return f"❌ 创建输出目录失败: {str(e)}", {}, {}
+                
+                target_filename = selected_file if mode == "single" else None
+                
+                # 执行转换
+                result = data_adapter.convert_annotations(
+                    input_dir, 
+                    output_path, 
+                    image_dir=image_dir,
+                    filename=target_filename
+                )
+                
+                status_msg = ""
+                source_sample = {}
+                target_sample = {}
+                
+                if result.get("success"):
+                    log_output = result.get("stdout", "")
+                    prefix = "单文件" if mode == "single" else "批量"
+                    status_msg = f"✅ {prefix}转换成功! \n输出: {result.get('output_path')}\n\n执行日志:\n{log_output}"
+                    
+                    # 尝试读取源文件进行预览
+                    try:
+                         # 如果是批量转换但依然选了文件，或者单文件模式
+                         preview_file = selected_file
+                         if not preview_file and Path(input_dir).exists():
+                             # 如果都没选，找第一个
+                             all_jsons = list(Path(input_dir).glob("*.json"))
+                             if all_jsons:
+                                 preview_file = all_jsons[0].name
+                         
+                         if preview_file:
+                             src_p = Path(input_dir) / preview_file
+                             if src_p.exists():
+                                 with open(src_p, 'r', encoding='utf-8') as f:
+                                    source_sample = json.load(f)
+                    except Exception as e:
+                        source_sample = {"error": f"Read source failed: {str(e)}"}
+
+                    # 读取转换后的结果
+                    try:
+                        with open(output_path, 'r', encoding='utf-8') as f:
+                            converted_data = json.load(f)
+                            if converted_data and isinstance(converted_data, list):
+                                if preview_file:
+                                    # 尝试匹配 image 路径
+                                    core_name = preview_file.replace("annotations_数据集", "").replace(".json", "")
+                                    # 简单去后缀
+                                    core_name = core_name.replace(".csv", "")
+                                    
+                                    matched = False
+                                    for item in converted_data:
+                                        if core_name in item.get("image", ""):
+                                            target_sample = item
+                                            matched = True
+                                            break
+                                    if not matched:
+                                        target_sample = converted_data[-1] if mode == "single" else converted_data[0]
+                                        status_msg = f"(注意：预览未精确匹配，显示{'最后一条' if mode=='single' else '第一条'})\n" + status_msg
+                                else:
+                                    target_sample = converted_data[0]
+                    except Exception as e:
+                        target_sample = {"error": f"Read output failed: {str(e)}"}
+                        
+                else:
+                    status_msg = f"❌ 转换失败: {result.get('error')}\n日志:\n{result.get('stderr', '')}"
+                
+                return status_msg, source_sample, target_sample
+
+            # 绑定事件
+            convert_curr_btn.click(
+                fn=lambda f, i, m, o: convert_core(f, i, m, o, mode="single"),
+                inputs=[ann_file_dropdown, conf_input_dir, conf_image_dir, conf_output_path],
+                outputs=[convert_status, before_json, after_json]
             )
+            
+            convert_all_btn.click(
+                fn=lambda f, i, m, o: convert_core(f, i, m, o, mode="batch"),
+                inputs=[ann_file_dropdown, conf_input_dir, conf_image_dir, conf_output_path],
+                outputs=[convert_status, before_json, after_json]
+            )
+            
+            refresh_files_btn.click(
+                fn=refresh_files,
+                inputs=[conf_input_dir],
+                outputs=ann_file_dropdown
+            )
+            
+            # 选择文件立即预览
+            ann_file_dropdown.change(
+                fn=preview_source_file,
+                inputs=[ann_file_dropdown, conf_input_dir, conf_image_dir],
+                outputs=[before_json, after_json]
+            )
+            
+            # 初始化预览
+            if initial_val:
+                init_src, init_ex = preview_source_file(initial_val, default_ann_dir, settings.DATA_DOWNSAMPLED_DIR)
+                before_json.value = init_src
+                after_json.value = init_ex
+
+        # ==================== 数据资产管理 Tab (New) ====================
+        with gr.Tab("📦 数据资产管理"):
+            with gr.Tabs():
+                # 1. 标注数据管理
+                with gr.Tab("标注数据 (Annotations)"):
+                    gr.Markdown("### 📝 标注文件管理")
+                    with gr.Row():
+                        with gr.Column(scale=1):
+                            ann_mgr_dir = gr.Textbox(label="标注目录", value=str(Path(settings.ANNOTATIONS_ROOT) / "douff"), interactive=False)
+                            ann_mgr_list = gr.Dropdown(label="选择文件", interactive=True)
+                            refresh_ann_mgr = gr.Button("🔄 刷新列表")
+                            delete_ann_btn = gr.Button("🗑️ 删除选中文件", variant="stop")
+                            ann_op_status = gr.Textbox(label="操作状态", interactive=False)
+                        
+                        with gr.Column(scale=2):
+                            ann_mgr_view = gr.JSON(label="文件内容预览", height=600)
+
+                    # Logic
+                    def list_ann_files(path_str):
+                        p = Path(path_str)
+                        if not p.exists(): return []
+                        files = list(p.glob("*.json"))
+                        files.sort(key=lambda x: x.stat().st_mtime, reverse=True)
+                        return [f.name for f in files]
+
+                    def load_ann_content(path_str, filename):
+                        if not filename: return None
+                        try:
+                            with open(Path(path_str) / filename, 'r') as f:
+                                return json.load(f)
+                        except Exception as e:
+                            return {"error": str(e)}
+
+                    def delete_ann_file(path_str, filename):
+                        if not filename: return "未选择文件", gr.update()
+                        try:
+                            p = Path(path_str) / filename
+                            p.unlink()
+                            # 刷新列表
+                            new_list = list_ann_files(path_str)
+                            return f"已删除: {filename}", gr.update(choices=new_list, value=None)
+                        except Exception as e:
+                            return f"删除失败: {e}", gr.update()
+
+                    # Bindings
+                    ann_mgr_dir.change(fn=lambda p: gr.update(choices=list_ann_files(p)), inputs=ann_mgr_dir, outputs=ann_mgr_list)
+                    refresh_ann_mgr.click(fn=lambda p: gr.update(choices=list_ann_files(p)), inputs=ann_mgr_dir, outputs=ann_mgr_list)
+                    ann_mgr_list.change(fn=load_ann_content, inputs=[ann_mgr_dir, ann_mgr_list], outputs=ann_mgr_view)
+                    delete_ann_btn.click(fn=delete_ann_file, inputs=[ann_mgr_dir, ann_mgr_list], outputs=[ann_op_status, ann_mgr_list])
+
+                # 2. 训练数据管理
+                with gr.Tab("训练数据 (Training Data)"):
+                    gr.Markdown("### 🎯 微调数据管理 (Converted JSONL)")
+                    with gr.Row():
+                        with gr.Column(scale=1):
+                            train_mgr_dir = gr.Textbox(label="数据目录", value=settings.DATA_TRAINING_DIR, interactive=False)
+                            train_mgr_list = gr.Dropdown(label="选择文件", interactive=True)
+                            refresh_train_mgr = gr.Button("🔄 刷新列表")
+                            delete_train_btn = gr.Button("🗑️ 删除选中文件", variant="stop")
+                            train_op_status = gr.Textbox(label="操作状态", interactive=False)
+                        
+                        with gr.Column(scale=2):
+                            train_mgr_view = gr.JSON(label="文件内容预览 (Head 50 lines / JSON)", height=600)
+
+                    # Logic
+                    def list_train_files(path_str):
+                        p = Path(path_str)
+                        if not p.exists(): return []
+                        files = list(p.glob("*.json")) + list(p.glob("*.jsonl"))
+                        files.sort(key=lambda x: x.stat().st_mtime, reverse=True)
+                        return [f.name for f in files]
+
+                    def load_train_content(path_str, filename):
+                        if not filename: return None
+                        try:
+                            p = Path(path_str) / filename
+                            
+                            # Strategy 1: Small file (<50MB) -> Try full JSON load
+                            # This handles standard JSON lists (pretty printed or minified)
+                            if p.stat().st_size < 50 * 1024 * 1024: 
+                                try:
+                                    with open(p, 'r') as f:
+                                        data = json.load(f)
+                                    if isinstance(data, list):
+                                        return data[:50]  # Preview first 50 items
+                                    return data
+                                except:
+                                    pass # Fallback to Strategy 2
+                            
+                            # Strategy 2: JSONL or Large File -> Line-by-line
+                            records = []
+                            with open(p, 'r') as f:
+                                for _ in range(50):
+                                    line = f.readline()
+                                    if not line: break
+                                    line = line.strip()
+                                    if not line: continue
+                                    try:
+                                        records.append(json.loads(line))
+                                    except:
+                                        # If it looks like start/end of array, skip or show raw
+                                        if line in ['[', ']', '],']: continue
+                                        records.append({"raw_text": line})
+                            return records
+                        except Exception as e:
+                            return {"error": str(e)}
+
+                    def delete_train_file(path_str, filename):
+                        if not filename: return "未选择文件", gr.update()
+                        try:
+                            p = Path(path_str) / filename
+                            p.unlink()
+                            new_list = list_train_files(path_str)
+                            return f"已删除: {filename}", gr.update(choices=new_list, value=None)
+                        except Exception as e:
+                            return f"删除失败: {e}", gr.update()
+
+                    # Bindings
+                    # Init load
+                    train_mgr_dir.change(fn=lambda p: gr.update(choices=list_train_files(p)), inputs=train_mgr_dir, outputs=train_mgr_list)
+                    refresh_train_mgr.click(fn=lambda p: gr.update(choices=list_train_files(p)), inputs=train_mgr_dir, outputs=train_mgr_list)
+                    train_mgr_list.change(fn=load_train_content, inputs=[train_mgr_dir, train_mgr_list], outputs=train_mgr_view)
+                    delete_train_btn.click(fn=delete_train_file, inputs=[train_mgr_dir, train_mgr_list], outputs=[train_op_status, train_mgr_list])
         
         # ==================== 微调训练 Tab (原有) ====================
         with gr.Tab("🎯 开始训练"):
@@ -1173,10 +1659,28 @@ function openAnnotator() {
                 with gr.Column(scale=2):
                     # 基础配置
                     gr.Markdown("### 基础配置")
+                    
+                    # New Dropdowns for Quick Start
+                    with gr.Row():
+                        model_path_dropdown = gr.Dropdown(
+                            label="基础模型 (Base Model)",
+                            choices=adapter.get_base_models(),
+                            value=adapter.get_base_models()[0] if adapter.get_base_models() else None,
+                            interactive=True,
+                            allow_custom_value=True
+                        )
+                        dataset_dropdown = gr.Dropdown(
+                            label="微调数据集 (Dataset)",
+                            choices=adapter.get_dataset_list(),
+                            value=adapter.get_dataset_list()[0] if adapter.get_dataset_list() else None,
+                            interactive=True
+                        )
+
                     config_dropdown = gr.Dropdown(
-                        label="训练配置",
+                        label="训练模板 (Template Script)",
                         choices=get_training_configs(),
-                        interactive=True
+                        interactive=True,
+                        info="选择一个脚本作为参数模板 (如 DeepSpeed 配置)"
                     )
                     output_name = gr.Textbox(
                         label="输出目录名称",
@@ -1219,28 +1723,139 @@ function openAnnotator() {
                             )
                     
                     # 控制按钮
-                    with gr.Row():
-                        start_btn = gr.Button("🚀 开始训练", variant="primary")
-                        refresh_btn = gr.Button("🔄 刷新配置")
+                    # --- Backend Functions ---
+                    def start_training_wrap(
+                        config_name, lr, epochs, batch_size, rank, alpha, output_name,
+                        model_path, dataset_name
+                    ):
+                        if not config_name:
+                            return "❌ 请选择训练模板", ""
+                            
+                        task_id = f"qs_{int(time.time())}"
+                        
+                        # Call backend
+                        overrides = {
+                            "override_learning_rate": lr,
+                            "override_epochs": epochs,
+                            "override_batch_size": batch_size,
+                            "override_lora_rank": rank,
+                            "override_lora_alpha": alpha,
+                            "override_model_path": model_path,
+                            "override_dataset": dataset_name
+                        }
+                        
+                        res = adapter.run_training(task_id, config_name, version_tag=output_name, **overrides)
+                        
+                        if res.get("success"):
+                            return f"✅ 训练任务已成功启动!\n任务ID: {task_id}\n输出目录: {res.get('output_dir')}\n\n正在后台运行中... 请留意下方实时日志。", task_id
+                        else:
+                            return f"❌ 启动错误: {res.get('error')}", ""
+
+                    def stream_logs(task_id, current_log, offset):
+                        if not task_id:
+                            return current_log, offset
+                        
+                        # Read increment
+                        res = adapter.get_training_log(task_id, offset)
+                        new_content = res.get("log", "")
+                        new_offset = res.get("offset", offset)
+                        
+                        if new_content:
+                            current_log = (current_log or "") + new_content
+                            
+                        return current_log, new_offset
+
+                    def stop_training_wrap(task_id):
+                        if not task_id:
+                            return "无运行中的任务"
+                        res = adapter.stop_training(task_id)
+                        if res.get("success"):
+                            return "🛑 任务已手动停止"
+                        else:
+                            return f"停止失败: {res.get('error')}"
+
+                    # --- Layout & Events ---
+                    with gr.Column():
+                        with gr.Row():
+                            start_btn = gr.Button("🚀 (Quick Start) 开始训练", variant="primary", scale=2)
+                            stop_btn = gr.Button("🛑 停止训练", variant="stop", scale=1)
+                            refresh_btn = gr.Button("🔄 刷新配置", scale=1)
+                        
+                        # Hidden state for Task ID and Log Offset
+                        task_id_state = gr.State("")
+                        log_offset_state = gr.State(0)
+                        
+                        output_box = gr.Textbox(label="训练状态", lines=4)
+                        log_box = gr.Code(label="实时日志 (Real-time Logs)", language="shell", lines=15)
+                        
+                        # Timer for polling
+                        timer = gr.Timer(1) # 1s interval
+
+                        # Events
+                        start_btn.click(
+                            fn=start_training_wrap,
+                            inputs=[
+                                config_dropdown, learning_rate, num_epochs,
+                                batch_size, lora_rank, lora_alpha, output_name,
+                                model_path_dropdown, dataset_dropdown
+                            ],
+                            outputs=[output_box, task_id_state]
+                        ).then(
+                            fn=lambda: 0, outputs=log_offset_state # Reset offset
+                        ).then(
+                            fn=lambda: "", outputs=log_box # Clear logs
+                        )
+                        
+                        stop_btn.click(
+                            fn=stop_training_wrap,
+                            inputs=[task_id_state],
+                            outputs=output_box
+                        )
+                        
+                        # Timer ticks -> Update logs
+                        timer.tick(
+                            fn=stream_logs,
+                            inputs=[task_id_state, log_box, log_offset_state],
+                            outputs=[log_box, log_offset_state]
+                        )
+                        refresh_btn.click(
+                            fn=lambda: (
+                                gr.Dropdown(choices=get_training_configs()),
+                                gr.Dropdown(choices=adapter.get_dataset_list())
+                            ),
+                            outputs=[config_dropdown, dataset_dropdown]
+                        )
+
+            # ==================== Advanced Mode (Native Integration) ====================
+        with gr.Accordion("⚙️ 高级模式 (Native WebUI Integration)", open=False):
+                gr.Markdown("""
+                > **专家模式**: 将当前选择的 Shell 脚本自动转换为 LLaMA-Factory 配置，并启动原生 WebUI 进行微调。
+                > 适合需要调整 DeepSpeed、LR Scheduler 等高级参数的用户。
+                """)
+                with gr.Row():
+                    convert_btn = gr.Button("🛠️ 1. 转换脚本为模板", variant="secondary")
+                    launch_native_btn = gr.Button("🚀 2. 启动原生 WebUI", variant="primary")
                 
-                with gr.Column(scale=1):
-                    # 输出区域
-                    gr.Markdown("### 训练状态")
-                    output_box = gr.Markdown(value="等待开始训练...")
-            
-            # 事件绑定
-            start_btn.click(
-                fn=start_training,
-                inputs=[
-                    config_dropdown, learning_rate, num_epochs,
-                    batch_size, lora_rank, lora_alpha, output_name
-                ],
-                outputs=output_box
-            )
-            refresh_btn.click(
-                fn=lambda: gr.Dropdown(choices=get_training_configs()),
-                outputs=config_dropdown
-            )
+                native_status = gr.Markdown("等待操作...")
+                native_ui_link = gr.Markdown(visible=False)
+
+                # Logic
+                def convert_action(script_name):
+                    if not script_name: return "⚠️ 请先选择一个脚本配置"
+                    res = adapter.convert_script_to_config(script_name)
+                    if res["success"]:
+                        return f"✅ {res['message']}"
+                    return f"❌ {res['error']}"
+
+                def launch_action():
+                    res = adapter.start_native_webui()
+                    if res["success"]:
+                        url = res['url']
+                        return f"✅ {res['message']}", gr.Markdown(f"### [👉 点击访问原生 WebUI ({url})]({url})", visible=True)
+                    return f"❌ {res['error']}", gr.update(visible=False)
+
+                convert_btn.click(convert_action, inputs=config_dropdown, outputs=native_status)
+                launch_native_btn.click(launch_action, outputs=[native_status, native_ui_link])
         
         with gr.Tab("📊 已训练模型"):
             with gr.Row():
