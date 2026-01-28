@@ -244,10 +244,23 @@ class DataProcessingAdapter:
                 text=True,
                 timeout=600
             )
-            
+            output_path_final = output_path
+            try:
+                import re
+                stdout = result.stdout or ""
+                match = re.search(r"所有转换结果已保存到:\\s*(.+)", stdout)
+                if not match:
+                    match = re.search(r"单文件已更新至:\\s*(.+)", stdout)
+                if match:
+                    candidate = match.group(1).strip()
+                    if candidate:
+                        output_path_final = candidate
+            except Exception:
+                pass
+
             return {
                 "success": result.returncode == 0,
-                "output_path": output_path,
+                "output_path": output_path_final,
                 "stdout": result.stdout,
                 "stderr": result.stderr
             }

@@ -10,6 +10,7 @@ import numpy as np
 from pathlib import Path
 from tsdownsample import M4Downsampler
 from configs.settings import settings
+from .file_registry import init_db, sync_directory, list_files, rebuild_directory
 
 # Import authentication module
 # Fix import path for sibling modules when run from project root
@@ -30,10 +31,25 @@ DATA_DIR = os.path.join(BASE_DIR, 'data')
 # 使用标准化标注目录 (从 settings 导入)
 ANNOTATIONS_DIR = settings.ANNOTATIONS_ROOT
 LABELS_FILE = os.path.join(BASE_DIR, 'config', 'labels.json')
+REGISTRY_DB = os.path.join(DATA_DIR, 'file_registry.db')
+
+# Allowed data directories (whitelist)
+ALLOWED_DATA_DIRS = [
+    settings.DATA_DOWNSAMPLED_DIR,
+    settings.DATA_RAW_DIR,
+    os.path.join(settings.DATA_INFERENCE_DIR, "chatts"),
+    os.path.join(settings.DATA_INFERENCE_DIR, "qwen"),
+    os.path.join(settings.DATA_INFERENCE_DIR, "timer"),
+    os.path.join(settings.DATA_INFERENCE_DIR, "adtk_hbos"),
+    os.path.join(settings.DATA_INFERENCE_DIR, "ensemble"),
+]
+
+_ALLOWED_ROOTS = [Path(p).resolve() for p in ALLOWED_DATA_DIRS]
 
 # Ensure directories exist
 os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(ANNOTATIONS_DIR, exist_ok=True)
+init_db(REGISTRY_DB)
 
 # Current working data path
 CURRENT_DATA_PATH = DATA_DIR
@@ -69,6 +85,48 @@ def parse_standard_filename(filename: str) -> dict:
         except ValueError:
             return None
     return None
+
+
+def infer_method_from_path(path: str) -> str:
+    """Infer method from inference directory path, if any."""
+    try:
+        parts = Path(path).parts
+    except Exception:
+        return ""
+    if "inference" in parts:
+        idx = parts.index("inference")
+        if idx + 1 < len(parts):
+            method = parts[idx + 1].lower()
+            if method in {"chatts", "qwen", "timer", "adtk_hbos", "ensemble"}:
+                return method
+    return ""
+
+
+def _is_allowed_path(path: str) -> bool:
+    try:
+        p = Path(path).resolve()
+    except Exception:
+        return False
+    for root in _ALLOWED_ROOTS:
+        try:
+            if root == p or root in p.parents:
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _allowed_root_dirs():
+    dirs = []
+    for root in _ALLOWED_ROOTS:
+        if root.exists() and root.is_dir():
+            dirs.append({
+                'name': root.name,
+                'path': str(root),
+                'is_dir': True,
+                'has_data_files': True,
+            })
+    return dirs
 
 
 def fetch_from_iotdb(metadata: dict) -> pd.DataFrame:
@@ -149,7 +207,7 @@ def set_data_path(current_user):
         data = request.get_json()
         path = data.get('path', '')
         
-        if path and os.path.isdir(path):
+        if path and os.path.isdir(path) and _is_allowed_path(path):
             # Save path to user config
             users = load_users()
             if current_user in users:
@@ -157,8 +215,11 @@ def set_data_path(current_user):
                 save_users(users)
             
             return jsonify({'success': True, 'path': path})
-        else:
-            return jsonify({'success': False, 'error': 'Invalid directory path'}), 400
+        return jsonify({
+            'success': False,
+            'error': 'Invalid or not allowed directory path',
+            'allowed_roots': [str(p) for p in _ALLOWED_ROOTS]
+        }), 400
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 
@@ -184,6 +245,16 @@ def browse_directory():
     try:
         # Default to /home instead of user home directory
         path = request.args.get('path', '/home')
+        
+        if not _is_allowed_path(path):
+            return jsonify({
+                'success': True,
+                'current_path': '/',
+                'parent_path': None,
+                'directories': _allowed_root_dirs(),
+                'has_data_files': False,
+                'allowed_roots': [str(p) for p in _ALLOWED_ROOTS]
+            })
         
         if not os.path.exists(path):
             return jsonify({'success': False, 'error': 'Path does not exist'}), 404
@@ -237,6 +308,40 @@ def browse_directory():
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
+@app.route('/api/rebuild-index', methods=['POST'])
+@login_required
+def rebuild_index(current_user):
+    """Rebuild file registry for current user's path (or provided path)."""
+    try:
+        from auth import load_users
+
+        data = request.get_json(silent=True) or {}
+        users = load_users()
+        user_path = users.get(current_user, {}).get('data_path', DATA_DIR)
+        path = data.get('path') or user_path
+
+        if not path or not os.path.isdir(path):
+            return jsonify({'success': False, 'error': 'Path does not exist'}), 404
+        if not _is_allowed_path(path):
+            return jsonify({
+                'success': False,
+                'error': 'Invalid or not allowed directory path',
+                'allowed_roots': [str(p) for p in _ALLOWED_ROOTS]
+            }), 400
+
+        rebuild_directory(REGISTRY_DB, path)
+        method_filter = infer_method_from_path(path)
+        files = list_files(REGISTRY_DB, path, method_filter or None)
+
+        return jsonify({
+            'success': True,
+            'path': path,
+            'count': len(files)
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
 # ==================== File Management (User-specific path) ====================
 @app.route('/api/files', methods=['GET'])
 @login_required
@@ -257,70 +362,72 @@ def get_files(current_user):
         if not os.path.exists(user_path):
             return jsonify({'success': False, 'error': 'Path does not exist'}), 404
         
-        all_items = os.listdir(user_path)
-        print(f"All items in directory: {all_items}")
+        # Sync and query file registry for this directory
+        sync_directory(REGISTRY_DB, user_path)
+        method_filter = infer_method_from_path(user_path)
+        registry_files = list_files(REGISTRY_DB, user_path, method_filter or None)
         
         files = []
-        for f in all_items:
+        for entry in registry_files:
+            f = entry["name"]
             full_path = os.path.join(user_path, f)
-            print(f"Checking: {f}, is_file: {os.path.isfile(full_path)}")
+            if not os.path.isfile(full_path):
+                continue
+
+            # Check for annotations in user's annotation directory
+            user_ann_dir = os.path.join(ANNOTATIONS_DIR, current_user)
             
-            if os.path.isfile(full_path) and f.endswith(('.csv', '.xls', '.xlsx')):
-                print(f"  -> Matched: {f}")
-                # Check for annotations in user's annotation directory
-                user_ann_dir = os.path.join(ANNOTATIONS_DIR, current_user)
-                
-                # Try multiple annotation file name patterns (ordered by frequency)
-                annotation_file = None
-                annotation_count = 0
-                has_annotations = False
-                
-                # Pattern 5: Direct replacement .csv -> .json (most common for current files)
-                # This matches files like: 数据集zhlh_100_XXX.PV.json for CSV files like: 数据集zhlh_100_XXX.PV.csv
-                pattern5 = os.path.join(user_ann_dir, f.replace('.csv', '.json'))
-                # Pattern 1: filename.csv.json (standard auto-save format)
-                pattern1 = os.path.join(user_ann_dir, f"{f}.json")
-                # Pattern 4: 数据集filename.json (for CSV files without 数据集 prefix)
-                # This matches files like: 数据集zhlh_100_XXX.json for CSV files like: zhlh_100_XXX.csv
-                pattern4 = os.path.join(user_ann_dir, f"数据集{f.replace('.csv', '')}.json")
-                # Pattern 3: annotations_filename.json (old export without 数据集)
-                pattern3 = os.path.join(user_ann_dir, f"annotations_{f.replace('.csv', '')}.json")
-                # Pattern 2: annotations_数据集filename.json (old export format)
-                pattern2 = os.path.join(user_ann_dir, f"annotations_数据集{f.replace('.csv', '')}.json")
-                
-                for pattern in [pattern5, pattern1, pattern4, pattern3, pattern2]:
-                    if os.path.exists(pattern):
-                        annotation_file = pattern
-                        print(f"  -> Found annotation: {os.path.basename(pattern)}")
-                        break
-                
-                if annotation_file and os.path.exists(annotation_file):
-                    try:
-                        with open(annotation_file, 'r', encoding='utf-8') as af:
-                            ann_data = json.load(af)
-                            # Support both formats
-                            annotations = ann_data.get('annotations', [])
-                            
-                            # Has annotations if there are any annotations (including no-label)
-                            if annotations:
-                                has_annotations = True
-                            
-                            # Only count annotations with segments (exclude no-label annotations)
-                            annotations_with_segments = [
-                                ann for ann in annotations 
-                                if ann.get('segments') and len(ann.get('segments', [])) > 0
-                            ]
-                            annotation_count = len(annotations_with_segments)
-                    except Exception as e:
-                        print(f"  -> Error reading annotation: {e}")
-                        pass
-                
-                files.append({
-                    'name': f,
-                    'has_annotations': has_annotations,
-                    'annotation_count': annotation_count
-                })
-        
+            # Try multiple annotation file name patterns (ordered by frequency)
+            annotation_file = None
+            annotation_count = 0
+            has_annotations = False
+            
+            # Pattern 5: Direct replacement .csv -> .json (most common for current files)
+            # This matches files like: 数据集zhlh_100_XXX.PV.json for CSV files like: 数据集zhlh_100_XXX.PV.csv
+            pattern5 = os.path.join(user_ann_dir, f.replace('.csv', '.json'))
+            # Pattern 1: filename.csv.json (standard auto-save format)
+            pattern1 = os.path.join(user_ann_dir, f"{f}.json")
+            # Pattern 4: 数据集filename.json (for CSV files without 数据集 prefix)
+            # This matches files like: 数据集zhlh_100_XXX.json for CSV files like: zhlh_100_XXX.csv
+            pattern4 = os.path.join(user_ann_dir, f"数据集{f.replace('.csv', '')}.json")
+            # Pattern 3: annotations_filename.json (old export without 数据集)
+            pattern3 = os.path.join(user_ann_dir, f"annotations_{f.replace('.csv', '')}.json")
+            # Pattern 2: annotations_数据集filename.json (old export format)
+            pattern2 = os.path.join(user_ann_dir, f"annotations_数据集{f.replace('.csv', '')}.json")
+            
+            for pattern in [pattern5, pattern1, pattern4, pattern3, pattern2]:
+                if os.path.exists(pattern):
+                    annotation_file = pattern
+                    print(f"  -> Found annotation: {os.path.basename(pattern)}")
+                    break
+            
+            if annotation_file and os.path.exists(annotation_file):
+                try:
+                    with open(annotation_file, 'r', encoding='utf-8') as af:
+                        ann_data = json.load(af)
+                        # Support both formats
+                        annotations = ann_data.get('annotations', [])
+                        
+                        # Has annotations if there are any annotations (including no-label)
+                        if annotations:
+                            has_annotations = True
+                        
+                        # Only count annotations with segments (exclude no-label annotations)
+                        annotations_with_segments = [
+                            ann for ann in annotations 
+                            if ann.get('segments') and len(ann.get('segments', [])) > 0
+                        ]
+                        annotation_count = len(annotations_with_segments)
+                except Exception as e:
+                    print(f"  -> Error reading annotation: {e}")
+                    pass
+            
+            files.append({
+                'name': f,
+                'has_annotations': has_annotations,
+                'annotation_count': annotation_count
+            })
+
         print(f"Matched files: {[f['name'] for f in files]}")
         
         return jsonify({

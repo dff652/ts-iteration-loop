@@ -1542,7 +1542,8 @@ def create_training_ui() -> gr.Blocks:
                 if result.get("success"):
                     log_output = result.get("stdout", "")
                     prefix = "单文件" if mode == "single" else "批量"
-                    status_msg = f"✅ {prefix}转换成功! \n输出: {result.get('output_path')}\n\n执行日志:\n{log_output}"
+                    final_output_path = result.get("output_path") or output_path
+                    status_msg = f"✅ {prefix}转换成功! \n输出: {final_output_path}\n\n执行日志:\n{log_output}"
                     
                     # 尝试读取源文件进行预览
                     try:
@@ -1564,7 +1565,7 @@ def create_training_ui() -> gr.Blocks:
 
                     # 读取转换后的结果
                     try:
-                        with open(output_path, 'r', encoding='utf-8') as f:
+                        with open(final_output_path, 'r', encoding='utf-8') as f:
                             converted_data = json.load(f)
                             if converted_data and isinstance(converted_data, list):
                                 if preview_file:

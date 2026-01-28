@@ -5,6 +5,8 @@
 import json
 import os
 import re
+import tempfile
+from datetime import datetime
 from pathlib import Path
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -42,6 +44,98 @@ def extract_point_name(annotation_filename):
         return basename.replace("annotations_", "", 1)
         
     return basename
+
+def extract_point_id(name):
+    """Extract point id like ZHLH_XXX.PV from a filename or path."""
+    if not name:
+        return None
+    candidates = []
+    for match in re.findall(r'([A-Za-z][A-Za-z0-9_]*\.[A-Za-z0-9]+)', name):
+        lower = match.lower()
+        if lower.endswith((".csv", ".json", ".jpg", ".png")):
+            continue
+        if not re.search(r'[A-Za-z]', match):
+            continue
+        candidates.append(match)
+    if not candidates:
+        return None
+    candidates.sort(key=lambda s: (s.count("_"), len(s)), reverse=True)
+    return candidates[0]
+
+def extract_suffix_hint(name):
+    """Extract suffix hint like trend_resid for fuzzy match."""
+    if not name:
+        return None
+    for key in ["trend_resid", "resid", "trend"]:
+        if key in name:
+            return key
+    return None
+
+def find_latest_auto_file(output_dir, format_type):
+    if not output_dir or not os.path.exists(output_dir):
+        return None
+    pattern = re.compile(rf"^{re.escape(format_type)}_n\\d+_\\d{{8}}\\.json$")
+    candidates = []
+    for fname in os.listdir(output_dir):
+        if pattern.match(fname):
+            candidates.append(fname)
+    if not candidates:
+        return None
+    candidates.sort(
+        key=lambda fn: os.path.getmtime(os.path.join(output_dir, fn)),
+        reverse=True
+    )
+    return os.path.join(output_dir, candidates[0])
+
+def fuzzy_find_file(dir_path, point_id=None, suffix_hint=None, exts=None):
+    """Fuzzy find a file by point id and optional suffix hint."""
+    if not dir_path or not os.path.exists(dir_path):
+        return None
+    exts = exts or []
+    matches = []
+    for fname in os.listdir(dir_path):
+        if exts and not any(fname.lower().endswith(ext) for ext in exts):
+            continue
+        if point_id and point_id not in fname:
+            continue
+        if suffix_hint and suffix_hint not in fname:
+            continue
+        matches.append(fname)
+    if not matches and point_id:
+        for fname in os.listdir(dir_path):
+            if exts and not any(fname.lower().endswith(ext) for ext in exts):
+                continue
+            if point_id and point_id not in fname:
+                continue
+            matches.append(fname)
+    if not matches:
+        return None
+    def score(fn):
+        s = 0
+        lower = fn.lower()
+        if point_id:
+            if fn.startswith(point_id):
+                s += 100
+            if f"_{point_id}" in fn:
+                s += 60
+            if point_id in fn:
+                s += 30
+        if suffix_hint and suffix_hint in fn:
+            s += 10
+        if lower.startswith("_"):
+            s -= 3
+        if "qwen" in lower:
+            s -= 5
+        if "chatts" in lower:
+            s -= 5
+        s -= len(fn) / 200.0
+        return s
+
+    matches.sort(
+        key=lambda fn: (score(fn), os.path.getmtime(os.path.join(dir_path, fn))),
+        reverse=True
+    )
+    return os.path.join(dir_path, matches[0])
 
 def plot_csv_to_image(csv_path, output_image_path):
     """Generate a plot from CSV file"""
@@ -117,6 +211,16 @@ def find_csv_file(point_name, image_dir, csv_filename=None, csv_src_dir=None):
             if f.endswith(".csv") and stem in f:
                 return os.path.join(csv_src_dir, f)
 
+    point_id = extract_point_id(csv_filename or point_name)
+    suffix_hint = extract_suffix_hint(csv_filename or point_name)
+    csv_path = fuzzy_find_file(image_dir, point_id=point_id, suffix_hint=suffix_hint, exts=[".csv"])
+    if csv_path:
+        return csv_path
+    if csv_src_dir:
+        csv_path = fuzzy_find_file(csv_src_dir, point_id=point_id, suffix_hint=suffix_hint, exts=[".csv"])
+        if csv_path:
+            return csv_path
+
     return None
 
 def find_image_file(point_name, image_dir, csv_filename=None, csv_src_dir=None):
@@ -145,6 +249,11 @@ def find_image_file(point_name, image_dir, csv_filename=None, csv_src_dir=None):
         image_path = os.path.join(image_dir, fname)
         if os.path.exists(image_path) and (fname.endswith('.jpg') or fname.endswith('.png')):
             return image_path
+
+    point_id = extract_point_id(csv_filename or point_name)
+    image_path = fuzzy_find_file(image_dir, point_id=point_id, suffix_hint=None, exts=[".jpg", ".png"])
+    if image_path:
+        return image_path
             
     # Try to generate if csv available
     possible_csvs = []
@@ -174,6 +283,19 @@ def find_image_file(point_name, image_dir, csv_filename=None, csv_src_dir=None):
             target_img_path = os.path.join(image_dir, target_img_name)
             
             print(f"🔄 Generating image from CSV: {csv_name} -> {target_img_name}")
+            if plot_csv_to_image(csv_path, target_img_path):
+                return target_img_path
+
+    if point_id:
+        suffix_hint = extract_suffix_hint(csv_filename or point_name)
+        csv_path = fuzzy_find_file(image_dir, point_id=point_id, suffix_hint=suffix_hint, exts=[".csv"])
+        if not csv_path and csv_src_dir:
+            csv_path = fuzzy_find_file(csv_src_dir, point_id=point_id, suffix_hint=suffix_hint, exts=[".csv"])
+        if csv_path:
+            stem = Path(csv_path).stem
+            target_img_name = f"{stem}.jpg"
+            target_img_path = os.path.join(image_dir, target_img_name)
+            print(f"🔄 Generating image from CSV: {os.path.basename(csv_path)} -> {target_img_name}")
             if plot_csv_to_image(csv_path, target_img_path):
                 return target_img_path
     
@@ -544,11 +666,22 @@ def convert_annotations(input_dir, output_file, image_dir, filename=None, format
         for fname, reason in failed_files:
             print(f"  - {fname}: {reason}")
     
-    os.makedirs(os.path.dirname(output_file), exist_ok=True)
-    with open(output_file, 'w', encoding='utf-8') as f:
+    # Auto-name output file if using default placeholder name
+    final_output_file = output_file
+    output_dir = output_file if os.path.isdir(output_file) else os.path.dirname(output_file)
+    output_basename = os.path.basename(output_file)
+    if output_basename == "converted_data.json" or os.path.isdir(output_file):
+        date_tag = datetime.now().strftime("%Y%m%d")
+        final_output_file = os.path.join(
+            output_dir,
+            f"{format_type}_n{len(all_conversations)}_{date_tag}.json"
+        )
+
+    os.makedirs(os.path.dirname(final_output_file), exist_ok=True)
+    with open(final_output_file, 'w', encoding='utf-8') as f:
         json.dump(all_conversations, f, ensure_ascii=False, indent=2)
     
-    print(f"\n✨ 所有转换结果已保存到: {output_file}")
+    print(f"\n✨ 所有转换结果已保存到: {final_output_file}")
     print(f"📦 共 {len(all_conversations)} 条对话数据")
     
     return all_conversations
@@ -602,24 +735,39 @@ def main():
             print(f"❌ 文件不存在: {annotation_path}")
             sys.exit(1)
             
+        placeholder_output = os.path.isdir(args.output) or os.path.basename(args.output) == "converted_data.json"
+        output_dir = args.output if os.path.isdir(args.output) else os.path.dirname(args.output)
+        base_output_path = None
+
+        if placeholder_output:
+            base_output_path = find_latest_auto_file(output_dir, args.format)
+        else:
+            base_output_path = args.output
+
         # 先读取已有输出，避免被转换过程覆盖
         all_conversations = []
-        if os.path.exists(args.output):
+        if base_output_path and os.path.exists(base_output_path):
             try:
-                with open(args.output, 'r', encoding='utf-8') as f:
+                with open(base_output_path, 'r', encoding='utf-8') as f:
                     all_conversations = json.load(f)
             except:
                 pass
 
-        # 转换单个文件
+        # 转换单个文件（使用临时输出避免覆盖目标文件）
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp:
+            tmp_path = tmp.name
         result = convert_annotations(
             args.input_dir,
-            args.output,
+            tmp_path,
             args.image_dir,
             filename=args.file,
             format_type=args.format,
             csv_src_dir=args.csv_src,
         )
+        try:
+            os.unlink(tmp_path)
+        except:
+            pass
         conversation = result[0] if result else None
 
         if conversation:
@@ -630,17 +778,35 @@ def main():
                 # For ChatTS, we check "input" or "target" equality? Or maybe we can't easily dedup without ID?
                 # The previous logic relied on image path.
                 # We'll skip dedup for ChatTS or use input text as partial key.
-                pass 
+                pass
             else:
                 new_image_path = conversation.get("image")
-                if new_image_path:
-                    all_conversations = [c for c in all_conversations if c.get("image") != new_image_path]
+                new_point_id = extract_point_id(new_image_path or args.file)
+                if new_image_path or new_point_id:
+                    def should_keep(c):
+                        img = c.get("image", "")
+                        if new_image_path and img == new_image_path:
+                            return False
+                        if new_point_id and extract_point_id(img) == new_point_id:
+                            return False
+                        return True
+                    all_conversations = [c for c in all_conversations if should_keep(c)]
             
             all_conversations.append(conversation)
-            
-            with open(args.output, 'w', encoding='utf-8') as f:
+
+            # 仅写自动命名文件（或用户指定文件）
+            if placeholder_output:
+                date_tag = datetime.now().strftime("%Y%m%d")
+                final_output_path = os.path.join(
+                    output_dir,
+                    f"{args.format}_n{len(all_conversations)}_{date_tag}.json"
+                )
+            else:
+                final_output_path = args.output
+
+            with open(final_output_path, 'w', encoding='utf-8') as f:
                 json.dump(all_conversations, f, ensure_ascii=False, indent=2)
-            print(f"✅ 单文件已更新至: {args.output}")
+            print(f"✅ 单文件已更新至: {final_output_path}")
         else:
             print("❌ 单文件转换失败 (可能是找不到图片或CSV)")
             sys.exit(1)

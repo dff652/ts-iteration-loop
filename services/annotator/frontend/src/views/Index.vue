@@ -19,6 +19,7 @@
           <div class="panel-card-header">
             <span class="panel-card-title">📁 数据管理</span>
             <button class="btn-icon-sm" @click="refreshFiles" title="刷新">🔄</button>
+            <button class="btn-icon-sm" @click="rebuildIndex" title="重建索引">🧱</button>
           </div>
           <!-- 标签页切换 -->
           <div class="file-tabs">
@@ -839,6 +840,29 @@ export default {
       } catch (e) {
         console.error('Load files error:', e);
         this.showToast('文件加载失败: ' + e.message, 'error');
+      }
+    },
+
+    async rebuildIndex() {
+      if (!this.currentPath) return;
+      try {
+        const res = await fetch(`${API_BASE}/rebuild-index`, {
+          method: 'POST',
+          headers: this.getAuthHeaders(),
+          body: JSON.stringify({ path: this.currentPath })
+        });
+        const data = await res.json();
+        if (data.success) {
+          this.showToast(`索引已重建（${data.count || 0} 个文件）`, 'success');
+          await this.loadFiles();
+        } else if (res.status === 401) {
+          this.$router.push('/login');
+        } else {
+          this.showToast('索引重建失败: ' + (data.error || '未知错误'), 'error');
+        }
+      } catch (e) {
+        console.error('Rebuild index error:', e);
+        this.showToast('索引重建失败: ' + e.message, 'error');
       }
     },
     
