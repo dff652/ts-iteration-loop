@@ -30,17 +30,17 @@ pip install -r requirements.txt
 
 - **数据路径**: `/home/douff/ts/ChatTS-Training/data/chatts_tune/train.jsonl`
 - **数据格式检查**: 已确认为标准的 JSONL 格式，包含 `<ts><ts/>` 占位符和嵌入的数值 `timeseries` 列表。
-- **Dataset Info**: 需要确保 `data/dataset_info.json` 中已经注册了该数据集。
+- **Dataset Info**: 需要确保 `/home/share/data/training_chatts/dataset_info.json` 中已经注册了该数据集。
 
 ## 3. 训练配置
 
 我们将使用 **LoRA** 微调，FP16 或 BF16 (Ada 架构支持 BF16，建议使用 BF16 以获得更好的数值稳定性)。
 
-**脚本**: `scripts/lora/train_chatts_14b_rtx6000.sh`
+**脚本**: `scripts/chatts/lora/train_chatts_14b_rtx6000.sh`
 
 **关键参数**:
 - `model_name_or_path`: `/home/share/llm_models/bytedance-research/ChatTS-14B`
-- `dataset`: `chatts_tune` (需在 dataset_info.json 确认)
+- `dataset`: `chatts_tune` (需在 `/home/share/data/training_chatts/dataset_info.json` 确认)
 - `finetuning_type`: `lora`
 - `lora_rank`: 16 (显存足够，可以适当增加 rank)
 - `per_device_train_batch_size`: 4 (根据显存调整)
@@ -53,6 +53,6 @@ pip install -r requirements.txt
 ## 4. 步骤
 
 1.  **环境安装**: 执行上述 Conda 和 Pip 命令。
-2.  **配置检查**: 检查 `data/dataset_info.json` 是否包含 `chatts_tune`。
-3.  **脚本生成**: 创建 `scripts/lora/train_chatts_14b_rtx6000.sh`。
+2.  **配置检查**: 检查 `/home/share/data/training_chatts/dataset_info.json` 是否包含 `chatts_tune`。
+3.  **脚本生成**: 创建 `scripts/chatts/lora/train_chatts_14b_rtx6000.sh`。
 4.  **执行训练**: 运行脚本。

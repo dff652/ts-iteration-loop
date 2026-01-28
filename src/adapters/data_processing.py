@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import List, Dict, Optional
 
 from configs.settings import settings
+from src.utils.file_filters import is_inference_or_generated_csv
 
 
 class DataProcessingAdapter:
@@ -17,7 +18,8 @@ class DataProcessingAdapter:
     def __init__(self):
         self.project_path = Path(settings.DATA_PROCESSING_PATH)
         self.scripts_path = self.project_path / "scripts"
-        self.data_path = self.project_path / "data_downsampled"
+        # 使用标准化数据目录
+        self.data_path = Path(settings.DATA_DOWNSAMPLED_DIR)
     
     def list_datasets(self) -> List[Dict]:
         """列出所有数据集"""
@@ -27,6 +29,10 @@ class DataProcessingAdapter:
             for f in self.data_path.glob("*.csv"):
                 try:
                     if not f.exists():
+                        continue
+                    
+                    # 过滤掉推理结果/中间文件
+                    if is_inference_or_generated_csv(f.name):
                         continue
                         
                     stat = f.stat()
@@ -95,7 +101,8 @@ class DataProcessingAdapter:
             "--port", port,
             "--user", user,
             "--password", password,
-            "--target-points", str(target_points)
+            "--target-points", str(target_points),
+            "--output-dir", str(self.data_path)
         ]
         
         if point_name and point_name != "*":
@@ -158,7 +165,9 @@ class DataProcessingAdapter:
             "--port", port,
             "--user", user,
             "--password", password,
-            "--target-points", str(target_points)
+            "--target-points", str(target_points),
+            "--output-dir", str(self.data_path),
+            "--image-dir", settings.DATA_IMAGES_DIR,
         ]
         
         if point_name and point_name != "*":
@@ -198,7 +207,7 @@ class DataProcessingAdapter:
         except Exception as e:
             yield f"❌ **Error:** {str(e)}"
     
-    def convert_annotations(self, input_dir: str, output_path: str) -> Dict:
+    def convert_annotations(self, input_dir: str, output_path: str, image_dir: str = None, filename: str = None, model_family: str = "qwen", csv_src_dir: str = None) -> Dict:
         """
         转换标注格式
         调用 convert_annotations.py 脚本
@@ -208,12 +217,24 @@ class DataProcessingAdapter:
         if not script_path.exists():
             return {"success": False, "error": f"脚本不存在: {script_path}"}
         
+        if image_dir is None:
+            # 默认图片目录
+            image_dir = str(self.data_path)
+
         python_exe = settings.PYTHON_UNIFIED if settings.USE_LOCAL_MODULES else settings.PYTHON_DATA_PROCESSING
         cmd = [
             python_exe, str(script_path),
             "--input-dir", input_dir,
-            "--output", output_path
+            "--image-dir", image_dir,
+            "--output", output_path,
+            "--format", model_family  # chatts or qwen
         ]
+        
+        if csv_src_dir:
+             cmd.extend(["--csv-src", csv_src_dir])
+        
+        if filename:
+             cmd.extend(["--file", filename])
         
         try:
             result = subprocess.run(
@@ -227,7 +248,8 @@ class DataProcessingAdapter:
             return {
                 "success": result.returncode == 0,
                 "output_path": output_path,
-                "stderr": result.stderr if result.returncode != 0 else None
+                "stdout": result.stdout,
+                "stderr": result.stderr
             }
         except Exception as e:
             return {"success": False, "error": str(e)}

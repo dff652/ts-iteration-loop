@@ -4,6 +4,7 @@
 export CUDA_VISIBLE_DEVICES=0,1
 export CUDA_HOME=$CONDA_PREFIX
 export PATH=$CUDA_HOME/bin:$PATH
+DATASET_DIR="${DATASET_DIR:-/home/share/data/training_chatts}"
 
 # Run command with torchrun (No DeepSpeed, DDP)
 torchrun --nproc_per_node=2 --master_port=19901 src/train.py \
@@ -11,6 +12,7 @@ torchrun --nproc_per_node=2 --master_port=19901 src/train.py \
     --do_train \
     --model_name_or_path /home/share/llm_models/bytedance-research/ChatTS-14B \
     --dataset chatts_tune \
+    --dataset_dir "${DATASET_DIR}" \
     --template chatts \
     --finetuning_type lora \
     --lora_target q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj \

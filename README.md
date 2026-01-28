@@ -59,7 +59,25 @@ ts-iteration-loop/
 │   └── requirements.txt    # pip 依赖
 ├── docker/                 # Docker 配置
 └── scripts/                # 脚本工具
-```
+ts-iteration-loop/
+├── src/                    # 核心应用代码
+│   ├── api/                # FastAPI 路由
+│   ├── adapters/           # 模块适配器
+│   └── webui/              # Gradio 界面
+├── services/               # 整合的子模块
+│   ├── inference/          # 推理检测
+│   ├── training/           # 模型训练 (LlamaFactory)
+│   │   └── data/           # 训练数据根目录
+│   │       ├── chatts/     # ChatTS 格式数据
+│   │       └── qwen/       # Qwen 格式数据
+│   ├── data_processing/    # 数据处理
+│   └── annotator/          # 标注工具
+├── configs/                # 全局配置 (settings.py, iotdb_config.json)
+├── envs/                   # 环境配置
+│   ├── environment.yml     # Conda 环境
+│   └── requirements.txt    # pip 依赖
+├── docker/                 # Docker 配置
+└── scripts/                # 脚本工具
 
 ## 技术栈与环境架构 (Architecture)
 
@@ -91,7 +109,7 @@ ts-iteration-loop/
 
 ## 版本
 
-- **v0.3.0** - Qwen-VL 多模态异常检测集成 (2026-01-27)
+- **v0.3.0** - Qwen-VL 多模态检测集成 & 架构重构 (2026-01-28)
 - **v0.2.3** - 数据链路优化 (2026-01-27)
 - **v0.2.1** - 推理 UI 交互体验优化 (2026-01-23)
 - **v0.2.0** - Monorepo 整合重构

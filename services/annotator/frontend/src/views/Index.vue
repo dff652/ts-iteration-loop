@@ -1754,10 +1754,20 @@ export default {
     
     // Finish editing and sync changes to savedAnnotations
     finishWorkspaceEdit() {
-      if (this.workspaceState !== 'edit' || this.workspaceAnnIndex === null) return;
+      if (this.workspaceState !== 'edit') return;
       
       // Sync workspaceData back to savedAnnotations
-      this.$set(this.savedAnnotations, this.workspaceAnnIndex, JSON.parse(JSON.stringify(this.workspaceData)));
+      if (this.workspaceAnnIndex === null) {
+        // Create NEW annotation
+        const newAnn = JSON.parse(JSON.stringify(this.workspaceData));
+        this.savedAnnotations.push(newAnn);
+        this.workspaceAnnIndex = this.savedAnnotations.length - 1;
+        this.showToast('新建标注已保存', 'success');
+      } else {
+        // Update EXISTING annotation
+        this.$set(this.savedAnnotations, this.workspaceAnnIndex, JSON.parse(JSON.stringify(this.workspaceData)));
+        this.showToast('修改已保存', 'success');
+      }
       
       this.workspaceState = 'view';
       this.editingSegmentKey = null;
@@ -1765,8 +1775,6 @@ export default {
       // Refresh chart colors and save
       this.applyAnnotationsToChart();
       this.saveAnnotationsToServer();
-      
-      this.showToast('修改已保存', 'success');
     },
     
     // Clear workspace and return to empty state
@@ -2321,6 +2329,13 @@ export default {
       
       this.showToast(`已添加数据段: ${segment.start}-${segment.end} (${labelToUse.text})`, 'success');
       this.$forceUpdate();
+      
+      // FIX: Sync to workspaceData so user can see/edit it immediately
+      this.workspaceData = JSON.parse(JSON.stringify(this.currentAnnotation));
+      if (this.workspaceState === 'empty') {
+        this.workspaceState = 'edit';
+        this.workspaceAnnIndex = null; // Mark as new
+      }
     },
     
     // Helper to find label by text

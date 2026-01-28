@@ -17,10 +17,29 @@ class Settings(BaseSettings):
     DEBUG: bool = True
     
     # 服务端口
+    # 服务端口
     API_PORT: int = 8000
+    WEBUI_HOST: str = "192.168.199.126"
+    
+    # 用户配置
+    DEFAULT_USER: str = "douff"
     
     # 数据库
     DATABASE_URL: str = f"sqlite:///{PROJECT_ROOT}/data/iteration_loop.db"
+    
+    # ========== 标准化数据目录 ==========
+    DATA_ROOT: str = "/home/share/data"
+    DATA_RAW_DIR: str = "/home/share/data/raw"
+    DATA_DOWNSAMPLED_DIR: str = "/home/share/data/downsampled"
+    DATA_IMAGES_DIR: str = "/home/share/data/images"
+    DATA_INFERENCE_DIR: str = "/home/share/data/inference"
+    # 训练数据目录（按模型类型拆分）
+    DATA_TRAINING_CHATTS_DIR: str = str(PROJECT_ROOT / "services" / "training" / "data" / "chatts")
+    DATA_TRAINING_QWEN_DIR: str = str(PROJECT_ROOT / "services" / "training" / "data" / "qwen")
+    DATA_TRAINING_QWEN_IMAGES_DIR: str = DATA_IMAGES_DIR  # 统一使用全局图片池
+    # 兼容旧配置（默认指向 ChatTS）
+    DATA_TRAINING_DIR: str = DATA_TRAINING_CHATTS_DIR
+    ANNOTATIONS_ROOT: str = "/home/share/data/annotations"
     
     # ========== 模块路径配置 ==========
     # 使用本地整合模块（Monorepo 模式）
@@ -60,7 +79,9 @@ class Settings(BaseSettings):
     
     # 各模块独立环境（兼容模式，USE_LOCAL_MODULES=False 时可能需要）
     PYTHON_ILABEL: str = "/opt/miniconda3/envs/chatts_test/bin/python"
-    PYTHON_TRAINING: str = "/opt/miniconda3/envs/chatts_tune/bin/python"
+    PYTHON_TRAINING: str = os.getenv("PYTHON_TRAINING", "/opt/miniconda3/envs/chatts_tune/bin/python")
+    PYTHON_TRAINING_CHATTS: str = os.getenv("PYTHON_TRAINING_CHATTS", PYTHON_TRAINING)
+    PYTHON_TRAINING_QWEN: str = os.getenv("PYTHON_TRAINING_QWEN", PYTHON_TRAINING)
     PYTHON_ANNOTATOR: str = "/opt/miniconda3/envs/test-env/bin/python"
     PYTHON_DATA_PROCESSING: str = "/opt/conda_envs/douff/ts_iter_loop/bin/python"
     
@@ -84,4 +105,3 @@ class Settings(BaseSettings):
         env_file = ".env"
 
 settings = Settings()
-

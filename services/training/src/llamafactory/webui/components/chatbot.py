@@ -58,7 +58,7 @@ def create_chat_box(
         if "resizable" in inspect.signature(gr.Chatbot.__init__).parameters:
             kwargs["resizable"] = True
 
-        chatbot = gr.Chatbot(type="messages", **kwargs)
+        chatbot = gr.Chatbot(**kwargs)
         messages = gr.State([])
         with gr.Row():
             with gr.Column(scale=4):

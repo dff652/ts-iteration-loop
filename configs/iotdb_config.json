@@ -1,0 +1,9 @@
+{
+    "host": "192.168.199.185",
+    "port": "6667",
+    "user": "root",
+    "password": "root",
+    "default_path": "root.supcon.nb.whlj.LJSJ",
+    "fetch_size": 2000000,
+    "limit": 1000000000
+}

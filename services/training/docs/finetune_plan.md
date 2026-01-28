@@ -37,7 +37,7 @@
 ### 第二阶段：数据集配置
 **目标**: 在训练框架中注册新数据集。
 
-*   **文件**: `data/dataset_info.json`
+*   **文件**: `/home/share/data/training_chatts/dataset_info.json`
 *   **操作**: 添加 `chatts_tune` 条目：
     ```json
     "chatts_tune": {
@@ -53,7 +53,7 @@
 ### 第三阶段：训练环境配置
 **目标**: 创建可复现的训练脚本。
 
-*   **脚本路径**: `scripts/lora/train_chatts_tune.sh`
+*   **脚本路径**: `scripts/chatts/lora/train_chatts_tune.sh`
 *   **配置概览**:
     *   基座模型: `llm_models/ChatTS-14B`
     *   数据集: `chatts_tune`
@@ -65,8 +65,8 @@
 
 - [ ] **数据准备**: 编写并运行 `scripts/preprocess_gdsh.py`。
 - [ ] **数据验证**: 检查生成的 `data/chatts_tune/train.jsonl` 格式是否正确。
-- [ ] **配置更新**: 修改 `data/dataset_info.json`。
-- [ ] **脚本编写**: 创建 `scripts/lora/train_chatts_tune.sh`。
+- [ ] **配置更新**: 修改 `/home/share/data/training_chatts/dataset_info.json`。
+- [ ] **脚本编写**: 创建 `scripts/chatts/lora/train_chatts_tune.sh`。
 - [ ] **执行训练**: 启动训练并监控 Loss。
 
 ## 5. 备注

@@ -9,6 +9,14 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 from tsdownsample import M4Downsampler
+from configs.settings import settings
+
+# Import authentication module
+# Fix import path for sibling modules when run from project root
+import sys
+current_dir = os.path.dirname(os.path.abspath(__file__))
+if current_dir not in sys.path:
+    sys.path.append(current_dir)
 
 # Import authentication module
 from auth import login_required, verify_password, generate_token, load_users
@@ -19,7 +27,8 @@ CORS(app)
 # Configuration directories
 BASE_DIR = os.path.dirname(__file__)
 DATA_DIR = os.path.join(BASE_DIR, 'data')
-ANNOTATIONS_DIR = os.path.join(BASE_DIR, 'annotations')
+# 使用标准化标注目录 (从 settings 导入)
+ANNOTATIONS_DIR = settings.ANNOTATIONS_ROOT
 LABELS_FILE = os.path.join(BASE_DIR, 'config', 'labels.json')
 
 # Ensure directories exist
@@ -28,6 +37,98 @@ os.makedirs(ANNOTATIONS_DIR, exist_ok=True)
 
 # Current working data path
 CURRENT_DATA_PATH = DATA_DIR
+
+# ==================== Level 3 Fallback Helpers ====================
+import re
+import sys
+
+# 添加项目根目录到 path 以便导入共享模块
+_PROJECT_ROOT = os.path.abspath(os.path.join(BASE_DIR, '..', '..', '..'))
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
+
+
+def parse_standard_filename(filename: str) -> dict:
+    """
+    解析标准化文件名: {PointID}_{StartTime}_{EndTime}_{Algorithm}.csv
+    
+    Returns:
+        解析结果字典或 None
+    """
+    # 格式: AI_20405E.PV_20230101_000000_20231231_235959_chatts.csv
+    pattern = r'^(.+?)_(\d{8}_\d{6})_(\d{8}_\d{6})_(\w+)\.csv$'
+    match = re.match(pattern, filename)
+    if match:
+        try:
+            return {
+                'point_id': match.group(1),
+                'start_time': datetime.strptime(match.group(2), '%Y%m%d_%H%M%S'),
+                'end_time': datetime.strptime(match.group(3), '%Y%m%d_%H%M%S'),
+                'algorithm': match.group(4)
+            }
+        except ValueError:
+            return None
+    return None
+
+
+def fetch_from_iotdb(metadata: dict) -> pd.DataFrame:
+    """
+    从 IoTDB 获取数据
+    
+    Args:
+        metadata: 包含 point_id, start_time, end_time 的字典
+        
+    Returns:
+        DataFrame 或 None
+    """
+    try:
+        # 尝试导入共享配置
+        try:
+            from src.utils.iotdb_config import load_iotdb_config
+            config = load_iotdb_config()
+        except ImportError:
+            # 使用默认配置
+            config = {
+                "host": "192.168.199.185",
+                "port": "6667",
+                "user": "root",
+                "password": "root"
+            }
+        
+        from iotdb.Session import Session
+        
+        session = Session(
+            config['host'], 
+            config['port'], 
+            config['user'], 
+            config['password'],
+            fetch_size=2000000
+        )
+        session.open(False)
+        
+        st = metadata['start_time'].strftime('%Y-%m-%d %H:%M:%S')
+        et = metadata['end_time'].strftime('%Y-%m-%d %H:%M:%S')
+        point_id = metadata['point_id']
+        
+        # 注意：这里假设 path 需要从某处获取，暂时使用默认值
+        # 实际使用时可能需要更复杂的路径推断逻辑
+        default_path = config.get('default_path', 'root.supcon.nb.whlj.LJSJ')
+        
+        query = f"select `{point_id}` from {default_path} where time >= {st.replace(' ', 'T')} and time <= {et.replace(' ', 'T')}"
+        
+        result = session.execute_query_statement(query)
+        df = result.todf()
+        
+        if len(df) > 0:
+            df.set_index('Time', inplace=True)
+            df.index = pd.to_datetime(df.index.astype('int64')).tz_localize('UTC').tz_convert('Asia/Shanghai')
+        
+        session.close()
+        return df
+        
+    except Exception as e:
+        print(f"[fetch_from_iotdb] Error: {e}")
+        return None
 
 
 # ==================== Static Files ====================
@@ -247,8 +348,26 @@ def get_data(filename, current_user):
         user_path = users.get(current_user, {}).get('data_path', DATA_DIR)
         
         filepath = os.path.join(user_path, filename)
+        
+        # Level 3 Fallback: 如果文件不存在，尝试从文件名解析元数据并从 IoTDB 重新拉取
         if not os.path.exists(filepath):
-            return jsonify({'success': False, 'error': 'File not found'}), 404
+            metadata = parse_standard_filename(filename)
+            if metadata:
+                print(f"[Level 3 Fallback] File not found, attempting to fetch from IoTDB: {filename}")
+                try:
+                    df = fetch_from_iotdb(metadata)
+                    if df is not None and len(df) > 0:
+                        # 缓存到本地
+                        os.makedirs(user_path, exist_ok=True)
+                        df.to_csv(filepath, index=True)
+                        print(f"[Level 3 Fallback] Successfully fetched and cached: {filepath}")
+                    else:
+                        return jsonify({'success': False, 'error': 'File not found and IoTDB fetch failed'}), 404
+                except Exception as e:
+                    print(f"[Level 3 Fallback] IoTDB fetch error: {e}")
+                    return jsonify({'success': False, 'error': f'File not found: {filename}'}), 404
+            else:
+                return jsonify({'success': False, 'error': 'File not found'}), 404
         
         file_ext = os.path.splitext(filename)[1].lower()
         if file_ext == '.csv':
@@ -522,12 +641,25 @@ def get_annotations(filename, current_user):
                              ends = np.where(diff == -1)[0] - 1
                              
                              # Merge all segments into a single annotation
-                             label_obj = {
-                                 "id": "chatts_detected",
-                                 "text": "ChatTS",
-                                 "color": "#ec4899",
-                                 "categoryId": "algorithm_results"
-                             }
+                             # Check algorithm type from filename
+                             if 'qwen' in filename.lower():
+                                 label_obj = {
+                                     "id": "qwen_detected",
+                                     "text": "Qwen",
+                                     "color": "#6366f1",
+                                     "categoryId": "algorithm_results"
+                                 }
+                                 algo_desc = "Qwen Auto-Detection"
+                                 algo_id_suffix = "qwen"
+                             else:
+                                 label_obj = {
+                                     "id": "chatts_detected",
+                                     "text": "ChatTS",
+                                     "color": "#ec4899",
+                                     "categoryId": "algorithm_results"
+                                 }
+                                 algo_desc = "ChatTS Auto-Detection"
+                                 algo_id_suffix = "chatts"
                              all_segments = []
                              for i, (start, end) in enumerate(zip(starts, ends)):
                                  all_segments.append({
@@ -539,13 +671,13 @@ def get_annotations(filename, current_user):
                              
                              if all_segments:
                                  auto_annotations.append({
-                                     "id": f"auto_{int(time.time())}_chatts",
+                                     "id": f"auto_{int(time.time())}_{algo_id_suffix}",
                                      "label": label_obj,
                                      "segments": all_segments,
                                      "local_change": {
                                           "trend": "其他",
                                           "confidence": "high",
-                                          "desc": "ChatTS Auto-Detection"
+                                          "desc": algo_desc
                                      }
                                  })
                              print(f"[DEBUG] Auto-generated 1 annotation with {len(all_segments)} segments from global_mask")

@@ -19,12 +19,20 @@ Make sure that `flash-attention` and `DeepSpeed` are installed.
 
 ## Steps to reproduce
 1. Download the training datasets from [ChatTS-Training-Dataset](https://huggingface.co/datasets/ChatTSRepo/ChatTS-Training-Dataset). Put the folders under `data/` (e.g., `data/align_256/`, `data/align_random/`, etc).
-2. Configure your base model (see the instructions below), output model, training datasets and training parameters in `scripts/full/train_stage1.sh` and `train_stage2.sh`.
+2. Configure your base model (see the instructions below), output model, training datasets and training parameters in `scripts/chatts/full/train_stage1.sh` and `train_stage2.sh`.
 3. Run `bash scripts/train_stage1.sh` and `bash scripts/train_stage2.sh`.
 
 ## Use your own datasets
-1. **If you want to use your own datasets**, put your own training data in `data/`. The example of dataset format is shown in [chatts_dev.jsonl](data/chatts_dev.jsonl). Set your training data path in `data/dataset_info.json`.
-2. Configure your base model (see the instructions below), output model, training datasets and training parameters in `scripts/full/dev.sh` (for full SFT) or `scripts/lora/dev.sh`.
+1. **If you want to use your own datasets (ChatTS)**, put your training data in `/home/share/data/training_chatts`. The example of dataset format is shown in [chatts_dev.jsonl](data/chatts_dev.jsonl). Set your training data path in `/home/share/data/training_chatts/dataset_info.json`.
+2. Configure your base model (see the instructions below), output model, training datasets and training parameters in `scripts/chatts/full/dev.sh` (for full SFT) or `scripts/chatts/lora/dev.sh`.
+
+## Dataset info separation
+- **ChatTS**: `/home/share/data/training_chatts/dataset_info.json`
+- **Qwen**: `/home/share/data/training_qwen/dataset_info.json`
+
+## Output separation
+- ChatTS 训练产物：`/home/douff/ts/ts-iteration-loop/services/training/saves/chatts`
+- Qwen 训练产物：`/home/douff/ts/ts-iteration-loop/services/training/saves/qwen`
 3. Run `bash scripts/train_chatts.sh` for full SFT. Run `bash scripts/train_lora.sh` for LoRA SFT.
 
 ## Credit

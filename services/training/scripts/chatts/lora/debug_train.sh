@@ -4,12 +4,14 @@
 export CUDA_VISIBLE_DEVICES=0
 export CUDA_HOME=$CONDA_PREFIX
 export PATH=$CUDA_HOME/bin:$PATH
+DATASET_DIR="${DATASET_DIR:-/home/share/data/training_chatts}"
 
 # Run command with python directly (Single GPU debug)
 python src/train.py \
     --stage sft \
     --model_name_or_path /home/share/llm_models/bytedance-research/ChatTS-14B \
     --dataset chatts_tune \
+    --dataset_dir "${DATASET_DIR}" \
     --template chatts \
     --finetuning_type lora \
     --lora_target q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj \

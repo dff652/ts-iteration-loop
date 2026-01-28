@@ -90,7 +90,7 @@ python scripts/fix_jsonl_format.py \
 
 ## 使用修复后的数据训练
 
-修改 `data/dataset_info.json`:
+修改 `/home/share/data/training_chatts/dataset_info.json`:
 
 ```json
 "chatts_tune": {

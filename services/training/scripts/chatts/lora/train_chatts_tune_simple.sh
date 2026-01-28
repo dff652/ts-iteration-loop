@@ -3,13 +3,15 @@
 # Configuration
 MODEL_PATH="llm_models/ChatTS-14B"
 DATASET="chatts_tune"
-OUTPUT_DIR="saves/chatts-14b/qlora/gdsh_tune"
+DATASET_DIR="${DATASET_DIR:-/home/share/data/training_chatts}"
+OUTPUT_DIR="${OUTPUT_DIR:-saves/chatts-14b/qlora/gdsh_tune}"
 
 # Run training (Pure Single GPU QLoRA - No DeepSpeed/Torchrun Overhead)
 llamafactory-cli train \
     --stage sft \
     --model_name_or_path "${MODEL_PATH}" \
     --dataset "${DATASET}" \
+    --dataset_dir "${DATASET_DIR}" \
     --interleave_probs "1.0" \
     --do_train \
     --mix_strategy "interleave_over" \

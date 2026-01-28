@@ -207,6 +207,8 @@ def parse_args():
     parser.add_argument('--start-time', default=None, help='Start Time (YYYY-MM-DD HH:MM:SS)')
     parser.add_argument('--end-time', default=None, help='End Time (YYYY-MM-DD HH:MM:SS)')
     parser.add_argument('--target-points', type=int, default=5000, help='Target points for downsampling')
+    parser.add_argument('--output-dir', default='./data_downsampled', help='Output directory for CSV files')
+    parser.add_argument('--image-dir', default=None, help='Output directory for Image files (optional)')
     return parser.parse_args()
 
 def process_single_request(args):
@@ -299,30 +301,43 @@ def process_single_request(args):
             df_downsampled = downsample_data(data_series, ratio=args.target_points)
             df_downsampled['date'] = pd.date_range(start=pd.Timestamp.now().floor('s'), periods=len(df_downsampled), freq='1s')
 
-            # 文件名处理
+            # 文件名处理：包含时间范围元数据
             base_name = sanitize(col)
             # 使用 source 的最后一段作为 path_name 标识
             path_name = args.source.split('.')[-1]
-            file_name = f"{path_name}_{base_name}"
+            
+            # 从数据中提取实际时间范围
+            actual_start = data_series.index.min()
+            actual_end = data_series.index.max()
+            
+            # 格式化时间为文件名安全格式 (YYYYMMDD_HHMMSS)
+            start_str = actual_start.strftime('%Y%m%d_%H%M%S') if pd.notna(actual_start) else 'unknown'
+            end_str = actual_end.strftime('%Y%m%d_%H%M%S') if pd.notna(actual_end) else 'unknown'
+            
+            # 新文件名格式: {path_name}_{point_name}_{start}_{end}.csv
+            file_name = f"{path_name}_{base_name}_{start_str}_to_{end_str}"
 
             # 确保目录存在
-            os.makedirs('./data_downsampled', exist_ok=True)
+            os.makedirs(args.output_dir, exist_ok=True)
             # os.makedirs('./data/picture_data', exist_ok=True)
 
             # 保存
             # 注意：DataProcessingAdapter 扫描 data_downsampled 下的 .csv
-            csv_path = f'./data_downsampled/{file_name}.csv'
+            csv_path = os.path.join(args.output_dir, f'{file_name}.csv')
             df_downsampled.to_csv(csv_path, index=False, encoding='utf-8')
             print(f"Saved CSV: {csv_path}")
 
             # 图片
-            # 暂时注释掉图片生成，或保存到 logs 目录，因为 adapter 并不使用这里的图片
-            # plot_series = pd.Series(df_downsampled['value'].values, index=range(len(df_downsampled)))
-            # img_path = f'./data/picture_data/{file_name}.jpg'
-            # img_success = create_and_save_plot(plot_series, img_path)
-            
-            # if img_success:
-            #    print(f"Saved Image: {img_path}")
+            # 图片
+            if args.image_dir:
+                os.makedirs(args.image_dir, exist_ok=True)
+                
+                plot_series = pd.Series(df_downsampled['value'].values, index=range(len(df_downsampled)))
+                img_path = os.path.join(args.image_dir, f'{file_name}.jpg')
+                img_success = create_and_save_plot(plot_series, img_path)
+                
+                if img_success:
+                   print(f"Saved Image: {img_path}")
             success_count += 1
         
         return success_count > 0

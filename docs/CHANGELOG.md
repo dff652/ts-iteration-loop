@@ -1,5 +1,55 @@
 # 更新日志
 
+## [0.3.1] - 2026-01-28
+
+### 新增
+- 🔄 **数据闭环自动化**:
+    - **自动生图**: 数据采集脚本 (`get_downsampled.py`) 支持同步生成图片至 `/home/share/data/images`
+    - **智能回退**: Qwen 格式转换时若缺失图片，自动查找源 CSV 并补全生成，无需人工干预
+- ⚡ **体验优化**:
+    - **秒级预览**: 数据获取界面优先加载预生成图片，大幅提升预览响应速度
+    - **引导式报错**: 转换缺失源文件时提供明确的修复指引
+
+### 优化
+- 🔧 **代码重构**: 
+    - 消除 `get_downsampled.py` 中的图片路径硬编码，统一受控于全局配置
+
+## [0.3.0] - 2026-01-28
+
+### 新增
+- 🤖 **Qwen-VL 多模态检测**:
+    - **推理集成**: 支持 Qwen2-VL-7B-Instruct 模型进行异常检测
+    - **标注支持**: 标注工具支持 "Qwen" 算法预标注结果展示
+    - **训练配置**: 新增 `DATA_TRAINING_QWEN_IMAGES_DIR` 路径配置支持图片数据
+- 🛠️ **数据转换 UI**:
+    - **动态配置**: ChatTS/Qwen 转换时自动切换 "Data Dir" / "Image Dir" 标签
+
+### 优化
+- 🏗️ **项目结构重构**:
+    - **配置整合**: 合并 `config/` 至 `configs/`，统一管理全局配置
+    - **代码清理**: 移除 `services/training/` 下的垃圾日志和临时脚本
+    - **Inference 整理**: 重组 `services/inference/`，新建 `scripts/` 和 `tests/` 目录
+    - **数据路径重构**: 
+        - 拆分训练数据至 `services/training/data/{chatts,qwen}`
+        - 新增独立图片源目录 `/home/share/data/images`
+- 🔧 **代码质量**:
+    - **硬编码修复**: 消除 `training_ui.py` 和 `chatts_training.py` 中的用户路径和 IP 硬编码
+    - **Annotator 修复**: 解决前端新建标注无法显示的问题，修复标签保存逻辑
+
+### 变更
+- `config/iotdb_config.json` -> `configs/iotdb_config.json`
+- `settings.py` 新增 `DEFAULT_USER` 和 `WEBUI_HOST` 配置项
+
+## [0.2.3] - 2026-01-27
+
+### 新增
+- 📁 **数据链路优化**:
+    - **统一命名规范**: 新格式 `{PointID}_{StartTime}_{EndTime}_{Algorithm}.csv`
+    - **共享 IoTDB 配置**: `config/iotdb_config.json` 统一管理连接参数
+    - **Level 3 兜底机制**: 文件缺失时自动从 IoTDB 重新拉取
+    - **统一数据源**: 推理监控与数据获取共享文件列表
+- 🛠️ **数据修复工具**: `scripts/repair_data.py` 批量修复旧数据文件命名
+
 ## [0.2.2] - 2026-01-23
 
 ### 新增

@@ -4,7 +4,7 @@
 
 ## 1. 核心訓練參數
 
-在 `scripts/full/dev.sh` 或您的自定義腳本中，以下參數至關重要：
+在 `scripts/chatts/full/dev.sh` 或您的自定義腳本中，以下參數至關重要：
 
 - `--template chatts`: 必須使用 `chatts` 模板，以正確處理時序占位符和特殊 Token。
 - `--timeseries_sft_lr 1e-5`: 設定時序編碼器（`ts_encoder`）的獨立學習率。通常建議與主學習率保持一致或略大。

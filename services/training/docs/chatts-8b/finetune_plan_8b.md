@@ -20,7 +20,7 @@
     *   `bitsandbytes`: 0.49.0 (支持 4-bit 量化)
 
 ### 2.3 模型与数据
-*   **基座模型**: `ChatTS-8B` (位于 `/home/data1/llm_models/bytedance-research/ChatTS-8B`)
+*   **基座模型**: `ChatTS-8B` (位于 `/home/share/llm_models/bytedance-research/ChatTS-8B`)
 *   **模型类型**: `qwen3ts`
 *   **微调数据**: `/home/dff652/TS-anomaly-detection/ChatTS-Training/data/chatts_tune/train.jsonl` (共 421 条)
 
@@ -45,7 +45,7 @@
 
 - [ ] **环境验证**: 确认 `chatts_train_env` 的可用性。
 - [ ] **数据检查**: 再次确认 `train.jsonl` 中 `timeseries` 的长度与 `qwen3ts` 配置的兼容性（模型支持 8192，当前数据 5000，符合要求）。
-- [ ] **脚本编写**: 创建 `scripts/lora/train_chatts_8b_ds3.sh`。
+- [ ] **脚本编写**: 创建 `scripts/chatts/lora/train_chatts_8b_ds3.sh`。
 - [ ] **执行微调**: 启动训练并监控 Loss 与系统资源。
 - [ ] **结果报告**: 记录微调进度与产出路径。
 

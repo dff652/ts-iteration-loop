@@ -6,14 +6,14 @@
 - [ ] Apply Xavier normal initialization to `ts_encoder`.
 
 ## 2. Dataset Setup
-- [ ] Add entry to `data/dataset_info.json`. (See [Data Preparation Guide](data_preparation.md))
+- [ ] Add entry to `/home/share/data/training_chatts/dataset_info.json`. (See [Data Preparation Guide](data_preparation.md))
 - [ ] Verify `timeseries` column data format.
 
 ## 3. Training Script Configuration
-- [ ] Create `scripts/full/chatts_tune_14b.sh`. (See [Training Configuration Guide](training_config.md))
+- [ ] Create `scripts/chatts/full/chatts_tune_14b.sh`. (See [Training Configuration Guide](training_config.md))
 - [ ] Configure `model_name_or_path` and `dataset`.
 
 ## 4. Execution & Evaluation
-- [ ] Launch training: `bash scripts/full/chatts_tune_14b.sh`.
+- [ ] Launch training: `bash scripts/chatts/full/chatts_tune_14b.sh`.
 - [ ] Monitor loss convergence.
 - [ ] Run inference test using `src/cli_demo.py`.

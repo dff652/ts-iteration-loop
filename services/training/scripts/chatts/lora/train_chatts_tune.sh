@@ -1,28 +1,27 @@
 #!/bin/bash
 
-# 自动切换到项目根目录
-cd "$(dirname "$0")/../.." || exit 1
-
 # Environment variables
 export NCCL_DEBUG=WARN 
 export DEEPSPEED_TIMEOUT=120
 
 # Configuration
-MODEL_PATH="/home/douff/ts/ChatTS-8B"
-DATASET="chatts_tune_5000"
-OUTPUT_DIR="saves/chatts-8b/qlora/RTX6000_tune_qlora_${TIMESTAMP}"
+MODEL_PATH="llm_models/ChatTS-14B"
+DATASET="chatts_tune"
+DATASET_DIR="${DATASET_DIR:-/home/share/data/training_chatts}"
+OUTPUT_DIR="${OUTPUT_DIR:-saves/chatts-14b/lora/2080Ti_tune_20251226}"
 
-# Run training (Dual GPU QLoRA)
-torchrun --nproc_per_node=2 src/train.py \
+# Run training
+deepspeed --num_gpus 2 --master_port=19901 src/train.py \
+    --deepspeed ds_config/ds_config_3_offload.json \
     --stage sft \
     --model_name_or_path "${MODEL_PATH}" \
     --dataset "${DATASET}" \
+    --dataset_dir "${DATASET_DIR}" \
     --interleave_probs "1.0" \
     --do_train \
     --mix_strategy "interleave_over" \
     --template "chatts" \
     --finetuning_type lora \
-    --quantization_bit 4 \
     --lora_rank 8 \
     --lora_target "q_proj,k_proj,v_proj" \
     --flash_attn disabled \
@@ -44,4 +43,4 @@ torchrun --nproc_per_node=2 src/train.py \
     --preprocessing_num_workers 4 \
     --trust_remote_code True \
     --cutoff_len 4096 \
-    --low_cpu_mem_usage True
+    --ddp_timeout 180000000

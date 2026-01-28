@@ -46,7 +46,7 @@
     *   `flash-attn`: Disabled (因编译环境问题暂时禁用，使用 4-bit 量化时影响不大)
 
 ### 3.2 训练配置
-*   **脚本**: `scripts/lora/train_chatts_tune_qlora_safe.sh`
+*   **脚本**: `scripts/chatts/lora/train_chatts_tune_qlora_safe.sh`
 *   **策略**: QLoRA (Quantized LoRA)
 *   **精度**: 4-bit 加载 (NF4), 16-bit 计算 (FP16)
 *   **显存占用**: 预计单卡约 10GB (远低于 2080 Ti 的 22GB 上限)。
@@ -63,7 +63,7 @@
 conda activate chatts_train_env
 
 # 2. 启动训练 (建议使用 nohup 防止断开)
-nohup bash scripts/lora/train_chatts_tune_qlora_safe.sh > my_train.log 2>&1 &
+nohup bash scripts/chatts/lora/train_chatts_tune_qlora_safe.sh > my_train.log 2>&1 &
 
 # 3. 监控日志
 tail -f my_train.log

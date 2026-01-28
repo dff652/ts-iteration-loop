@@ -2,9 +2,10 @@
 微调服务 API
 封装 ChatTS-Training 项目功能
 """
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Query
 from sqlalchemy.orm import Session
 from typing import List
+import json
 import uuid
 
 from src.db.database import get_db, Task
@@ -15,14 +16,27 @@ from src.models.schemas import (
 from src.adapters.chatts_training import ChatTSTrainingAdapter
 
 router = APIRouter()
-adapter = ChatTSTrainingAdapter()
+
+def get_adapter(model_family: str) -> ChatTSTrainingAdapter:
+    return ChatTSTrainingAdapter(model_family=model_family or "chatts")
+
+
+def get_adapter_from_task(task: Task) -> ChatTSTrainingAdapter:
+    model_family = "chatts"
+    try:
+        if task and task.config:
+            cfg = json.loads(task.config)
+            model_family = cfg.get("model_family", "chatts")
+    except Exception:
+        pass
+    return get_adapter(model_family)
 
 
 @router.get("/configs", response_model=ApiResponse)
-async def list_training_configs():
+async def list_training_configs(model_family: str = Query("chatts", description="chatts or qwen")):
     """获取训练配置列表"""
     try:
-        configs = adapter.list_configs()
+        configs = get_adapter(model_family).list_configs()
         return ApiResponse(
             success=True,
             data={"configs": configs},
@@ -33,14 +47,28 @@ async def list_training_configs():
 
 
 @router.get("/models", response_model=ApiResponse)
-async def list_trained_models():
+async def list_trained_models(model_family: str = Query("chatts", description="chatts or qwen")):
     """获取已训练模型列表"""
     try:
-        models = adapter.list_models()
+        models = get_adapter(model_family).list_models()
         return ApiResponse(
             success=True,
             data={"models": models},
             message=f"找到 {len(models)} 个模型"
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/datasets", response_model=ApiResponse)
+async def list_training_datasets(model_family: str = Query("chatts", description="chatts or qwen")):
+    """获取训练数据集列表"""
+    try:
+        datasets = get_adapter(model_family).get_dataset_list()
+        return ApiResponse(
+            success=True,
+            data={"datasets": datasets},
+            message=f"找到 {len(datasets)} 个数据集"
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -67,7 +95,7 @@ async def start_training(
     
     # 后台执行训练
     background_tasks.add_task(
-        adapter.run_training,
+        get_adapter(request.model_family).run_training,
         task_id=task_id,
         config_name=request.config_name,
         version_tag=request.version_tag
@@ -88,7 +116,7 @@ async def get_training_status(task_id: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="任务不存在")
     
     # 获取训练进度
-    progress = adapter.get_training_progress(task_id)
+    progress = get_adapter_from_task(task).get_training_progress(task_id)
     
     return ApiResponse(
         success=True,
@@ -112,7 +140,7 @@ async def stop_training(task_id: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail="任务未在运行中")
     
     try:
-        adapter.stop_training(task_id)
+        get_adapter_from_task(task).stop_training(task_id)
         task.status = TaskStatus.CANCELLED
         db.commit()
         
@@ -126,18 +154,18 @@ async def stop_training(task_id: str, db: Session = Depends(get_db)):
 
 
 @router.get("/models/{model_name}", response_model=ApiResponse)
-async def get_model_details(model_name: str):
+async def get_model_details(model_name: str, model_family: str = Query("chatts", description="chatts or qwen")):
     """获取模型详细信息（包含训练产物）"""
     try:
         # 查找模型
-        models = adapter.list_models()
+        models = get_adapter(model_family).list_models()
         model = next((m for m in models if m["name"] == model_name), None)
         
         if not model:
             raise HTTPException(status_code=404, detail=f"模型不存在: {model_name}")
         
         # 获取详细信息
-        details = adapter.get_model_details(model["path"])
+        details = get_adapter(model_family).get_model_details(model["path"])
         
         return ApiResponse(
             success=True,
@@ -151,18 +179,18 @@ async def get_model_details(model_name: str):
 
 
 @router.get("/models/{model_name}/log", response_model=ApiResponse)
-async def get_model_training_log(model_name: str):
+async def get_model_training_log(model_name: str, model_family: str = Query("chatts", description="chatts or qwen")):
     """获取模型训练日志（用于绘制 loss 曲线）"""
     try:
         # 查找模型
-        models = adapter.list_models()
+        models = get_adapter(model_family).list_models()
         model = next((m for m in models if m["name"] == model_name), None)
         
         if not model:
             raise HTTPException(status_code=404, detail=f"模型不存在: {model_name}")
         
         # 获取训练日志
-        logs = adapter.get_training_log(model["path"])
+        logs = get_adapter(model_family).get_training_log(model["path"])
         
         return ApiResponse(
             success=True,
@@ -176,13 +204,13 @@ async def get_model_training_log(model_name: str):
 
 
 @router.get("/models/{model_name}/loss-image")
-async def get_model_loss_image(model_name: str):
+async def get_model_loss_image(model_name: str, model_family: str = Query("chatts", description="chatts or qwen")):
     """获取模型 loss 曲线图片"""
     from fastapi.responses import FileResponse
     
     try:
         # 查找模型
-        models = adapter.list_models()
+        models = get_adapter(model_family).list_models()
         model = next((m for m in models if m["name"] == model_name), None)
         
         if not model:
@@ -201,4 +229,3 @@ async def get_model_loss_image(model_name: str):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-

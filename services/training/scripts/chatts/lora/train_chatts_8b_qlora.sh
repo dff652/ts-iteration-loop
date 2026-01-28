@@ -6,25 +6,25 @@ cd "$(dirname "$0")/../.." || exit 1
 # Environment variables
 export NCCL_DEBUG=WARN 
 export DEEPSPEED_TIMEOUT=120
-export CUDA_VISIBLE_DEVICES=0,1
-TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
+
 # Configuration
 MODEL_PATH="/home/share/llm_models/bytedance-research/ChatTS-8B"
-DATASET="chatts_tune_1024_split"
-OUTPUT_DIR="saves/chatts-8b/lora/RTX6000_tune_1024_no_offload_${TIMESTAMP}"
+DATASET="chatts_tune_5000"
+DATASET_DIR="${DATASET_DIR:-/home/share/data/training_chatts}"
+OUTPUT_DIR="${OUTPUT_DIR:-saves/chatts-8b/qlora/RTX6000_tune_qlora_${TIMESTAMP}}"
 
-# Run training (Dual GPU DeepSpeed ZeRO-3 WITHOUT Offload)
-# This avoids the CUDA version mismatch error since it doesn't need to compile CPUAdam.
+# Run training (Dual GPU QLoRA)
 torchrun --nproc_per_node=2 src/train.py \
-    --deepspeed ds_config/ds_config_3.json \
     --stage sft \
     --model_name_or_path "${MODEL_PATH}" \
     --dataset "${DATASET}" \
+    --dataset_dir "${DATASET_DIR}" \
     --interleave_probs "1.0" \
     --do_train \
     --mix_strategy "interleave_over" \
     --template "chatts" \
     --finetuning_type lora \
+    --quantization_bit 4 \
     --lora_rank 8 \
     --lora_target "q_proj,k_proj,v_proj" \
     --flash_attn disabled \
@@ -46,6 +46,4 @@ torchrun --nproc_per_node=2 src/train.py \
     --preprocessing_num_workers 4 \
     --trust_remote_code True \
     --cutoff_len 4096 \
-    --low_cpu_mem_usage True \
-    --lora_dropout 0.05 \
-    --max_steps 90
+    --low_cpu_mem_usage True

@@ -5,23 +5,23 @@ export NCCL_DEBUG=WARN
 export DEEPSPEED_TIMEOUT=120
 
 # Configuration
-MODEL_PATH="llm_models/ChatTS-14B"
+MODEL_PATH="/home/share/llm_models/bytedance-research/ChatTS-8B"
 DATASET="chatts_tune"
-# 动态生成带时间戳的输出目录
-TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
-OUTPUT_DIR="saves/chatts-14b/lora/2080Ti_tune_qlora_safe_${TIMESTAMP}"
+DATASET_DIR="${DATASET_DIR:-/home/share/data/training_chatts}"
+OUTPUT_DIR="${OUTPUT_DIR:-saves/chatts-8b/lora/gdsh_tune_ds3}"
 
-# Run training (Single GPU QLoRA with aggressive RAM saving)
+# Run training (Dual GPU DeepSpeed ZeRO-3)
 torchrun --nproc_per_node=2 src/train.py \
+    --deepspeed ds_config/ds_config_3_offload.json \
     --stage sft \
     --model_name_or_path "${MODEL_PATH}" \
     --dataset "${DATASET}" \
+    --dataset_dir "${DATASET_DIR}" \
     --interleave_probs "1.0" \
     --do_train \
     --mix_strategy "interleave_over" \
     --template "chatts" \
     --finetuning_type lora \
-    --quantization_bit 4 \
     --lora_rank 8 \
     --lora_target "q_proj,k_proj,v_proj" \
     --flash_attn disabled \
@@ -40,7 +40,7 @@ torchrun --nproc_per_node=2 src/train.py \
     --fp16 \
     --save_only_model \
     --save_safetensors False \
-    --preprocessing_num_workers 1 \
+    --preprocessing_num_workers 4 \
     --trust_remote_code True \
     --cutoff_len 4096 \
     --low_cpu_mem_usage True

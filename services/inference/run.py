@@ -81,6 +81,11 @@ def get_timer_detect():
     from timer_detect import timer_detect
     return timer_detect
 
+# 引入 Qwen 检测方法
+def get_qwen_detect():
+    from qwen_detect import qwen_detect
+    return qwen_detect
+
 from config import load_args, save_args_to_file
 
 # 导入性能跟踪日志模块
@@ -594,6 +599,8 @@ def process_sensor(sensor_info, args):
     # 确定使用的设备
     if args.method == 'chatts':
         metrics.device = args.chatts_device
+    elif args.method == 'qwen':
+        metrics.device = getattr(args, 'chatts_device', 'cuda') # Reuse ChatTS device arg or default to cuda
     elif args.method == 'timer':
         metrics.device = args.timer_device
     else:
@@ -614,7 +621,10 @@ def process_sensor(sensor_info, args):
     if args.use_seasonal: components.append("seasonal")
     if args.use_resid: components.append("resid")
     component_str = "_".join(components) if components else "results"
-    file_name = f"{args.task_name}_{args.method}_{args.downsampler}_{args.ratio}_{args.num_points}_{column}_{date_str}_{component_str}.csv"
+    
+    # Handle empty task_name
+    task_prefix = f"{args.task_name}_" if args.task_name else ""
+    file_name = f"{task_prefix}{args.method}_{args.downsampler}_{args.ratio}_{args.num_points}_{column}_{date_str}_{component_str}.csv"
     file_path = os.path.join(folder_path, file_name)
 
     if os.path.exists(file_path):
@@ -846,6 +856,7 @@ def process_sensor(sensor_info, args):
             
             logging.info(f"=== Finished processing sensor (chatts): {sensor_info} ===")
             return data
+
         except Exception as e:
             print(f"ChatTS 方法执行失败: {e}")
             import traceback
@@ -855,6 +866,87 @@ def process_sensor(sensor_info, args):
             metrics.total_time = time.perf_counter() - total_start_time
             perf_logger.log_metrics(metrics)
             return None
+
+    elif args.method == 'qwen':
+        # Qwen VLM 异常检测
+        try:
+            qwen_detect = get_qwen_detect()
+            point_name = column
+            input_df = pd.DataFrame({point_name: raw_data[point_name]})
+            
+            # 获取执行前的 GPU 状态
+            device = getattr(args, 'chatts_device', 'cuda')
+            gpu_metrics_before = perf_logger.get_gpu_metrics(device)
+            
+            with Timer("model_inference") as t_inference:
+                global_mask, anomalies, position_index_ds = qwen_detect(
+                    data=input_df,
+                    model_path=args.chatts_model_path, # Reuse ChatTS arg for generic VLM
+                    device=device,
+                    prompt_template_name=getattr(args, 'chatts_prompt_template', 'default'),
+                    n_downsample=getattr(args, 'n_downsample', 5000), # Pass downsample config
+                )
+            metrics.anomaly_detect_time = t_inference.elapsed
+            
+            # 记录 GPU 使用情况
+            gpu_metrics_after = perf_logger.get_gpu_metrics(device)
+            metrics.gpu_memory_used_mb = max(0, gpu_metrics_after.get("memory_used", 0) - gpu_metrics_before.get("memory_used", 0))
+            metrics.gpu_utilization = gpu_metrics_after.get("utilization", 0)
+            
+            # 结果处理 (Standardize with other methods)
+            data = raw_data.copy()
+            # Note: qwen_detect returns full-length global_mask if it does interpolation internally
+            # or returns partial if not. qwen_detect code seems to handle interpolation if needed or return full.
+            # Assuming full mask returned.
+            
+            if len(global_mask) != len(data):
+                # Fallback interpolation if length mismatch
+                temp_series = pd.Series(global_mask, index=data.index[position_index_ds])
+                temp_series = temp_series.reindex(data.index, method='nearest')
+                global_mask = temp_series.values
+            
+            outlier_mask = global_mask
+            local_mask = np.zeros_like(global_mask)
+            global_mask_cluster = np.zeros_like(global_mask)
+            local_mask_cluster = np.zeros_like(global_mask)
+            
+            data['outlier_mask'] = outlier_mask
+            data['global_mask'] = global_mask
+            data['local_mask'] = local_mask
+            data['global_mask_cluster'] = global_mask_cluster
+            data['local_mask_cluster'] = local_mask_cluster
+            
+            # Metrics
+            metrics.downsampled_data_length = len(position_index_ds) if position_index_ds is not None else metrics.raw_data_length
+            metrics.downsample_ratio = metrics.downsampled_data_length / metrics.raw_data_length if metrics.raw_data_length > 0 else 0
+            metrics.anomaly_count = int(np.sum(global_mask))
+            metrics.anomaly_ratio = (metrics.anomaly_count / len(global_mask) * 100) if len(global_mask) > 0 else 0
+            
+            # Save
+            with Timer("save") as t_save:
+                print(f"Saving results for {sensor_info} with shape {data.shape}")
+                save_results(data, sensor_info, args, position_index=position_index_ds)
+            metrics.save_time = t_save.elapsed
+            
+            # System metrics
+            sys_metrics = perf_logger.get_system_metrics()
+            metrics.cpu_percent = sys_metrics["cpu_percent"]
+            metrics.memory_used_gb = sys_metrics["memory_used_gb"]
+            metrics.memory_percent = sys_metrics["memory_percent"]
+            
+            metrics.status = "success"
+            metrics.total_time = time.perf_counter() - total_start_time
+            perf_logger.log_metrics(metrics)
+            
+            logging.info(f"=== Finished processing sensor (qwen): {sensor_info} ===")
+            return data
+            
+        except Exception as e:
+            print(f"Qwen 方法执行失败: {e}")
+            metrics.status = "failed"
+            metrics.error_message = str(e)
+            # import traceback
+            # traceback.print_exc()
 
     elif args.method == 'timer':
         # Timer 大模型残差异常检测

@@ -7,6 +7,11 @@
           "color": "#ec4899",
           "id": "chatts_detected",
           "text": "ChatTS"
+        },
+        {
+          "color": "#6366f1",
+          "id": "qwen_detected",
+          "text": "Qwen"
         }
       ],
       "name": "算法结果"

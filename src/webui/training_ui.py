@@ -16,15 +16,24 @@ from src.adapters.chatts_training import ChatTSTrainingAdapter
 from src.adapters.data_processing import DataProcessingAdapter
 from src.adapters.check_outlier import CheckOutlierAdapter
 from src.utils.iotdb_config import load_iotdb_config
+from src.utils.file_filters import is_inference_or_generated_csv, match_result_method
 
+
+TRAINING_MODEL_FAMILIES = ["chatts", "qwen"]
 
 # 初始化适配器
-training_adapter = ChatTSTrainingAdapter()
+chatts_adapter = ChatTSTrainingAdapter(model_family="chatts")
+qwen_adapter = ChatTSTrainingAdapter(model_family="qwen")
+training_adapter = chatts_adapter
 data_adapter = DataProcessingAdapter()
 inference_adapter = CheckOutlierAdapter()
 
 # 为了兼容性保留旧变量名
 adapter = training_adapter
+
+
+def get_training_adapter(model_family: str) -> ChatTSTrainingAdapter:
+    return qwen_adapter if model_family == "qwen" else chatts_adapter
 
 # 结果文件目录（使用标准化路径）
 RESULTS_BASE_PATH = Path(settings.DATA_INFERENCE_DIR)
@@ -34,6 +43,21 @@ RESULTS_BASE_PATH = Path(settings.DATA_INFERENCE_DIR)
 
 # 文件名到完整路径的映射 (用于在UI显示文件名，内部使用完整路径)
 _unified_file_mapping: Dict[str, str] = {}
+
+# UI logs can grow very large; keep a tail to avoid infinite expansion.
+LOG_TAIL_MAX_CHARS = 20000
+
+# Force fixed-height scrolling for log widgets in Gradio 6.
+LOG_SCROLL_CSS = """
+#training-log, #inference-log {
+  height: 320px !important;
+  overflow: auto !important;
+}
+#training-log pre, #inference-log pre {
+  max-height: 320px;
+  overflow: auto;
+}
+"""
 
 
 def get_unified_file_list() -> List[str]:
@@ -50,10 +74,8 @@ def get_unified_file_list() -> List[str]:
     if data_path.exists():
         for f in data_path.glob("*.csv"):
             if f.exists():
-                # 过滤掉推理结果文件 (global_chatts_ 开头, chatts_ 开头, timer_ 开头, 以及包含 _trend_resid 的文件)
-                if f.name.startswith(("global_chatts_", "chatts_", "_chatts_", "timer_")):
-                    continue
-                if "_trend_resid" in f.name:
+                # 过滤掉推理结果/中间文件
+                if is_inference_or_generated_csv(f.name):
                     continue
                 full_path = str(f)
                 all_files.append(full_path)
@@ -91,6 +113,28 @@ def resolve_filenames_to_paths(filenames: List[str]) -> List[str]:
             # 如果已经是完整路径
             paths.append(name)
     return paths
+
+
+def format_log_html(log_content: str) -> str:
+    """Format log content as scrollable HTML"""
+    if not log_content:
+        log_content = ""
+    # Simple escaping
+    safe_content = log_content.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    return f"""
+    <div style="height: 300px;
+                overflow-y: scroll;
+                background-color: #f5f5f5;
+                font-family: monospace;
+                white-space: pre-wrap;
+                font-size: 13px;
+                line-height: 1.4;
+                padding: 10px;
+                border: 1px solid #ccc;
+                border-radius: 4px;">
+        {safe_content}
+    </div>
+    """
 
 
 
@@ -228,6 +272,10 @@ def get_result_filenames(method: str = "chatts") -> List[str]:
     for f in results_dir.glob("*.csv"):
         # 安全检查：如果是断裂的符号链接，f.exists() 会返回 False
         if f.exists() or f.is_symlink():
+            # 严格过滤 (Addressing Issue: mixed files in directories)
+            if not match_result_method(f.name, method):
+                continue
+            
             csv_files.append(f)
             
     def safe_get_mtime(p):
@@ -245,9 +293,9 @@ def delete_result_file(method: str, filename: str) -> tuple:
     pass
 
 
-def get_training_configs() -> List[str]:
+def get_training_configs(model_family: str = "chatts") -> List[str]:
     """获取训练配置列表"""
-    configs = adapter.list_configs()
+    configs = get_training_adapter(model_family).list_configs()
     return [c["name"] for c in configs]
 
 
@@ -418,8 +466,25 @@ def preview_dataset(filename: str) -> tuple:
         print(f"[DEBUG] Default selected: {default_selected}")
         
         # 生成默认曲线图
-        plot_path = generate_plot(df, filename, default_selected)
-        print(f"[DEBUG] Plot generated: {plot_path}")
+        plot_path = None
+        
+        # 优化：尝试使用预生成的图片 (如果存在)
+        # 假设图片在 DATA_IMAGES_DIR 或 DATA_DOWNSAMPLED_DIR (用户可能手动放这)
+        # 优先查 DATA_IMAGES_DIR
+        possible_img_name = filename.replace(".csv", ".jpg")
+        pre_gen_img_path = Path(settings.DATA_IMAGES_DIR) / possible_img_name
+        
+        if pre_gen_img_path.exists():
+            print(f"[DEBUG] Using pre-generated image: {pre_gen_img_path}")
+            plot_path = str(pre_gen_img_path)
+            
+        # 如果没有找到，或者用户选择了特定的列组合(这里初始化默认选第一列，假设预生成图也是画的主列)
+        # 为了严谨，如果使用了预生成图，我们也许应该显示它。
+        # 但如果用户后续修改了 Checkbox，会触发 update_plot_from_selection，那时候会重画，这是对的。
+        
+        if not plot_path:
+             plot_path = generate_plot(df, filename, default_selected)
+             print(f"[DEBUG] Plot generated: {plot_path}")
         
         # 转换为列表格式，确保 Gradio 6.x 兼容
         # 使用 values 列表 + headers 的方式
@@ -427,7 +492,7 @@ def preview_dataset(filename: str) -> tuple:
         headers = df.columns.tolist()
         print(f"[DEBUG] Table data rows: {len(table_data)}, headers: {headers}")
         
-        return gr.Dataframe(value=table_data, headers=headers), gr.CheckboxGroup(choices=numeric_cols, value=default_selected), plot_path
+        return gr.Dataframe(value=table_data, headers=headers), gr.update(choices=numeric_cols, value=default_selected), plot_path
     except Exception as e:
         import traceback
         print(f"[DEBUG ERROR] Exception: {e}")
@@ -514,7 +579,7 @@ def start_acquire_task(
 
 def get_algorithms() -> List[str]:
     """获取可用算法列表"""
-    return ["chatts", "adtk_hbos", "ensemble", "timer"]
+    return ["chatts", "qwen", "adtk_hbos", "ensemble", "timer"]
 
 
 def get_inference_models() -> List[str]:
@@ -525,7 +590,7 @@ def get_inference_models() -> List[str]:
 
 def toggle_algo_params(algorithm: str):
     """根据选择的算法切换参数组可见性"""
-    show_chatts = (algorithm == "chatts")
+    show_chatts = (algorithm == "chatts" or algorithm == "qwen")
     show_timer = (algorithm == "timer")
     show_adtk = (algorithm == "adtk_hbos")
     return (
@@ -600,9 +665,10 @@ def start_inference_task(
     finally:
         db.close()
     
+    accumulated_log = f"🚀 Starting batch inference for {len(file_paths)} files...\\n"
     yield (
-        f"🚀 任务已启动 (ID: {task_id[:8]})\\n正在处理 {len(file_paths)} 个文件...", 
-        f"🚀 任务已启动 (ID: {task_id[:8]})",
+        format_log_html(accumulated_log), 
+        "🔄 正在初始化...", 
         gr.update(visible=True), # Show stop button
         gr.update(visible=False), # Hide submit button
         task_id, # Return task_id to state
@@ -655,8 +721,10 @@ def start_inference_task(
                  pass # 其他结构化消息
             else:
                 accumulated_log += log_chunk
+                if len(accumulated_log) > LOG_TAIL_MAX_CHARS:
+                    accumulated_log = accumulated_log[-LOG_TAIL_MAX_CHARS:]
                 yield (
-                    accumulated_log, 
+                    format_log_html(accumulated_log), 
                     "🔄 正在执行...",
                     gr.update(visible=True),
                     gr.update(visible=False),
@@ -692,15 +760,19 @@ def start_inference_task(
             try:
                 annotator_users_file = Path(settings.DATA_PROCESSING_PATH).parent / "annotator" / "backend" / "users.json"
                 if annotator_users_file.exists():
-                    import json
+                    # import json  <-- Removed to avoid shadowing global json
                     with open(annotator_users_file, 'r') as f:
                         users = json.load(f)
                     # 遍历所有用户，将结果链接到每个用户的 data_path
                     for username, user_info in users.items():
                         if 'data_path' in user_info:
                             user_dir = Path(user_info['data_path'])
+                            # Only add if directory exists and is writable by current user
                             if user_dir.exists() and user_dir not in target_dirs:
-                                target_dirs.append(user_dir)
+                                if os.access(user_dir, os.W_OK):
+                                    target_dirs.append(user_dir)
+                                else:
+                                    print(f"[Auto-Link] Skipping {user_dir}: No write permission")
             except Exception as e:
                 print(f"[Auto-Link] Warning: Could not read annotator users.json: {e}")
             
@@ -732,7 +804,7 @@ def start_inference_task(
             print(f"[Auto-Link Error] Failed to link results: {e}")
         
         yield (
-            accumulated_log + "\n✅ 所有任务已完成", 
+            format_log_html(accumulated_log + "\n✅ 所有任务已完成"), 
             "✅ 任务完成",
              gr.update(visible=False),
              gr.update(visible=True),
@@ -759,7 +831,7 @@ def start_inference_task(
             db.close()
         
         yield (
-            f"❌ 发生错误: {str(e)}", 
+            format_log_html(f"❌ 发生错误: {str(e)}"), 
             f"❌ 错误: {str(e)}",
             gr.update(visible=False),
             gr.update(visible=True),
@@ -879,7 +951,7 @@ def start_training(
 def create_training_ui() -> gr.Blocks:
     """创建统一管理界面（数据获取、推理监控、微调训练）"""
     
-    with gr.Blocks(title="TS-Iteration-Loop", theme=gr.themes.Soft()) as demo:
+    with gr.Blocks(title="TS-Iteration-Loop", theme=gr.themes.Soft(), css=LOG_SCROLL_CSS) as demo:
         gr.Markdown("# 🔄 TS-Iteration-Loop 时序迭代平台")
         gr.Markdown("整合数据获取、推理监控、微调训练的统一管理界面")
         
@@ -1090,13 +1162,10 @@ def create_training_ui() -> gr.Blocks:
                     gr.Markdown("### 任务状态 & 日志")
                     with gr.Tabs():
                         with gr.Tab("实时日志"):
-                            inference_logs = gr.Textbox(
-                                value="",
+                            inference_logs = gr.HTML(
+                                value=format_log_html("Waiting for task..."),
                                 label="Execution Logs",
-                                interactive=False,
-                                lines=20,
-                                max_lines=20,
-                                autoscroll=True
+                                elem_id="inference-log"
                             )
                         with gr.Tab("任务结果"):
                              # 当前任务状态
@@ -1108,7 +1177,7 @@ def create_training_ui() -> gr.Blocks:
                              with gr.Row():
                                  results_method_select = gr.Dropdown(
                                      label="筛选方法",
-                                     choices=["chatts", "timer", "adtk_hbos"],
+                                     choices=["chatts", "qwen", "timer", "adtk_hbos"],
                                      value="chatts",
                                      scale=1
                                  )
@@ -1217,14 +1286,14 @@ def create_training_ui() -> gr.Blocks:
             
             # 历史结果文件刷新
             refresh_results_btn.click(
-                fn=lambda m: gr.CheckboxGroup(choices=get_result_filenames(m)),
+                fn=lambda m: gr.CheckboxGroup(choices=get_result_filenames(m), value=[]),
                 inputs=results_method_select,
                 outputs=file_manager_list
             )
             
             # 切换方法时刷新结果列表
             results_method_select.change(
-                fn=lambda m: gr.CheckboxGroup(choices=get_result_filenames(m)),
+                fn=lambda m: gr.CheckboxGroup(choices=get_result_filenames(m), value=[]),
                 inputs=results_method_select,
                 outputs=file_manager_list
             )
@@ -1249,6 +1318,13 @@ def create_training_ui() -> gr.Blocks:
                 fn=toggle_algo_params,
                 inputs=algo_dropdown,
                 outputs=[chatts_group, timer_group, adtk_group]
+            )
+            
+            # 自动同步筛选方法 (User requested unification)
+            algo_dropdown.change(
+                fn=lambda x: x if x in ["chatts", "qwen", "timer", "adtk_hbos"] else "chatts",
+                inputs=algo_dropdown,
+                outputs=results_method_select
             )
         
         # ==================== 标注工具 Tab ====================
@@ -1301,22 +1377,28 @@ def create_training_ui() -> gr.Blocks:
             with gr.Row():
                 with gr.Column(scale=1):
                     # 配置区域
+                    conv_model_family = gr.Radio(
+                        choices=["chatts", "qwen"],
+                        value="chatts",
+                        label="目标模型格式 (Target Format)"
+                    )
+                    
                     with gr.Accordion("⚙️ 路径与参数配置 (Settings)", open=False):
                         conf_input_dir = gr.Textbox(
                             label="标注文件来源 (Annotation Dir)", 
-                            value=str(Path(settings.ANNOTATIONS_ROOT) / "douff")
+                            value=str(Path(settings.ANNOTATIONS_ROOT) / settings.DEFAULT_USER)
                         )
                         conf_image_dir = gr.Textbox(
                             label="图片文件来源 (Image Dir)", 
                             value=settings.DATA_DOWNSAMPLED_DIR
                         )
                         conf_output_path = gr.Textbox(
-                            label="转换输出路径 (Output Path)", 
-                            value=str(Path(settings.DATA_TRAINING_DIR) / "converted_data.json")
+                            label="转换输出路径 (Output Path)",
+                            value=str(Path(settings.DATA_TRAINING_CHATTS_DIR) / "converted_data.json")
                         )
 
                     # 获取标注文件列表
-                    def get_file_choices(ann_dir):
+                    def get_file_choices(ann_dir, filter_keyword=None):
                         path_obj = Path(ann_dir)
                         if not path_obj.exists():
                             return []
@@ -1324,13 +1406,22 @@ def create_training_ui() -> gr.Blocks:
                             files = list(path_obj.glob("*.json"))
                             # 按修改时间排序
                             files.sort(key=lambda x: x.stat().st_mtime, reverse=True)
+                            
+                            # 过滤逻辑
+                            if filter_keyword == "qwen":
+                                # Qwen 模式：只显示包含 qwen 的文件
+                                files = [f for f in files if "qwen" in f.name.lower()]
+                            elif filter_keyword == "chatts":
+                                # ChatTS 模式：排除 qwen 文件 (显示 chatts 和 legacy)
+                                files = [f for f in files if "qwen" not in f.name.lower()]
+                                
                             return [f.name for f in files]
                         except Exception:
                             return []
 
                     # 初始加载
                     # 初始加载
-                    default_ann_dir = str(Path(settings.ANNOTATIONS_ROOT) / "douff")
+                    default_ann_dir = str(Path(settings.ANNOTATIONS_ROOT) / settings.DEFAULT_USER)
                     initial_choices = get_file_choices(default_ann_dir)
                     initial_val = initial_choices[0] if initial_choices else None
 
@@ -1343,12 +1434,12 @@ def create_training_ui() -> gr.Blocks:
                         allow_custom_value=False
                     )
                     
-                    def refresh_files(ann_dir):
-                        choices = get_file_choices(ann_dir)
+                    def refresh_files(ann_dir, family):
+                        choices = get_file_choices(ann_dir, family)
                         val = choices[0] if choices else None
                         return gr.Dropdown(choices=choices, value=val)
                         
-                    refresh_files_btn = gr.Button("🔄 刷新文件列表", size="sm")
+                    refresh_files_btn = gr.Button("🔄 刷新列表 (Refresh)", size="sm")
                     
                     with gr.Row():
                         convert_curr_btn = gr.Button("🚀 仅转换选中", variant="primary")
@@ -1362,10 +1453,10 @@ def create_training_ui() -> gr.Blocks:
                     gr.Markdown("#### 📝 转换前 (Annotator JSON)")
                     before_json = gr.JSON(label="Source Data", height=400)
                 with gr.Column():
-                    gr.Markdown("#### 🎯 转换后 (ChatTS Training Data)")
+                    after_json_label = gr.Markdown("#### 🎯 转换后 (ChatTS Training Data)")
                     after_json = gr.JSON(label="Converted Data", height=400)
                 
-            def preview_source_file(selected_file, input_dir_val, image_dir_val):
+            def preview_source_file(selected_file, input_dir_val, image_dir_val, model_family="qwen"):
                 """选择文件时立即预览，并执行真实转换（使用临时文件）"""
                 if not selected_file or not input_dir_val:
                     return None, None
@@ -1395,7 +1486,9 @@ def create_training_ui() -> gr.Blocks:
                         input_dir=input_dir_val,
                         output_path=tmp_path,
                         image_dir=img_d,
-                        filename=selected_file
+                        filename=selected_file,
+                        model_family=model_family,
+                        csv_src_dir=str(RESULTS_BASE_PATH / "qwen") if model_family == "qwen" else settings.DATA_DOWNSAMPLED_DIR
                     )
                     
                     if res["success"]:
@@ -1422,7 +1515,7 @@ def create_training_ui() -> gr.Blocks:
                 
                 return source_content, converted_content
 
-            def convert_core(selected_file, input_dir, image_dir, output_path, mode="single"):
+            def convert_core(selected_file, input_dir, image_dir, output_path, model_family, mode="single"):
                 """核心转换逻辑"""
                 # 创建输出目录
                 try:
@@ -1437,7 +1530,9 @@ def create_training_ui() -> gr.Blocks:
                     input_dir, 
                     output_path, 
                     image_dir=image_dir,
-                    filename=target_filename
+                    filename=target_filename,
+                    model_family=model_family,
+                    csv_src_dir=str(RESULTS_BASE_PATH / "qwen") if model_family == "qwen" else settings.DATA_DOWNSAMPLED_DIR
                 )
                 
                 status_msg = ""
@@ -1498,34 +1593,75 @@ def create_training_ui() -> gr.Blocks:
                 return status_msg, source_sample, target_sample
 
             # 绑定事件
+            # 绑定事件
             convert_curr_btn.click(
-                fn=lambda f, i, m, o: convert_core(f, i, m, o, mode="single"),
-                inputs=[ann_file_dropdown, conf_input_dir, conf_image_dir, conf_output_path],
+                fn=lambda f, i, m, o, fam: convert_core(f, i, m, o, fam, mode="single"),
+                inputs=[ann_file_dropdown, conf_input_dir, conf_image_dir, conf_output_path, conv_model_family],
                 outputs=[convert_status, before_json, after_json]
             )
             
             convert_all_btn.click(
-                fn=lambda f, i, m, o: convert_core(f, i, m, o, mode="batch"),
-                inputs=[ann_file_dropdown, conf_input_dir, conf_image_dir, conf_output_path],
+                fn=lambda f, i, m, o, fam: convert_core(f, i, m, o, fam, mode="batch"),
+                inputs=[ann_file_dropdown, conf_input_dir, conf_image_dir, conf_output_path, conv_model_family],
                 outputs=[convert_status, before_json, after_json]
+            )
+            
+            # 动态更新输出路径和Label
+            def on_model_family_change(family, ann_dir):
+                new_path = settings.DATA_TRAINING_CHATTS_DIR if family == "chatts" else settings.DATA_TRAINING_QWEN_DIR
+                new_conf = str(Path(new_path) / "converted_data.json")
+                
+                # Update output label
+                new_label = "#### 🎯 转换后 (ChatTS Training Data)" if family == "chatts" else "#### 🎯 转换后 (Qwen Training Data)"
+                
+                # Update Image/Data Dir label and value
+                if family == "chatts":
+                    img_dir_label = "数据文件来源 (Source Data Dir)"
+                    img_dir_val = settings.DATA_DOWNSAMPLED_DIR
+                else:
+                    img_dir_label = "图片文件来源 (Source Image Dir)"
+                    img_dir_val = settings.DATA_IMAGES_DIR
+                
+                # Filter file choices
+                new_choices = get_file_choices(ann_dir, family)
+                new_val = new_choices[0] if new_choices else None
+                
+                return (
+                    new_conf, 
+                    gr.update(value=new_label),
+                    gr.update(value=img_dir_val, label=img_dir_label),
+                    gr.update(choices=new_choices, value=new_val)
+                )
+
+            conv_model_family.change(
+                fn=on_model_family_change,
+                inputs=[conv_model_family, conf_input_dir],
+                outputs=[conf_output_path, after_json_label, conf_image_dir, ann_file_dropdown]
             )
             
             refresh_files_btn.click(
                 fn=refresh_files,
-                inputs=[conf_input_dir],
+                inputs=[conf_input_dir, conv_model_family],
                 outputs=ann_file_dropdown
             )
             
             # 选择文件立即预览
             ann_file_dropdown.change(
                 fn=preview_source_file,
-                inputs=[ann_file_dropdown, conf_input_dir, conf_image_dir],
+                inputs=[ann_file_dropdown, conf_input_dir, conf_image_dir, conv_model_family],
                 outputs=[before_json, after_json]
             )
             
-            # 初始化预览
+            # 模型格式切换触发预览更新
+            conv_model_family.change(
+                fn=preview_source_file,
+                inputs=[ann_file_dropdown, conf_input_dir, conf_image_dir, conv_model_family],
+                outputs=[before_json, after_json]
+            )
+            
+            # 初始化预览 (Default to chatts as per Radio default)
             if initial_val:
-                init_src, init_ex = preview_source_file(initial_val, default_ann_dir, settings.DATA_DOWNSAMPLED_DIR)
+                init_src, init_ex = preview_source_file(initial_val, default_ann_dir, settings.DATA_DOWNSAMPLED_DIR, "chatts")
                 before_json.value = init_src
                 after_json.value = init_ex
 
@@ -1584,7 +1720,17 @@ def create_training_ui() -> gr.Blocks:
                     gr.Markdown("### 🎯 微调数据管理 (Converted JSONL)")
                     with gr.Row():
                         with gr.Column(scale=1):
-                            train_mgr_dir = gr.Textbox(label="数据目录", value=settings.DATA_TRAINING_DIR, interactive=False)
+                            train_mgr_family = gr.Dropdown(
+                                label="模型类型",
+                                choices=TRAINING_MODEL_FAMILIES,
+                                value="chatts",
+                                interactive=True
+                            )
+                            train_mgr_dir = gr.Textbox(
+                                label="数据目录",
+                                value=settings.DATA_TRAINING_CHATTS_DIR,
+                                interactive=False
+                            )
                             train_mgr_list = gr.Dropdown(label="选择文件", interactive=True)
                             refresh_train_mgr = gr.Button("🔄 刷新列表")
                             delete_train_btn = gr.Button("🗑️ 删除选中文件", variant="stop")
@@ -1652,6 +1798,21 @@ def create_training_ui() -> gr.Blocks:
                     refresh_train_mgr.click(fn=lambda p: gr.update(choices=list_train_files(p)), inputs=train_mgr_dir, outputs=train_mgr_list)
                     train_mgr_list.change(fn=load_train_content, inputs=[train_mgr_dir, train_mgr_list], outputs=train_mgr_view)
                     delete_train_btn.click(fn=delete_train_file, inputs=[train_mgr_dir, train_mgr_list], outputs=[train_op_status, train_mgr_list])
+
+                    def resolve_train_mgr_dir(model_family: str) -> str:
+                        if model_family == "qwen":
+                            return settings.DATA_TRAINING_QWEN_DIR
+                        return settings.DATA_TRAINING_CHATTS_DIR
+
+                    train_mgr_family.change(
+                        fn=lambda mf: gr.update(value=resolve_train_mgr_dir(mf)),
+                        inputs=train_mgr_family,
+                        outputs=train_mgr_dir
+                    ).then(
+                        fn=lambda p: gr.update(choices=list_train_files(p), value=None),
+                        inputs=train_mgr_dir,
+                        outputs=train_mgr_list
+                    )
         
         # ==================== 微调训练 Tab (原有) ====================
         with gr.Tab("🎯 开始训练"):
@@ -1662,23 +1823,29 @@ def create_training_ui() -> gr.Blocks:
                     
                     # New Dropdowns for Quick Start
                     with gr.Row():
+                        model_family_dropdown = gr.Dropdown(
+                            label="模型类型 (Model Family)",
+                            choices=TRAINING_MODEL_FAMILIES,
+                            value="chatts",
+                            interactive=True
+                        )
                         model_path_dropdown = gr.Dropdown(
                             label="基础模型 (Base Model)",
-                            choices=adapter.get_base_models(),
-                            value=adapter.get_base_models()[0] if adapter.get_base_models() else None,
+                            choices=get_training_adapter("chatts").get_base_models(),
+                            value=get_training_adapter("chatts").get_base_models()[0] if get_training_adapter("chatts").get_base_models() else None,
                             interactive=True,
                             allow_custom_value=True
                         )
                         dataset_dropdown = gr.Dropdown(
                             label="微调数据集 (Dataset)",
-                            choices=adapter.get_dataset_list(),
-                            value=adapter.get_dataset_list()[0] if adapter.get_dataset_list() else None,
+                            choices=get_training_adapter("chatts").get_dataset_list(),
+                            value=get_training_adapter("chatts").get_dataset_list()[0] if get_training_adapter("chatts").get_dataset_list() else None,
                             interactive=True
                         )
 
                     config_dropdown = gr.Dropdown(
                         label="训练模板 (Template Script)",
-                        choices=get_training_configs(),
+                        choices=get_training_configs("chatts"),
                         interactive=True,
                         info="选择一个脚本作为参数模板 (如 DeepSpeed 配置)"
                     )
@@ -1724,15 +1891,55 @@ def create_training_ui() -> gr.Blocks:
                     
                     # 控制按钮
                     # --- Backend Functions ---
+                    def validate_dataset_wrap(model_family: str, dataset_name: Optional[str]) -> str:
+                        data_dir = (settings.DATA_TRAINING_QWEN_DIR
+                                    if model_family == "qwen"
+                                    else settings.DATA_TRAINING_CHATTS_DIR)
+                        info_path = Path(data_dir) / "dataset_info.json"
+                        if not info_path.exists():
+                            return f"❌ 找不到 dataset_info.json: {info_path}"
+                        try:
+                            with open(info_path, "r", encoding="utf-8") as f:
+                                info = json.load(f)
+                        except Exception as e:
+                            return f"❌ 读取失败: {e}"
+
+                        if not info:
+                            return f"❌ dataset_info.json 为空: {info_path}"
+                        if not dataset_name:
+                            return "⚠️ 未选择数据集"
+                        if dataset_name not in info:
+                            return f"❌ 数据集未注册: {dataset_name}"
+
+                        file_name = info[dataset_name].get("file_name")
+                        if not file_name:
+                            return f"❌ 未配置 file_name: {dataset_name}"
+                        data_path = Path(file_name)
+                        if not data_path.is_absolute():
+                            data_path = Path(data_dir) / file_name
+
+                        if not data_path.exists():
+                            return f"❌ 数据不存在: {data_path}"
+
+                        if data_path.is_dir():
+                            files = list(data_path.glob("*.json")) + list(data_path.glob("*.jsonl"))
+                            if not files:
+                                return f"❌ 目录下没有 json/jsonl: {data_path}"
+                            return f"✅ 校验通过: {dataset_name} (目录, {len(files)} 个文件)"
+
+                        return f"✅ 校验通过: {dataset_name} ({data_path.name})"
+
                     def start_training_wrap(
-                        config_name, lr, epochs, batch_size, rank, alpha, output_name,
+                        model_family, config_name, lr, epochs, batch_size, rank, alpha, output_name,
                         model_path, dataset_name
                     ):
                         if not config_name:
-                            return "❌ 请选择训练模板", ""
+                            return "❌ 请选择训练模板", "", model_family
                             
                         task_id = f"qs_{int(time.time())}"
                         
+                        local_adapter = get_training_adapter(model_family)
+
                         # Call backend
                         overrides = {
                             "override_learning_rate": lr,
@@ -1744,31 +1951,33 @@ def create_training_ui() -> gr.Blocks:
                             "override_dataset": dataset_name
                         }
                         
-                        res = adapter.run_training(task_id, config_name, version_tag=output_name, **overrides)
+                        res = local_adapter.run_training(task_id, config_name, version_tag=output_name, **overrides)
                         
                         if res.get("success"):
-                            return f"✅ 训练任务已成功启动!\n任务ID: {task_id}\n输出目录: {res.get('output_dir')}\n\n正在后台运行中... 请留意下方实时日志。", task_id
+                            return f"✅ 训练任务已成功启动!\n任务ID: {task_id}\n输出目录: {res.get('output_dir')}\n\n正在后台运行中... 请留意下方实时日志。", task_id, model_family
                         else:
-                            return f"❌ 启动错误: {res.get('error')}", ""
+                            return f"❌ 启动错误: {res.get('error')}", "", model_family
 
-                    def stream_logs(task_id, current_log, offset):
+                    def stream_logs(model_family, task_id, current_log_text, offset):
                         if not task_id:
-                            return current_log, offset
+                            return format_log_html(current_log_text), current_log_text, offset
                         
                         # Read increment
-                        res = adapter.get_training_log(task_id, offset)
+                        res = get_training_adapter(model_family).get_training_log(task_id, offset)
                         new_content = res.get("log", "")
                         new_offset = res.get("offset", offset)
                         
                         if new_content:
-                            current_log = (current_log or "") + new_content
+                            current_log_text = (current_log_text or "") + new_content
+                            if len(current_log_text) > LOG_TAIL_MAX_CHARS:
+                                current_log_text = current_log_text[-LOG_TAIL_MAX_CHARS:]
                             
-                        return current_log, new_offset
+                        return format_log_html(current_log_text), current_log_text, new_offset
 
-                    def stop_training_wrap(task_id):
+                    def stop_training_wrap(model_family, task_id):
                         if not task_id:
                             return "无运行中的任务"
-                        res = adapter.stop_training(task_id)
+                        res = get_training_adapter(model_family).stop_training(task_id)
                         if res.get("success"):
                             return "🛑 任务已手动停止"
                         else:
@@ -1779,14 +1988,18 @@ def create_training_ui() -> gr.Blocks:
                         with gr.Row():
                             start_btn = gr.Button("🚀 (Quick Start) 开始训练", variant="primary", scale=2)
                             stop_btn = gr.Button("🛑 停止训练", variant="stop", scale=1)
+                            validate_btn = gr.Button("✅ 校验数据", scale=1)
                             refresh_btn = gr.Button("🔄 刷新配置", scale=1)
                         
                         # Hidden state for Task ID and Log Offset
                         task_id_state = gr.State("")
+                        task_family_state = gr.State("chatts")
                         log_offset_state = gr.State(0)
+                        training_log_state = gr.State("") # Raw text state
                         
                         output_box = gr.Textbox(label="训练状态", lines=4)
-                        log_box = gr.Code(label="实时日志 (Real-time Logs)", language="shell", lines=15)
+                        validate_box = gr.Textbox(label="数据校验结果", lines=2)
+                        log_box = gr.HTML(label="实时日志 (Real-time Logs)", value=format_log_html(""), elem_id="training-log")
                         
                         # Timer for polling
                         timer = gr.Timer(1) # 1s interval
@@ -1795,39 +2008,81 @@ def create_training_ui() -> gr.Blocks:
                         start_btn.click(
                             fn=start_training_wrap,
                             inputs=[
-                                config_dropdown, learning_rate, num_epochs,
+                                model_family_dropdown, config_dropdown, learning_rate, num_epochs,
                                 batch_size, lora_rank, lora_alpha, output_name,
                                 model_path_dropdown, dataset_dropdown
                             ],
-                            outputs=[output_box, task_id_state]
+                            outputs=[output_box, task_id_state, task_family_state]
                         ).then(
                             fn=lambda: 0, outputs=log_offset_state # Reset offset
                         ).then(
-                            fn=lambda: "", outputs=log_box # Clear logs
+                            fn=lambda: "", outputs=training_log_state # Clear raw log
+                        ).then(
+                            fn=lambda: format_log_html(""), outputs=log_box # Clear visual log
+                        )
+
+                        model_family_dropdown.change(
+                            fn=lambda mf: (
+                                gr.Dropdown(
+                                    choices=get_training_configs(mf),
+                                    value=(get_training_configs(mf)[0] if get_training_configs(mf) else None)
+                                ),
+                                gr.Dropdown(
+                                    choices=get_training_adapter(mf).get_dataset_list(),
+                                    value=(get_training_adapter(mf).get_dataset_list()[0]
+                                           if get_training_adapter(mf).get_dataset_list() else None)
+                                ),
+                                gr.Dropdown(
+                                    choices=get_training_adapter(mf).get_base_models(),
+                                    value=(get_training_adapter(mf).get_base_models()[0]
+                                           if get_training_adapter(mf).get_base_models() else None)
+                                )
+                            ),
+                            inputs=[model_family_dropdown],
+                            outputs=[config_dropdown, dataset_dropdown, model_path_dropdown]
                         )
                         
                         stop_btn.click(
                             fn=stop_training_wrap,
-                            inputs=[task_id_state],
+                            inputs=[task_family_state, task_id_state],
                             outputs=output_box
+                        )
+
+                        validate_btn.click(
+                            fn=validate_dataset_wrap,
+                            inputs=[model_family_dropdown, dataset_dropdown],
+                            outputs=validate_box
                         )
                         
                         # Timer ticks -> Update logs
                         timer.tick(
                             fn=stream_logs,
-                            inputs=[task_id_state, log_box, log_offset_state],
-                            outputs=[log_box, log_offset_state]
+                            inputs=[task_family_state, task_id_state, training_log_state, log_offset_state],
+                            outputs=[log_box, training_log_state, log_offset_state]
                         )
                         refresh_btn.click(
-                            fn=lambda: (
-                                gr.Dropdown(choices=get_training_configs()),
-                                gr.Dropdown(choices=adapter.get_dataset_list())
+                            fn=lambda mf: (
+                                gr.Dropdown(
+                                    choices=get_training_configs(mf),
+                                    value=(get_training_configs(mf)[0] if get_training_configs(mf) else None)
+                                ),
+                                gr.Dropdown(
+                                    choices=get_training_adapter(mf).get_dataset_list(),
+                                    value=(get_training_adapter(mf).get_dataset_list()[0]
+                                           if get_training_adapter(mf).get_dataset_list() else None)
+                                ),
+                                gr.Dropdown(
+                                    choices=get_training_adapter(mf).get_base_models(),
+                                    value=(get_training_adapter(mf).get_base_models()[0]
+                                           if get_training_adapter(mf).get_base_models() else None)
+                                )
                             ),
-                            outputs=[config_dropdown, dataset_dropdown]
+                            inputs=[model_family_dropdown],
+                            outputs=[config_dropdown, dataset_dropdown, model_path_dropdown]
                         )
 
             # ==================== Advanced Mode (Native Integration) ====================
-        with gr.Accordion("⚙️ 高级模式 (Native WebUI Integration)", open=False):
+            with gr.Accordion("⚙️ 高级模式 (Native WebUI Integration)", open=False):
                 gr.Markdown("""
                 > **专家模式**: 将当前选择的 Shell 脚本自动转换为 LLaMA-Factory 配置，并启动原生 WebUI 进行微调。
                 > 适合需要调整 DeepSpeed、LR Scheduler 等高级参数的用户。
@@ -1946,7 +2201,8 @@ def create_training_ui() -> gr.Blocks:
 
 ### 训练脚本
 
-可用的训练配置来自 `/home/douff/ts/ChatTS-Training/scripts/lora/` 目录。
+可用的训练配置来自 `/home/douff/ts/ts-iteration-loop/services/training/scripts/chatts/lora/` 和
+`/home/douff/ts/ts-iteration-loop/services/training/scripts/qwen/lora/` 目录。
 """)
     
         # 初始化加载

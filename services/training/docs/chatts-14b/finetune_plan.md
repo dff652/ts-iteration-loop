@@ -37,7 +37,7 @@
 ### 第二阶段：数据集配置
 **目标**: 在训练框架中注册新数据集。
 
-*   **文件**: `data/dataset_info.json`
+*   **文件**: `/home/share/data/training_chatts/dataset_info.json`
 *   **操作**: 添加 `chatts_tune` 条目：
     ```json
     "chatts_tune": {
@@ -53,7 +53,7 @@
 ### 第三阶段：训练环境配置
 **目标**: 创建可复现的训练脚本。
 
-*   **脚本路径**: `scripts/lora/train_chatts_tune_qlora_safe.sh` (推荐用于 RTX 2080Ti)
+*   **脚本路径**: `scripts/chatts/lora/train_chatts_tune_qlora_safe.sh` (推荐用于 RTX 2080Ti)
 *   **配置概览**:
     *   基座模型: `llm_models/ChatTS-14B`
     *   数据集: `chatts_tune`
@@ -67,7 +67,7 @@
 conda activate chatts_train_env
 
 # 2. 启动训练（前台运行）
-bash scripts/lora/train_chatts_tune_qlora_safe.sh
+bash scripts/chatts/lora/train_chatts_tune_qlora_safe.sh
 ```
 
 ### 微调脚本对比
@@ -141,11 +141,11 @@ bash scripts/lora/train_chatts_tune_qlora_safe.sh
 
 - [x] **数据准备**: 运行 `scripts/preprocess_tune_data.py` 生成训练数据
 - [x] **数据验证**: 检查 `data/chatts_tune/train.jsonl` 格式 (417条记录)
-- [x] **配置更新**: 修改 `data/dataset_info.json`
+- [x] **配置更新**: 修改 `/home/share/data/training_chatts/dataset_info.json`
 - [x] **脚本编写**: 创建训练脚本
 - [ ] **执行训练**: 启动训练并监控 Loss
 
 ## 5. 备注
 *   **路径映射**: JSON 中的 `image` 字段包含不存在的绝对路径，脚本通过文件名匹配定位本地 CSV 文件。
 *   **序列长度**: 原始 CSV 数据长度约 5000 点，模型支持长上下文，但可能增加显存消耗。
-*   **数据集选择**: 由 `data/dataset_info.json` 中的 `file_name` 字段决定使用哪个 JSONL 文件。
+*   **数据集选择**: 由 `/home/share/data/training_chatts/dataset_info.json` 中的 `file_name` 字段决定使用哪个 JSONL 文件。

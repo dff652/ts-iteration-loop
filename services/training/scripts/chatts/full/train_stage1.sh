@@ -1,14 +1,16 @@
 NCCL_DEBUG=WARN DEEPSPEED_TIMEOUT=120 deepspeed --num_gpus 8 --master_port=19901 src/train.py \
+DATASET_DIR="${DATASET_DIR:-/home/share/data/training_chatts}"
     --deepspeed ds_config/ds_config_3.json \
     --stage sft \
-    --model_name_or_path "[OUTPUT_PATH_STAGE_1]" \
-    --dataset "sft,ift,align_random" \
-    --interleave_probs "0.6,0.2,0.2" \
+    --model_name_or_path "[PATH_TO_LLM]" \
+    --dataset "align_256,ift" \
+    --dataset_dir "${DATASET_DIR}" \
+    --interleave_probs "0.9,0.1" \
     --do_train \
     --mix_strategy "interleave_over" \
     --template "chatts"  \
     --finetuning_type full \
-    --output_dir "[OUTPUT_PATH_STAGE_2]" \
+    --output_dir "[OUTPUT_PATH_STAGE_1]" \
     --overwrite_output_dir \
     --per_device_train_batch_size 2 \
     --gradient_accumulation_steps 32 \
@@ -19,7 +21,7 @@ NCCL_DEBUG=WARN DEEPSPEED_TIMEOUT=120 deepspeed --num_gpus 8 --master_port=19901
     --timeseries_sft_lr 1e-5 \
     --warmup_ratio 0.02 \
     --num_train_epochs 0 \
-    --max_steps 400 \
+    --max_steps 1000 \
     --plot_loss \
     --fp16 \
     --save_only_model \

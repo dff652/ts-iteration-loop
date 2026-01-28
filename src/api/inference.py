@@ -52,9 +52,9 @@ async def start_batch_inference(
     db.add(task)
     db.commit()
     
-    # 后台执行推理
+    # 后台执行推理 (使用 wrapper 更新数据库状态)
     background_tasks.add_task(
-        adapter.run_batch_inference,
+        run_inference_task,
         task_id=task_id,
         model=request.model,
         algorithm=request.algorithm,
@@ -66,6 +66,46 @@ async def start_batch_inference(
         status=TaskStatus.PENDING,
         message=f"推理任务已提交，处理 {len(request.input_files)} 个文件"
     )
+
+def run_inference_task(task_id: str, model: str, algorithm: str, input_files: List[str]):
+    """后台任务包装器: 执行推理并更新数据库状态"""
+    db = next(get_db())
+    try:
+        task = db.query(Task).filter(Task.id == task_id).first()
+        if not task:
+            return
+            
+        task.status = TaskStatus.PROCESSING
+        db.commit()
+        
+        # 执行推理
+        result = adapter.run_batch_inference(
+            task_id=task_id,
+            model=model,
+            algorithm=algorithm,
+            input_files=input_files
+        )
+        
+        # 更新结果
+        import json
+        task.result = json.dumps(result["results"], ensure_ascii=False)
+        task.status = TaskStatus.COMPLETED if result["success"] else TaskStatus.FAILED
+        if not result["success"]:
+            task.error = str(result.get("errors", "Unknown error"))
+            
+        db.commit()
+    except Exception as e:
+        print(f"Task execution failed: {e}")
+        try:
+            task = db.query(Task).filter(Task.id == task_id).first()
+            if task:
+                task.status = TaskStatus.FAILED
+                task.error = str(e)
+                db.commit()
+        except:
+            pass
+    finally:
+        db.close()
 
 
 @router.get("/status/{task_id}", response_model=TaskResponse)

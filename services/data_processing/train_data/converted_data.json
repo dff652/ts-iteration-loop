@@ -1,0 +1,15 @@
+[
+  {
+    "image": "/home/douff/ts/ts-iteration-loop/services/data_processing/data_downsampled/global_chatts_m4_0.1_1200_ZHLH_4C_1216_AI_20405E.PV_20230101_trend_resid.csv",
+    "conversations": [
+      {
+        "from": "user",
+        "value": "<image>\n你是一位时间序列异常检测专家。请分析图中的时间序列数据,识别异常区间。\n\n异常类型：\n1. 尖峰类：上行尖峰、下行尖峰、双向尖峰\n2. 阶跃类：阶跃上升、阶跃下降\n3. 漂移类：突然漂移、缓慢漂移\n4. 特殊异常段：点异常、区间异常、震荡区间、上下文异常\n\n请基于全局信号特征识别异常。输出必须是标准JSON格式：\n\n{\"status\":\"success\",\"detected_anomalies\":[{\"interval\":[start,end],\"type\":\"类型\",\"reason\":\"原因\"}]}\n\n若无异常：\n{\"status\":\"success\",\"detected_anomalies\":[]}\n\n请精确标注异常区间的起止索引。"
+      },
+      {
+        "from": "assistant",
+        "value": "{\"status\": \"success\", \"detected_anomalies\": [{\"interval\": [404, 407], \"type\": \"ChatTS\", \"reason\": \"索引区间[404,407]内数据存在异常\"}]},{\"status\": \"success\", \"detected_anomalies\": [{\"interval\": [449, 490], \"type\": \"ChatTS\", \"reason\": \"索引区间[449,490]内数据存在异常\"}]},{\"status\": \"success\", \"detected_anomalies\": [{\"interval\": [534, 581], \"type\": \"ChatTS\", \"reason\": \"索引区间[534,581]内数据存在异常\"}]},{\"status\": \"success\", \"detected_anomalies\": [{\"interval\": [2693, 2720], \"type\": \"ChatTS\", \"reason\": \"索引区间[2693,2720]内数据存在异常\"}]}"
+      }
+    ]
+  }
+]

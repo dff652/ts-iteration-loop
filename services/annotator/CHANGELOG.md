@@ -1,5 +1,16 @@
 # Changelog - 时序标注工具 V2
 
+## [0.3.8] - 2026-01-28
+
+### 🐛 Bug修复
+- **新建标注不可见** - 修复在"Create New"流程下，框选后工作区未更新且无法保存的问题
+    - [views/Index.vue] `updateSelectionRange` 同步 `workspaceData` 并切换状态
+    - [views/Index.vue] `finishWorkspaceEdit` 支持新建保存逻辑
+- **Qwen 标签支持** - 后端支持自动识别 Qwen 推理结果并应用 Qwen 标签
+
+### 🔧 技术改进
+- **前端重构** - 优化了标注保存与状态重置的逻辑闭环
+
 ## [0.3.7] - 2025-12-24
 
 ### 🐛 关键Bug修复

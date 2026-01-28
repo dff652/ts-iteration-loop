@@ -1,20 +1,27 @@
 #!/bin/bash
 
+# 自动切换到项目根目录
+cd "$(dirname "$0")/../.." || exit 1
+
 # Environment variables
 export NCCL_DEBUG=WARN 
 export DEEPSPEED_TIMEOUT=120
-
+export CUDA_VISIBLE_DEVICES=0,1
+TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
 # Configuration
-MODEL_PATH="llm_models/ChatTS-14B"
-DATASET="chatts_tune"
-OUTPUT_DIR="saves/chatts-14b/lora/2080Ti_tune_20251226"
+MODEL_PATH="/home/share/llm_models/bytedance-research/ChatTS-8B"
+DATASET="chatts_tune_1024_split"
+DATASET_DIR="${DATASET_DIR:-/home/share/data/training_chatts}"
+OUTPUT_DIR="${OUTPUT_DIR:-saves/chatts-8b/lora/RTX6000_tune_1024_no_offload_${TIMESTAMP}}"
 
-# Run training
-deepspeed --num_gpus 2 --master_port=19901 src/train.py \
-    --deepspeed ds_config/ds_config_3_offload.json \
+# Run training (Dual GPU DeepSpeed ZeRO-3 WITHOUT Offload)
+# This avoids the CUDA version mismatch error since it doesn't need to compile CPUAdam.
+torchrun --nproc_per_node=2 src/train.py \
+    --deepspeed ds_config/ds_config_3.json \
     --stage sft \
     --model_name_or_path "${MODEL_PATH}" \
     --dataset "${DATASET}" \
+    --dataset_dir "${DATASET_DIR}" \
     --interleave_probs "1.0" \
     --do_train \
     --mix_strategy "interleave_over" \
@@ -41,4 +48,6 @@ deepspeed --num_gpus 2 --master_port=19901 src/train.py \
     --preprocessing_num_workers 4 \
     --trust_remote_code True \
     --cutoff_len 4096 \
-    --ddp_timeout 180000000
+    --low_cpu_mem_usage True \
+    --lora_dropout 0.05 \
+    --max_steps 90

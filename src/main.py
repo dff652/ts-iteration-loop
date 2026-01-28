@@ -3,6 +3,11 @@ TS-Iteration-Loop 主入口
 """
 import os
 import getpass
+import subprocess
+import sys
+import atexit
+import signal
+import time
 
 # 设置 Gradio 临时目录，避免与其他用户冲突
 gradio_temp_dir = f"/tmp/{getpass.getuser()}/gradio"
@@ -91,6 +96,24 @@ async def startup_event():
     print("=" * 60)
 
 if __name__ == "__main__":
+    # 启动 Annotator 后端子进程
+    print("-" * 60)
+    print("🚀正在启动 Annotator 后端服务 (Port: 5000)...")
+    annotator_process = subprocess.Popen([sys.executable, "-m", "services.annotator.backend.app"])
+    
+    def cleanup():
+        if annotator_process.poll() is None:
+            print(f"\n🛑 正在停止 Annotator 服务 (PID: {annotator_process.pid})...")
+            annotator_process.terminate()
+            annotator_process.wait()
+            print("✅ Annotator 服务已停止")
+            
+    atexit.register(cleanup)
+    
+    # 等待几秒让后端启动
+    time.sleep(2)
+    print("-" * 60)
+
     uvicorn.run(
         "src.main:app",
         host="0.0.0.0",

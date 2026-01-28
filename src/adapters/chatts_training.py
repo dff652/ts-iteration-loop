@@ -6,6 +6,7 @@ import os
 import json
 import subprocess
 import signal
+import sys
 from pathlib import Path
 from typing import List, Dict, Optional
 
@@ -14,12 +15,14 @@ from configs.settings import settings
 
 class ChatTSTrainingAdapter:
     """ChatTS-Training 项目适配器"""
-    
-    def __init__(self):
+
+    def __init__(self, model_family: str = "chatts"):
+        self.model_family = model_family
         self.project_path = Path(settings.CHATTS_TRAINING_PATH)
-        self.scripts_path = self.project_path / "scripts"
-        self.saves_path = self.project_path / "saves"
-        self.data_path = self.project_path / "data"
+        self.scripts_root = self.project_path / "scripts"
+        self.scripts_path = self.scripts_root / model_family
+        self.saves_path = self.project_path / "saves" / model_family
+        self.data_path = Path(self._get_data_dir())
         
         # 运行中的训练进程
         self._running_processes: Dict[str, subprocess.Popen] = {}
@@ -27,27 +30,27 @@ class ChatTSTrainingAdapter:
     def list_configs(self) -> List[Dict]:
         """列出可用的训练配置"""
         configs = []
-        
+
         # 扫描 lora 目录
-        lora_scripts = self.scripts_path / "lora"
+        lora_scripts = self._get_scripts_dir("lora")
         if lora_scripts.exists():
             for f in lora_scripts.glob("*.sh"):
                 configs.append({
                     "name": f.stem,
                     "path": str(f),
                     "method": "lora",
-                    "description": f"LoRA 微调: {f.stem}"
+                    "description": f"LoRA 微调 ({self.model_family}): {f.stem}"
                 })
-        
+
         # 扫描 full 目录
-        full_scripts = self.scripts_path / "full"
+        full_scripts = self._get_scripts_dir("full")
         if full_scripts.exists():
             for f in full_scripts.glob("*.sh"):
                 configs.append({
                     "name": f.stem,
                     "path": str(f),
                     "method": "full",
-                    "description": f"Full SFT: {f.stem}"
+                    "description": f"Full SFT ({self.model_family}): {f.stem}"
                 })
         
         return configs
@@ -55,29 +58,23 @@ class ChatTSTrainingAdapter:
     def list_models(self) -> List[Dict]:
         """
         列出已训练的模型，包含训练产物信息
-        
-        返回格式:
-        {
-            "name": "RTX6000_tune_...",
-            "path": "/path/to/model",
-            "type": "lora" | "full",
-            "checkpoints": ["checkpoint-50", "checkpoint-90"],
-            "latest_checkpoint": "checkpoint-90",
-            "loss_image": "/path/to/training_loss.png",
-            "train_results": {"train_loss": 0.5, ...},
-            "trainer_state": {"global_step": 90, ...},
-            "created_time": 1704441600.0
-        }
         """
         models = []
         
-        if not self.saves_path.exists():
+        # 扫描全局 saves 目录
+        saves_root = self.project_path / "saves"
+        if not saves_root.exists():
             return models
         
         # 递归扫描所有可能的模型目录
-        for model_dir in self._find_model_dirs(self.saves_path):
+        # 限制搜索深度以提高性能，或者直接查找 adapter_config.json
+        # 这里复用 _find_model_dirs，它使用 rglob，能找到 saves/chatts-8b/lora/xxx 中的模型
+        for model_dir in self._find_model_dirs(saves_root):
             model_info = self._parse_model_dir(model_dir)
             if model_info:
+                # 简单的过滤：只显示当前 model_family 或相关的模型
+                # 如果 model_family 是 chatts，显示 path 中包含 chatts 的
+                # 或者不做过滤，全部显示
                 models.append(model_info)
         
         # 按创建时间排序（最新的在前）
@@ -88,13 +85,20 @@ class ChatTSTrainingAdapter:
         """递归查找包含 adapter_config.json 的目录"""
         model_dirs = []
         
+        if not base_path.exists():
+            return []
+
+        # 1. 查找 LoRA 模型 (含有 adapter_config.json)
         for item in base_path.rglob("adapter_config.json"):
             model_dirs.append(item.parent)
         
-        # 也检查 full SFT 模型（包含 config.json 但没有 adapter_config.json）
+        # 2. 查找 Full SFT 模型 (含有 trainer_state.json 但没有 adapter_config.json)
         for item in base_path.rglob("trainer_state.json"):
-            if not (item.parent / "adapter_config.json").exists():
-                model_dirs.append(item.parent)
+            parent = item.parent
+            if parent not in model_dirs:
+                 # 再次确认没有 adapter_config.json (避免重复)
+                 if not (parent / "adapter_config.json").exists():
+                     model_dirs.append(parent)
         
         return list(set(model_dirs))
     
@@ -180,11 +184,11 @@ class ChatTSTrainingAdapter:
         return logs
     
     def get_dataset_list(self) -> List[str]:
-        """获取所有可用数据集名称 (仅显示 DATA_TRAINING_DIR 下的自动注册数据集)"""
+        """获取所有可用数据集名称"""
         try:
-            # 1. 同步外部数据集 (覆盖模式)
-            self._sync_external_datasets()
-            
+            # 1. 同步数据集
+            self._sync_datasets()
+
             # 2. 读取最新的 info
             info_path = self.data_path / "dataset_info.json"
             if info_path.exists():
@@ -195,58 +199,146 @@ class ChatTSTrainingAdapter:
             pass
         return []
 
-    def _sync_external_datasets(self):
-        """扫描标准训练数据目录，重写 dataset_info.json (仅包含外部数据)"""
+    def _sync_datasets(self):
+        """按模型类型同步数据集，并写入对应的 dataset_info.json"""
         try:
-            training_dir = Path(settings.DATA_TRAINING_DIR)
+            if self.model_family == "qwen":
+                training_dir = Path(settings.DATA_TRAINING_QWEN_DIR)
+                info_path = training_dir / "dataset_info.json"
+                new_info = self._build_sharegpt_dataset_info(training_dir)
+            else:
+                training_dir = Path(settings.DATA_TRAINING_CHATTS_DIR)
+                info_path = training_dir / "dataset_info.json"
+                new_info = self._build_chatts_dataset_info(training_dir)
+
             if not training_dir.exists():
                 return
-            
-            info_path = self.data_path / "dataset_info.json"
-            
-            # 构建新的 info 字典
-            new_info = {}
-            
-            # 扫描 json/jsonl 文件
-            for f_path in training_dir.glob("*.json*"):
-                name = f_path.stem
-                
-                # 简单推断格式
-                file_format = "sharegpt" 
-                try:
-                     with open(f_path, 'r') as f:
-                         sample = f.read(1024)
-                         if '"conversations":' in sample or '"messages":' in sample:
-                             file_format = "sharegpt"
-                         elif '"instruction":' in sample or '"input":' in sample:
-                             file_format = "alpaca"
-                except:
-                    pass
-                    
-                entry = {
-                    "file_name": str(f_path),
-                    "formatting": file_format
-                }
-                if file_format == "sharegpt":
-                    entry["columns"] = {
-                        "messages": "conversations"  
-                    }
-                
-                new_info[name] = entry
-            
+
             # 覆盖写入
             with open(info_path, 'w') as f:
                 json.dump(new_info, f, indent=4, ensure_ascii=False)
-                    
         except Exception as e:
             print(f"Sync datasets failed: {e}")
 
+    def _build_chatts_dataset_info(self, training_dir: Path) -> Dict[str, Dict]:
+        """构建 ChatTS 数据集信息（支持文件/目录）"""
+        new_info: Dict[str, Dict] = {}
+        if not training_dir.exists():
+            return new_info
+
+        for item in sorted(training_dir.iterdir()):
+            if item.name.startswith("dataset_info"):
+                continue
+            if item.is_file() and item.suffix in {".json", ".jsonl"}:
+                name = item.stem
+                new_info[name] = {
+                    "file_name": item.name,
+                    "columns": {
+                        "prompt": "input",
+                        "response": "output",
+                        "timeseries": "timeseries"
+                    }
+                }
+            elif item.is_dir():
+                dataset_file = self._pick_dataset_file(item)
+                name = item.name
+                rel_path = item.name if dataset_file is None else f"{item.name}/{dataset_file.name}"
+                new_info[name] = {
+                    "file_name": rel_path,
+                    "columns": {
+                        "prompt": "input",
+                        "response": "output",
+                        "timeseries": "timeseries"
+                    }
+                }
+        return new_info
+
+    def _pick_dataset_file(self, dataset_dir: Path) -> Optional[Path]:
+        """为目录型数据集选择最合适的文件"""
+        candidates = sorted([p for p in dataset_dir.glob("*.json*") if p.is_file()])
+        if not candidates:
+            return None
+
+        # 优先 train.jsonl / train.json
+        for name in ["train.jsonl", "train.json"]:
+            for c in candidates:
+                if c.name == name:
+                    return c
+
+        # 其次选择包含 train 的文件
+        for c in candidates:
+            if "train" in c.name:
+                return c
+
+        # 如果只有一个文件就用它，否则交给目录加载
+        if len(candidates) == 1:
+            return candidates[0]
+        return None
+
+    def _build_sharegpt_dataset_info(self, training_dir: Path) -> Dict[str, Dict]:
+        """构建 ShareGPT / Alpaca 类数据集信息"""
+        new_info: Dict[str, Dict] = {}
+        if not training_dir.exists():
+            return new_info
+
+        for f_path in training_dir.glob("*.json*"):
+            name = f_path.stem
+
+            # 简单推断格式
+            file_format = "sharegpt"
+            messages_key = "conversations"
+            role_tag = "from"
+            content_tag = "value"
+            user_tag = "human"
+            assistant_tag = "gpt"
+            try:
+                with open(f_path, 'r') as f:
+                    sample = f.read(1024)
+                    if '"conversations":' in sample or '"messages":' in sample:
+                        file_format = "sharegpt"
+                        if '"messages":' in sample:
+                            messages_key = "messages"
+                    elif '"instruction":' in sample or '"input":' in sample:
+                        file_format = "alpaca"
+
+                    # ShareGPT tags detection (user/assistant vs human/gpt)
+                    if '"role":' in sample:
+                        role_tag = "role"
+                    if '"content":' in sample:
+                        content_tag = "content"
+                    if f'\"{role_tag}\": \"user\"' in sample or f'\"{role_tag}\":\"user\"' in sample:
+                        user_tag = "user"
+                        assistant_tag = "assistant"
+                    elif f'\"{role_tag}\": \"human\"' in sample or f'\"{role_tag}\":\"human\"' in sample:
+                        user_tag = "human"
+                        assistant_tag = "gpt"
+            except Exception:
+                pass
+
+            entry = {
+                "file_name": str(f_path),
+                "formatting": file_format
+            }
+            if file_format == "sharegpt":
+                entry["columns"] = {
+                    "messages": messages_key
+                }
+                entry["tags"] = {
+                    "role_tag": role_tag,
+                    "content_tag": content_tag,
+                    "user_tag": user_tag,
+                    "assistant_tag": assistant_tag
+                }
+
+            new_info[name] = entry
+
+        return new_info
+
     def get_base_models(self) -> List[str]:
         """获取常用底座模型路径 (Quick Start)"""
-        return [
-            "/home/data1/llm_models/bytedance-research/ChatTS-8B",
-            "/home/share/models/Qwen3-VL-8B-TR"
-        ]
+        if self.model_family == "qwen":
+            return ["/home/share/models/Qwen3-VL-8B-TR"]
+        return ["/home/share/llm_models/bytedance-research/ChatTS-8B"]
 
     def start_native_webui(self, port: int = 7861) -> Dict:
         """
@@ -289,11 +381,10 @@ class ChatTSTrainingAdapter:
             log_file = self.project_path / "webui.log"
             
             # 使用当前 Python 解释器直接运行 webui.py
-            # 使用项目专属环境的 Python 解释器
+            # 使用训练环境 Python 解释器（优先专属环境）
             # 避免使用 sys.executable (可能指向错误环境)
-            python_executable = "/opt/conda_envs/douff/ts-iteration-loop/bin/python"
+            python_executable = self._get_training_python() or settings.PYTHON_UNIFIED
             if not Path(python_executable).exists():
-                # Fallback to current if dedicated env python missing
                 python_executable = sys.executable
 
             cmd = [python_executable, str(src_path / "webui.py")]
@@ -328,8 +419,8 @@ class ChatTSTrainingAdapter:
                 self._running_processes.pop(task_id)
                 return {"success": False, "message": "启动失败，请查看日志", "error": error_msg}
             
-            # 使用固定 IP，停止猜测
-            ip = "192.168.199.126"
+            # 使用配置 IP
+            ip = settings.WEBUI_HOST
                 
             return {"success": True, "message": f"已启动原生 WebUI (PID: {process.pid})", "url": f"http://{ip}:{port}"}
             
@@ -357,7 +448,7 @@ class ChatTSTrainingAdapter:
             # 查找配置脚本
             script_path = None
             for method in ["lora", "full"]:
-                candidate = self.scripts_path / method / f"{config_name}.sh"
+                candidate = self._get_scripts_dir(method) / f"{config_name}.sh"
                 if candidate.exists():
                     script_path = candidate
                     break
@@ -387,16 +478,19 @@ class ChatTSTrainingAdapter:
             if override_lora_alpha:
                 script_content = self._replace_arg_val(script_content, "--lora_alpha", str(override_lora_alpha))
 
+            # 设置输出目录
+            output_dir = self.saves_path / f"{config_name}_{version_tag or task_id[:8]}"
+            output_dir.mkdir(parents=True, exist_ok=True)
+
             # 生成临时运行脚本
             temp_script_name = f"run_tmp_{task_id[:8]}.sh"
             temp_script_path = self.project_path / temp_script_name
             
+            # 强制输出目录隔离（模型族）
+            script_content = self._replace_script_var(script_content, "OUTPUT_DIR", str(output_dir))
+
             with open(temp_script_path, 'w', encoding='utf-8') as f:
                 f.write(script_content)
-            
-            # 设置输出目录
-            output_dir = self.saves_path / f"{config_name}_{version_tag or task_id[:8]}"
-            output_dir.mkdir(parents=True, exist_ok=True)
             
             # 日志文件
             log_file = output_dir / "train.log"
@@ -404,6 +498,8 @@ class ChatTSTrainingAdapter:
             # 环境变量
             env = os.environ.copy()
             env["OUTPUT_DIR"] = str(output_dir)
+            env["DATASET_DIR"] = str(self._get_data_dir())
+            env["IMAGE_DIR"] = str(self._get_images_dir())
             # 强制禁用缓存以实时显示日志
             env["PYTHONUNBUFFERED"] = "1"
             # 禁用 LLaMA-Factory 的严格版本检查 (适配当前环境 Transformers 4.57+)
@@ -411,9 +507,9 @@ class ChatTSTrainingAdapter:
             
             # 关键修复: 强制 PATH 指向正确的 Conda 环境
             # 解决 torchrun / python 使用系统默认解释器导致 ModuleNotFoundError 
-            conda_bin = "/opt/conda_envs/douff/ts-iteration-loop/bin"
-            if os.path.exists(conda_bin):
-                env["PATH"] = f"{conda_bin}:{env.get('PATH', '')}"
+            python_bin = Path(self._get_training_python() or settings.PYTHON_UNIFIED).parent
+            if python_bin.exists():
+                env["PATH"] = f"{python_bin}:{env.get('PATH', '')}"
                 
             # 启动训练进程 (输出重定向到文件)
             cmd = ["bash", str(temp_script_path)]
@@ -473,6 +569,16 @@ class ChatTSTrainingAdapter:
                 
         return {"log": content, "status": status, "offset": new_offset}
 
+    def get_training_progress(self, task_id: str) -> Dict:
+        """获取训练进度（基于当前任务状态，简化版）"""
+        if task_id not in self._running_processes:
+            return {"status": "unknown", "progress": 0}
+
+        info = self._running_processes[task_id]
+        process = info["process"]
+        status = "running" if process.poll() is None else "completed"
+        return {"status": status, "progress": 0}
+
     def stop_training(self, task_id: str) -> Dict:
         """停止训练任务"""
         if task_id not in self._running_processes:
@@ -517,3 +623,29 @@ class ChatTSTrainingAdapter:
         if pattern.search(content):
             return pattern.sub(f'{arg_name} {new_value}\\1', content)
         return content
+
+    def _get_scripts_dir(self, method: str) -> Path:
+        """获取脚本目录（优先模型专属目录）"""
+        candidate = self.scripts_root / self.model_family / method
+        if candidate.exists():
+            return candidate
+        # fallback for legacy layout
+        return self.scripts_root / method
+
+    def _get_data_dir(self) -> str:
+        """获取训练数据目录"""
+        if self.model_family == "qwen":
+            return settings.DATA_TRAINING_QWEN_DIR
+        return settings.DATA_TRAINING_CHATTS_DIR
+
+    def _get_images_dir(self) -> str:
+        """获取训练图片目录"""
+        if self.model_family == "qwen":
+            return settings.DATA_TRAINING_QWEN_IMAGES_DIR
+        return ""
+
+    def _get_training_python(self) -> str:
+        """获取训练环境的 Python 解释器路径"""
+        if self.model_family == "qwen":
+            return settings.PYTHON_TRAINING_QWEN
+        return settings.PYTHON_TRAINING_CHATTS

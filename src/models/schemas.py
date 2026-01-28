@@ -83,6 +83,7 @@ class TrainingTaskRequest(BaseModel):
     """训练任务请求"""
     config_name: str
     version_tag: Optional[str] = None
+    model_family: str = "chatts"
 
 
 # ==================== 推理服务 ====================

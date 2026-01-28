@@ -89,6 +89,12 @@ class CheckOutlierAdapter:
                 "chatts_model_path": model, # 注意：这是传给 run.py 的 --chatts_model_path
                 "chatts_enabled": True
             }
+        elif algorithm == "qwen":
+            return {
+                "method": "qwen",
+                "chatts_model_path": model, # Pass model path to reused argument in run.py
+                "chatts_enabled": False # Not using legacy ChatTS logic but new Qwen block
+            }
         elif algorithm == "adtk_hbos":
             return {
                 "method": "adtk_hbos",
@@ -109,7 +115,8 @@ class CheckOutlierAdapter:
         cmd = [
             python_exe, str(self.run_script),
             "--input", input_file,
-            "--method", algorithm
+            "--method", algorithm,
+            "--task_name", ""  # Suppress default 'global' subfolder
         ]
         
         # 处理参数映射
@@ -144,6 +151,10 @@ class CheckOutlierAdapter:
             
             cmd.extend([arg_name, str(v)])
         
+        # 强制指定输出路径，确保与系统统一配置一致
+        if "--data_path" not in cmd:
+            cmd.extend(["--data_path", settings.DATA_INFERENCE_DIR])
+        
         try:
             result = subprocess.run(
                 cmd,
@@ -155,10 +166,29 @@ class CheckOutlierAdapter:
             
             # 尝试解析输出为 JSON
             output = result.stdout.strip()
-            try:
-                parsed = json.loads(output)
-            except json.JSONDecodeError:
-                parsed = {"raw_output": output}
+            parsed = None
+            
+            # 尝试提取标记之间的 JSON
+            import re
+            match = re.search(r"__JSON_START__\s*(.*?)\s*__JSON_END__", output, re.DOTALL)
+            if match:
+                try:
+                    json_str = match.group(1)
+                    parsed = json.loads(json_str)
+                    # parsed 应该是一个 list, 我们取第一个或者合并
+                    # run.py 输出的是 [{"filename":..., "annotations":...}, ...]
+                    # 这里的 adapter 是 _run_single_inference, 所以通常只有一个结果，但这取决于 run.py 是怎么被调用的
+                    # 如果 input_file 只有一个，run.py loop 只跑一次，list len=1
+                    # 我们返回整个 list 或者 result
+                except:
+                    pass
+            
+            if parsed is None:
+                # Fallback: try parsing whole output (legacy behavior)
+                try:
+                    parsed = json.loads(output)
+                except json.JSONDecodeError:
+                    parsed = {"raw_output": output}
             
             return {
                 "file": input_file,
@@ -254,7 +284,8 @@ class CheckOutlierAdapter:
         cmd = [
             python_exe, str(self.run_script),
             "--input", input_file,
-            "--method", algorithm
+            "--method", algorithm,
+            "--task_name", ""  # Suppress default 'global' subfolder
         ]
         
         # 处理参数映射
@@ -286,6 +317,10 @@ class CheckOutlierAdapter:
             # 常规参数处理
             arg_name = f"--{k}"
             cmd.extend([arg_name, str(v)])
+
+        # 强制指定输出路径，确保与系统统一配置一致
+        if "--data_path" not in cmd:
+            cmd.extend(["--data_path", settings.DATA_INFERENCE_DIR])
             
         yield f"Running command: `{' '.join(cmd[:10])}...`\n"
 
@@ -307,6 +342,9 @@ class CheckOutlierAdapter:
             
             output_lines = []
             
+            # Local variable to track result directory for this specific run
+            current_result_dir = None
+
             # 实时读取日志
             for line in iter(process.stdout.readline, ''):
                 if line:
@@ -318,10 +356,7 @@ class CheckOutlierAdapter:
                     if "Saving results to:" in stripped_line:
                         parts = stripped_line.split("Saving results to:")
                         if len(parts) >= 2:
-                            result_dir = parts[-1].strip()
-                            # 存储目录供后续使用
-                            if not hasattr(self, '_current_result_dir'):
-                                self._current_result_dir = result_dir
+                            current_result_dir = parts[-1].strip()
 
                     # 捕获实际保存的文件名
                     # Log format: "保存结果: filename.csv"
@@ -330,11 +365,12 @@ class CheckOutlierAdapter:
                         if len(parts) >= 2:
                             filename = parts[-1].strip()
                             # 构建完整路径
-                            if hasattr(self, '_current_result_dir'):
-                                full_path = f"{self._current_result_dir}/{filename}"
+                            if current_result_dir:
+                                full_path = f"{current_result_dir}/{filename}"
                             else:
-                                # 默认目录
-                                full_path = f"/home/share/results/data/global/chatts/{filename}"
+                                # Fallback: use algorithm specific directory
+                                default_dir = os.path.join(settings.DATA_INFERENCE_DIR, algorithm)
+                                full_path = f"{default_dir}/{filename}"
                             yield {"file_path": full_path, "file_name": filename}
 
                     # 过滤并格式化有用信息
