@@ -328,10 +328,10 @@ def _is_checkpoint_model(model: Dict) -> bool:
 
 
 def _filter_models(model_family: str, model_type: str = "all", include_checkpoints: bool = False) -> List[Dict]:
-    models = get_training_adapter(model_family).list_models()
-    if model_family in TRAINING_MODEL_FAMILIES:
-        token = f"/saves/{model_family}/"
-        models = [m for m in models if token in str(m.get("path", "")).replace("\\", "/")]
+    adapter = get_training_adapter(model_family)
+    models = adapter.list_models()
+    saves_prefix = str(adapter.saves_path).replace("\\", "/") + "/"
+    models = [m for m in models if str(m.get("path", "")).replace("\\", "/").startswith(saves_prefix)]
     model_type = (model_type or "all").lower()
     if model_type in ["lora", "full"]:
         models = [m for m in models if m.get("type") == model_type]
@@ -429,7 +429,8 @@ def get_model_info(model_path: str, model_family: str) -> str:
     if not model_path:
         return "请选择一个模型"
     
-    models = get_training_adapter(model_family).list_models()
+    adapter = get_training_adapter(model_family)
+    models = adapter.list_models()
     model = next((m for m in models if str(m.get("path")) == str(model_path)), None)
     
     if not model:
@@ -490,7 +491,8 @@ def get_comparison_plot(model_paths: List[str], model_family: str):
             
         df = pd.DataFrame([{"step": l.get("current_steps", 0), "loss": l.get("loss")} for l in logs if "loss" in l])
         if not df.empty:
-            plt.plot(df["step"], df["loss"], label=name)
+            label = model.get("name") or _relative_model_path(model.get("path", ""))
+            plt.plot(df["step"], df["loss"], label=label)
             
     plt.xlabel("Steps")
     plt.ylabel("Loss")
