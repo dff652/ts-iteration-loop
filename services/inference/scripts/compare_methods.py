@@ -11,6 +11,7 @@
 """
 
 import os
+import re
 import argparse
 import logging
 from multiprocessing import Pool
@@ -42,11 +43,12 @@ def find_result_file(data_dir: str, task_name: str, column: str, method: str) ->
     """
     # 1) 优先方法子目录: <data_dir>/<task_name>/<method>/
     method_dir = os.path.join(data_dir, task_name, method)
+    short_col = _short_point_name(column)
     if os.path.exists(method_dir):
         for fname in os.listdir(method_dir):
             if not fname.endswith('.csv'):
                 continue
-            if column in fname:
+            if column in fname or (short_col and short_col in fname):
                 return os.path.join(method_dir, fname)
     # 2) 兼容旧结构: <data_dir>/<task_name>/ 下通过文件名包含 method + column 匹配
     dir_path = os.path.join(data_dir, task_name)
@@ -55,10 +57,37 @@ def find_result_file(data_dir: str, task_name: str, column: str, method: str) ->
     for fname in os.listdir(dir_path):
         if not fname.endswith('.csv'):
             continue
-        # 运行保存的命名规则中包含: task_name_method_downsampler_ratio_num_points_column_yyyymmdd_component.csv
-        if method in fname and column in fname:
+        # 命名规则包含: method_downsampler_shortpoint_yyyymmdd.csv
+        if method in fname and (column in fname or (short_col and short_col in fname)):
             return os.path.join(dir_path, fname)
     return None
+
+
+def _strip_date_suffix(name: str) -> str:
+    name = re.sub(r"_\d{8}(?:_\d{6})?_to_\d{8}(?:_\d{6})?$", "", name)
+    name = re.sub(r"_\d{8}(?:_\d{6})?$", "", name)
+    return name
+
+
+def _short_point_name(raw: str) -> str:
+    if not raw:
+        return raw
+    name = os.path.basename(str(raw))
+    if name.lower().endswith(".csv"):
+        name = name[:-4]
+    name = _strip_date_suffix(name)
+
+    match = re.search(r"(?:^|_)([A-Za-z]{1,3}_[A-Za-z0-9]+\.[A-Za-z0-9]+)$", name)
+    if match:
+        return match.group(1)
+
+    parts = name.split("_")
+    for i in range(len(parts) - 1, -1, -1):
+        if "." in parts[i]:
+            if i > 0:
+                return f"{parts[i - 1]}_{parts[i]}"
+            return parts[i]
+    return name
 
 
 def get_data_columns(df: pd.DataFrame) -> List[str]:
@@ -296,5 +325,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
-

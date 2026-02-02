@@ -827,8 +827,11 @@ def chatts_detect(
     data_length = len(series)
     
     # 降采样
-    if data_length > n_downsample:
-        downsampled_data,_, position_index = ts_downsample(series, downsampler=downsampler, n_out=n_downsample)
+    if downsampler is None or str(downsampler).lower() == "none":
+        ts_values = series.values.astype(np.float32)
+        position_index = np.arange(data_length)
+    elif data_length > n_downsample:
+        downsampled_data, _, position_index = ts_downsample(series, downsampler=downsampler, n_out=n_downsample)
         ts_values = downsampled_data.values.astype(np.float32)
     else:
         ts_values = series.values.astype(np.float32)

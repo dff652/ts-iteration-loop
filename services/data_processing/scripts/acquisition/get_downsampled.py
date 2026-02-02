@@ -1,17 +1,16 @@
 import os
 import re
+import sys
 import pandas as pd
 import numpy as np
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
-from matplotlib.figure import Figure
-from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
-from matplotlib.ticker import ScalarFormatter
+import warnings
 from tsdownsample import M4Downsampler
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import warnings
 from iotdb.Session import Session
+
+# Add project root to sys.path
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../../")))
+from src.utils.plot_utils import generate_ts_thumbnail
 
 warnings.filterwarnings("ignore")
 
@@ -129,69 +128,7 @@ def create_and_save_plot(data: pd.Series, save_path: str):
     Returns:
         bool: 保存成功返回True，失败返回False
     """
-    try:
-        # 设置图形参数
-        fig_width = 20
-        fig_height = 4
-        fig = Figure(figsize=(fig_width, fig_height), dpi=200, facecolor='white')
-        canvas = FigureCanvas(fig)
-        ax = fig.add_subplot(111)
-        
-        # 设置字体样式
-        plt.rcParams.update({
-            'font.size': 12,
-            'axes.titlesize': 12,
-            'axes.labelsize': 12,
-            'xtick.labelsize': 10,
-            'ytick.labelsize': 10,
-            'legend.fontsize': 10,
-            'figure.titlesize': 14
-        })
-        
-        # 绘制数据
-        ax.plot(data.index, data.values, color='black', alpha=1.0, linewidth=0.8)
-        
-        # 设置刻度
-        n_ticks = 25
-        if len(data) <= n_ticks:
-            ax.set_xticks(range(len(data)))
-        else:
-            tick_positions = np.linspace(0, len(data)-1, n_ticks, dtype=int)
-            ax.set_xticks(tick_positions)
-
-        ax.set_xticklabels([])
-        ax.set_yticklabels([])
-        ax.set_xlabel('')
-        ax.set_ylabel('')
-        
-        # 设置Y轴范围
-        y_min, y_max = data.min(), data.max()
-        if y_max > y_min:
-            y_range = y_max - y_min
-            margin = y_range * 0.05
-            ax.set_ylim(y_min - margin, y_max + margin)
-        
-        # 设置坐标轴格式
-        ax.yaxis.set_major_formatter(ScalarFormatter(useOffset=False))
-        ax.xaxis.set_major_formatter(ScalarFormatter(useOffset=False))
-        ax.tick_params(axis='both', which='both', direction='in', length=3, width=0.8, pad=2)
-        
-        # 美化图形
-        ax.spines['top'].set_visible(False)
-        ax.spines['right'].set_visible(False)
-        for spine in ax.spines.values():
-            spine.set_linewidth(0.8)
-        
-        # 调整布局并保存
-        fig.tight_layout(pad=0.1)
-        fig.savefig(save_path, format='jpg', dpi=200, 
-                   bbox_inches='tight', pad_inches=0.02,
-                   facecolor='white', edgecolor='none')
-        plt.close(fig)
-        return True
-    except Exception as e:
-        print(f"保存图片失败: {save_path} | 错误: {e}")
-        return False
+    return generate_ts_thumbnail(data, save_path)
 
 import argparse
 import sys

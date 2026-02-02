@@ -227,7 +227,7 @@ class ChatTSTrainingAdapter:
             return new_info
 
         for item in sorted(training_dir.iterdir()):
-            if item.name.startswith("dataset_info"):
+            if item.name.startswith("dataset_info") or item.name.startswith(".") or item.name.startswith("_"):
                 continue
             if item.is_file() and item.suffix in {".json", ".jsonl"}:
                 name = item.stem
@@ -283,6 +283,8 @@ class ChatTSTrainingAdapter:
 
         for f_path in training_dir.glob("*.json*"):
             name = f_path.stem
+            if name.startswith("dataset_info"):
+                continue
 
             # 简单推断格式
             file_format = "sharegpt"
@@ -440,6 +442,25 @@ class ChatTSTrainingAdapter:
         override_batch_size: Optional[int] = None,
         override_lora_rank: Optional[int] = None,
         override_lora_alpha: Optional[int] = None,
+        override_grad_accum_steps: Optional[int] = None,
+        override_cutoff_len: Optional[int] = None,
+        override_precision: Optional[str] = None,
+        override_image_max_pixels: Optional[int] = None,
+        override_image_min_pixels: Optional[int] = None,
+        override_nproc_per_node: Optional[int] = None,
+        override_cuda_visible_devices: Optional[str] = None,
+        override_extra_args: Optional[str] = None,
+        override_logging_steps: Optional[str] = None,
+        override_save_steps: Optional[str] = None,
+        override_warmup_steps: Optional[str] = None,
+        override_warmup_ratio: Optional[str] = None,
+        override_lr_scheduler_type: Optional[str] = None,
+        override_lora_dropout: Optional[str] = None,
+        override_lora_target: Optional[str] = None,
+        override_freeze_vision_tower: Optional[str] = None,
+        override_freeze_multi_modal_projector: Optional[str] = None,
+        override_freeze_trainable_layers: Optional[str] = None,
+        override_freeze_trainable_modules: Optional[str] = None,
     ) -> Dict:
         """
         执行训练任务 (支持 Quick Start 参数覆盖)
@@ -477,6 +498,73 @@ class ChatTSTrainingAdapter:
                 script_content = self._replace_arg_val(script_content, "--lora_rank", str(override_lora_rank))
             if override_lora_alpha:
                 script_content = self._replace_arg_val(script_content, "--lora_alpha", str(override_lora_alpha))
+            if override_grad_accum_steps:
+                script_content = self._replace_or_append_arg(
+                    script_content, "--gradient_accumulation_steps", str(override_grad_accum_steps)
+                )
+            if override_cutoff_len:
+                script_content = self._replace_or_append_arg(script_content, "--cutoff_len", str(override_cutoff_len))
+            if override_image_max_pixels:
+                script_content = self._replace_or_append_arg(
+                    script_content, "--image_max_pixels", str(override_image_max_pixels)
+                )
+            if override_image_min_pixels:
+                script_content = self._replace_or_append_arg(
+                    script_content, "--image_min_pixels", str(override_image_min_pixels)
+                )
+            if override_precision:
+                script_content = self._apply_precision(script_content, override_precision)
+            if override_nproc_per_node:
+                script_content = self._replace_arg_val(
+                    script_content, "--nproc_per_node", str(override_nproc_per_node)
+                )
+                script_content = self._replace_arg_val(script_content, "--num_gpus", str(override_nproc_per_node))
+            if override_extra_args:
+                script_content = self._append_to_train_command(script_content, override_extra_args.strip())
+            if override_logging_steps is not None and str(override_logging_steps).strip() != "":
+                script_content = self._replace_or_append_arg(
+                    script_content, "--logging_steps", str(override_logging_steps).strip()
+                )
+            if override_save_steps is not None and str(override_save_steps).strip() != "":
+                script_content = self._replace_or_append_arg(
+                    script_content, "--save_steps", str(override_save_steps).strip()
+                )
+            if override_warmup_steps is not None and str(override_warmup_steps).strip() != "":
+                script_content = self._replace_or_append_arg(
+                    script_content, "--warmup_steps", str(override_warmup_steps).strip()
+                )
+            if override_warmup_ratio is not None and str(override_warmup_ratio).strip() != "":
+                script_content = self._replace_or_append_arg(
+                    script_content, "--warmup_ratio", str(override_warmup_ratio).strip()
+                )
+            if override_lr_scheduler_type is not None and str(override_lr_scheduler_type).strip() != "":
+                script_content = self._replace_or_append_arg(
+                    script_content, "--lr_scheduler_type", str(override_lr_scheduler_type).strip()
+                )
+            if override_lora_dropout is not None and str(override_lora_dropout).strip() != "":
+                script_content = self._replace_or_append_arg(
+                    script_content, "--lora_dropout", str(override_lora_dropout).strip()
+                )
+            if override_lora_target is not None and str(override_lora_target).strip() != "":
+                script_content = self._replace_or_append_arg(
+                    script_content, "--lora_target", f"\"{str(override_lora_target).strip()}\""
+                )
+            if override_freeze_vision_tower is not None and str(override_freeze_vision_tower).strip() != "":
+                script_content = self._replace_or_append_arg(
+                    script_content, "--freeze_vision_tower", str(override_freeze_vision_tower).strip()
+                )
+            if override_freeze_multi_modal_projector is not None and str(override_freeze_multi_modal_projector).strip() != "":
+                script_content = self._replace_or_append_arg(
+                    script_content, "--freeze_multi_modal_projector", str(override_freeze_multi_modal_projector).strip()
+                )
+            if override_freeze_trainable_layers is not None and str(override_freeze_trainable_layers).strip() != "":
+                script_content = self._replace_or_append_arg(
+                    script_content, "--freeze_trainable_layers", str(override_freeze_trainable_layers).strip()
+                )
+            if override_freeze_trainable_modules is not None and str(override_freeze_trainable_modules).strip() != "":
+                script_content = self._replace_or_append_arg(
+                    script_content, "--freeze_trainable_modules", str(override_freeze_trainable_modules).strip()
+                )
 
             # 设置输出目录
             output_dir = self.saves_path / f"{config_name}_{version_tag or task_id[:8]}"
@@ -500,6 +588,10 @@ class ChatTSTrainingAdapter:
             env["OUTPUT_DIR"] = str(output_dir)
             env["DATASET_DIR"] = str(self._get_data_dir())
             env["IMAGE_DIR"] = str(self._get_images_dir())
+            if override_nproc_per_node:
+                env["NPROC_PER_NODE"] = str(override_nproc_per_node)
+            if override_cuda_visible_devices:
+                env["CUDA_VISIBLE_DEVICES"] = override_cuda_visible_devices
             # 强制禁用缓存以实时显示日志
             env["PYTHONUNBUFFERED"] = "1"
             # 禁用 LLaMA-Factory 的严格版本检查 (适配当前环境 Transformers 4.57+)
@@ -564,8 +656,13 @@ class ChatTSTrainingAdapter:
                     if chunk:
                         content = chunk
                         new_offset = f.tell()
-            except:
-                pass
+            except Exception as e:
+                content += f"\n[System Error] 无法读取日志文件: {e}\n"
+                
+        if status == "completed":
+            ret_code = process.returncode
+            if ret_code != 0:
+                content += f"\n\n[System] Training process terminated with error code {ret_code}.\n"
                 
         return {"log": content, "status": status, "offset": new_offset}
 
@@ -623,6 +720,49 @@ class ChatTSTrainingAdapter:
         if pattern.search(content):
             return pattern.sub(f'{arg_name} {new_value}\\1', content)
         return content
+
+    def _replace_or_append_arg(self, content: str, arg_name: str, new_value: str) -> str:
+        """替换参数值，若不存在则追加到训练命令"""
+        updated = self._replace_arg_val(content, arg_name, new_value)
+        if updated != content:
+            return updated
+        return self._append_to_train_command(updated, f"{arg_name} {new_value}")
+
+    def _apply_precision(self, content: str, precision: str) -> str:
+        """设置精度：bf16/fp16/fp32"""
+        import re
+        normalized = precision.lower().strip()
+        content = re.sub(r"\s--bf16\b", "", content)
+        content = re.sub(r"\s--fp16\b", "", content)
+        if normalized == "bf16":
+            return self._append_to_train_command(content, "--bf16")
+        if normalized == "fp16":
+            return self._append_to_train_command(content, "--fp16")
+        return content
+
+    def _append_to_train_command(self, content: str, arg_line: str) -> str:
+        """Append an arg line to the last train command block."""
+        if not arg_line:
+            return content
+        lines = content.splitlines()
+        start_idx = None
+        for i, line in enumerate(lines):
+            if "src/train.py" in line or "${RUN_CMD[@]}" in line:
+                start_idx = i
+                break
+        if start_idx is None:
+            return content
+        last_arg_idx = None
+        for j in range(start_idx + 1, len(lines)):
+            if lines[j].lstrip().startswith("--"):
+                last_arg_idx = j
+        end_idx = last_arg_idx if last_arg_idx is not None else start_idx
+        if lines[end_idx].rstrip().endswith("\\"):
+            lines.insert(end_idx + 1, f"    {arg_line}")
+        else:
+            lines[end_idx] = lines[end_idx] + " \\"
+            lines.insert(end_idx + 1, f"    {arg_line}")
+        return "\n".join(lines) + "\n"
 
     def _get_scripts_dir(self, method: str) -> Path:
         """获取脚本目录（优先模型专属目录）"""

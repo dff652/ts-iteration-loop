@@ -46,6 +46,15 @@ ALLOWED_DATA_DIRS = [
 
 _ALLOWED_ROOTS = [Path(p).resolve() for p in ALLOWED_DATA_DIRS]
 
+
+def _normalize_annotation_name(filename: str) -> str:
+    name = filename or ""
+    lower = name.lower()
+    for ext in (".csv", ".xls", ".xlsx"):
+        if lower.endswith(ext):
+            return name[: -len(ext)]
+    return name
+
 # Ensure directories exist
 os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(ANNOTATIONS_DIR, exist_ok=True)
@@ -699,10 +708,16 @@ def get_annotations(filename, current_user):
         annotation_file = None
         annotation_data = None
         
+        base_name = _normalize_annotation_name(filename)
+
         # Pattern 1: Standard format (filename.json)
-        pattern1 = os.path.join(user_ann_dir, f"{filename}.json")
+        pattern1 = os.path.join(user_ann_dir, f"{base_name}.json")
         if os.path.exists(pattern1):
             annotation_file = pattern1
+        elif base_name != filename:
+            pattern1_alt = os.path.join(user_ann_dir, f"{filename}.json")
+            if os.path.exists(pattern1_alt):
+                annotation_file = pattern1_alt
         
         # Pattern 2 & 3: Search all JSON files and match by filename field
         if not annotation_file:
@@ -848,7 +863,8 @@ def save_annotations(filename, current_user):
         user_ann_dir = os.path.join(ANNOTATIONS_DIR, current_user)
         os.makedirs(user_ann_dir, exist_ok=True)
         
-        annotation_file = os.path.join(user_ann_dir, f"{filename}.json")
+        base_name = _normalize_annotation_name(filename)
+        annotation_file = os.path.join(user_ann_dir, f"{base_name}.json")
         
         with open(annotation_file, 'w', encoding='utf-8') as f:
             json.dump(save_data, f, ensure_ascii=False, indent=2)
@@ -873,7 +889,10 @@ def delete_annotation(filename):
         if not annotation_id:
             return jsonify({'success': False, 'error': 'Annotation ID is required'}), 400
         
-        annotation_file = os.path.join(ANNOTATIONS_DIR, f"{filename}.json")
+        base_name = _normalize_annotation_name(filename)
+        annotation_file = os.path.join(ANNOTATIONS_DIR, f"{base_name}.json")
+        if not os.path.exists(annotation_file) and base_name != filename:
+            annotation_file = os.path.join(ANNOTATIONS_DIR, f"{filename}.json")
         
         if not os.path.exists(annotation_file):
             return jsonify({'success': False, 'error': 'Annotation file not found'}), 404
@@ -899,7 +918,10 @@ def delete_annotation(filename):
 def download_annotations(filename):
     """Download annotations in target JSON format"""
     try:
-        annotation_file = os.path.join(ANNOTATIONS_DIR, f"{filename}.json")
+        base_name = _normalize_annotation_name(filename)
+        annotation_file = os.path.join(ANNOTATIONS_DIR, f"{base_name}.json")
+        if not os.path.exists(annotation_file) and base_name != filename:
+            annotation_file = os.path.join(ANNOTATIONS_DIR, f"{filename}.json")
         
         if not os.path.exists(annotation_file):
             return jsonify({

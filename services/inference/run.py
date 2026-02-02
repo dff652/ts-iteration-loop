@@ -62,6 +62,7 @@ from scipy.signal import savgol_filter
 import argparse
 import time
 import json
+import re
 from multiprocessing import Pool
 import os
 import functools
@@ -124,6 +125,33 @@ def log_data_info(title, data, log_level=logging.INFO):
         logging.log(log_level, '\n' + '=' * 30 + f' {title} {data.columns[0]} ' + '=' * 30)
         logging.log(log_level, f'数据量：{data.shape}')
         logging.log(log_level, f'数据时间范围：{data.index[0]} - {data.index[-1]}')
+
+
+def _strip_date_suffix(name: str) -> str:
+    name = re.sub(r"_\d{8}(?:_\d{6})?_to_\d{8}(?:_\d{6})?$", "", name)
+    name = re.sub(r"_\d{8}(?:_\d{6})?$", "", name)
+    return name
+
+
+def _short_point_name(raw: str) -> str:
+    if not raw:
+        return raw
+    name = os.path.basename(str(raw))
+    if name.lower().endswith(".csv"):
+        name = name[:-4]
+    name = _strip_date_suffix(name)
+
+    match = re.search(r"(?:^|_)([A-Za-z]{1,3}_[A-Za-z0-9]+\.[A-Za-z0-9]+)$", name)
+    if match:
+        return match.group(1)
+
+    parts = name.split("_")
+    for i in range(len(parts) - 1, -1, -1):
+        if "." in parts[i]:
+            if i > 0:
+                return f"{parts[i - 1]}_{parts[i]}"
+            return parts[i]
+    return name
 
 
 def timer_decorator(func):
@@ -499,21 +527,7 @@ def save_results(results, sensor_info, args, position_index=None):
 
     print(f"Saving results to: {folder_path}")
 
-    components = []
-
-    # 添加各个条件下需要的组件
-    if args.use_trend:
-        components.append("trend")
-    if args.use_seasonal:
-        components.append("seasonal")
-    if args.use_resid:
-        components.append("resid")
-
-    # 构建文件名
-    if components:
-        component_str = "_".join(components)  # 将使用的分量组合起来
-    else:
-        component_str = "results"  # 如果没有任何分量，使用默认名称
+    output_point = _short_point_name(column)
 
     # 根据保存模式处理数据
     df_to_save = results
@@ -545,8 +559,11 @@ def save_results(results, sensor_info, args, position_index=None):
             except Exception:
                 pass
 
+    if output_point and output_point != column and column in df_to_save.columns:
+        df_to_save = df_to_save.rename(columns={column: output_point})
+
     # 只保存一个完整的CSV文件，包含所有信息
-    file_name = f"{args.task_name}_{args.method}_{args.downsampler}_{args.ratio}_{args.num_points}_{column}_{date_str}_{component_str}.csv"
+    file_name = f"{args.method}_{args.downsampler}_{output_point}_{date_str}.csv"
     df_to_save.to_csv(os.path.join(folder_path, file_name))
     print(f"保存结果: {file_name}")
     
@@ -616,15 +633,9 @@ def process_sensor(sensor_info, args):
     
     # 构建文件名
     date_str = pd.to_datetime(st).strftime('%Y%m%d')
-    components = []
-    if args.use_trend: components.append("trend")
-    if args.use_seasonal: components.append("seasonal")
-    if args.use_resid: components.append("resid")
-    component_str = "_".join(components) if components else "results"
+    output_point = _short_point_name(column)
     
-    # Handle empty task_name
-    task_prefix = f"{args.task_name}_" if args.task_name else ""
-    file_name = f"{task_prefix}{args.method}_{args.downsampler}_{args.ratio}_{args.num_points}_{column}_{date_str}_{component_str}.csv"
+    file_name = f"{args.method}_{args.downsampler}_{output_point}_{date_str}.csv"
     file_path = os.path.join(folder_path, file_name)
 
     if os.path.exists(file_path):
@@ -885,6 +896,7 @@ def process_sensor(sensor_info, args):
                     device=device,
                     prompt_template_name=getattr(args, 'chatts_prompt_template', 'default'),
                     n_downsample=getattr(args, 'n_downsample', 5000), # Pass downsample config
+                    downsampler=getattr(args, 'downsampler', 'm4'),
                 )
             metrics.anomaly_detect_time = t_inference.elapsed
             

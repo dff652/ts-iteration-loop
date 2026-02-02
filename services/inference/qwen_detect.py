@@ -101,8 +101,15 @@ class ImageGenerator:
         img = Image.open(buf).convert("RGB")
         return img
 
-def qwen_detect(data: pd.DataFrame, model_path: str, device: str = "cuda", 
-               prompt_template_name: str = "default", **kwargs):
+def qwen_detect(
+    data: pd.DataFrame,
+    model_path: str,
+    device: str = "cuda",
+    prompt_template_name: str = "default",
+    n_downsample: int = 5000,
+    downsampler: str = "m4",
+    **kwargs,
+):
     """
     Qwen 模型推理入口函数
     
@@ -125,13 +132,19 @@ def qwen_detect(data: pd.DataFrame, model_path: str, device: str = "cuda",
     # 提取第一列作为数值列
     series = data.iloc[:, 0]
     
-    # 降采样逻辑 (简单实现，如果需要复杂M4降采样可引用 tsdownsample)
-    # 这里假设传入数据长度适中，或者直接使用 tsdownsample
+    # 降采样逻辑
     try:
-        from tsdownsample import M4Downsampler
-        if len(series) > 5000:
-            downsampler = M4Downsampler()
-            idx = downsampler.downsample(series.values, n_out=5000)
+        if downsampler is None or str(downsampler).lower() == "none":
+            series_ds = series
+            position_index = np.arange(len(series))
+        elif len(series) > n_downsample:
+            if str(downsampler).lower() == "minmax":
+                from tsdownsample import MinMaxLTTBDownsampler
+                sampler = MinMaxLTTBDownsampler()
+            else:
+                from tsdownsample import M4Downsampler
+                sampler = M4Downsampler()
+            idx = sampler.downsample(series.values, n_out=n_downsample)
             series_ds = series.iloc[idx]
             position_index = idx
         else:

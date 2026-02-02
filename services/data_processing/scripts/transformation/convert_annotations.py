@@ -74,7 +74,7 @@ def extract_suffix_hint(name):
 def find_latest_auto_file(output_dir, format_type):
     if not output_dir or not os.path.exists(output_dir):
         return None
-    pattern = re.compile(rf"^{re.escape(format_type)}_n\\d+_\\d{{8}}\\.json$")
+    pattern = re.compile(rf"^{re.escape(format_type)}(?:_converted)?_(?:n)?\\d+_\\d{{8}}\\.json$")
     candidates = []
     for fname in os.listdir(output_dir):
         if pattern.match(fname):
@@ -674,7 +674,7 @@ def convert_annotations(input_dir, output_file, image_dir, filename=None, format
         date_tag = datetime.now().strftime("%Y%m%d")
         final_output_file = os.path.join(
             output_dir,
-            f"{format_type}_n{len(all_conversations)}_{date_tag}.json"
+            f"{format_type}_converted_{len(all_conversations)}_{date_tag}.json"
         )
 
     os.makedirs(os.path.dirname(final_output_file), exist_ok=True)
@@ -799,7 +799,7 @@ def main():
                 date_tag = datetime.now().strftime("%Y%m%d")
                 final_output_path = os.path.join(
                     output_dir,
-                    f"{args.format}_n{len(all_conversations)}_{date_tag}.json"
+                    f"{args.format}_converted_{len(all_conversations)}_{date_tag}.json"
                 )
             else:
                 final_output_path = args.output
