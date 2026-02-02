@@ -20,6 +20,7 @@ from src.utils.file_filters import is_inference_or_generated_csv, match_result_m
 
 
 TRAINING_MODEL_FAMILIES = ["chatts", "qwen"]
+TRAINING_METHODS = ["all", "lora", "full"]
 
 # 初始化适配器
 chatts_adapter = ChatTSTrainingAdapter(model_family="chatts")
@@ -293,25 +294,143 @@ def delete_result_file(method: str, filename: str) -> tuple:
     pass
 
 
-def get_training_configs(model_family: str = "chatts") -> List[str]:
+def get_training_configs(model_family: str = "chatts", method: str = "all") -> List[str]:
     """获取训练配置列表"""
     configs = get_training_adapter(model_family).list_configs()
+    method = (method or "all").lower()
+    if method in ["lora", "full"]:
+        configs = [c for c in configs if c.get("method") == method]
     return [c["name"] for c in configs]
 
 
+def update_training_dropdowns(model_family: str, method: str) -> tuple:
+    configs = get_training_configs(model_family, method)
+    datasets = get_training_adapter(model_family).get_dataset_list()
+    base_models = get_training_adapter(model_family).get_base_models()
+    return (
+        gr.Dropdown(choices=configs, value=(configs[0] if configs else None)),
+        gr.Dropdown(choices=datasets, value=(datasets[0] if datasets else None)),
+        gr.Dropdown(choices=base_models, value=(base_models[0] if base_models else None)),
+    )
+
+
+def update_training_config_only(model_family: str, method: str) -> gr.Dropdown:
+    configs = get_training_configs(model_family, method)
+    return gr.Dropdown(choices=configs, value=(configs[0] if configs else None))
+
+
+def _is_checkpoint_model(model: Dict) -> bool:
+    name = str(model.get("name", ""))
+    path = str(model.get("path", ""))
+    if name.startswith("checkpoint-"):
+        return True
+    return "/checkpoint-" in path.replace("\\", "/")
+
+
+def _filter_models(model_family: str, model_type: str = "all", include_checkpoints: bool = False) -> List[Dict]:
+    models = get_training_adapter(model_family).list_models()
+    if model_family in TRAINING_MODEL_FAMILIES:
+        token = f"/saves/{model_family}/"
+        models = [m for m in models if token in str(m.get("path", "")).replace("\\", "/")]
+    model_type = (model_type or "all").lower()
+    if model_type in ["lora", "full"]:
+        models = [m for m in models if m.get("type") == model_type]
+    if not include_checkpoints:
+        models = [m for m in models if not _is_checkpoint_model(m)]
+    return models
+
+
+def _relative_model_path(model_path: str) -> str:
+    path = Path(model_path)
+    parts = path.parts
+    if "saves" in parts:
+        idx = parts.index("saves")
+        return str(Path(*parts[idx:]))
+    return str(path)
+
+
+def _format_model_choice(model: Dict) -> tuple[str, str]:
+    label = f"{model.get('name', '')} ({model.get('type', 'unknown')}) · {_relative_model_path(model.get('path', ''))}"
+    return (label, str(model.get("path", "")))
+
+
+def get_trained_model_choices(model_family: str, model_type: str = "all", include_checkpoints: bool = False) -> List[tuple]:
+    models = _filter_models(model_family, model_type, include_checkpoints)
+    return [_format_model_choice(m) for m in models]
+
+
+def _sorted_checkpoints(run_path: str) -> List[str]:
+    if not run_path:
+        return []
+    root = Path(run_path)
+    if not root.exists():
+        return []
+    checkpoints = []
+    for cp in root.glob("checkpoint-*"):
+        try:
+            step = int(cp.name.split("-")[1])
+        except Exception:
+            step = 0
+        checkpoints.append((step, cp.name))
+    checkpoints.sort(key=lambda x: x[0])
+    return [name for _, name in checkpoints]
+
+
+def get_lora_run_choices(model_family: str) -> List[tuple]:
+    return get_trained_model_choices(model_family, model_type="lora", include_checkpoints=False)
+
+
+def get_checkpoint_choices(run_path: str) -> List[tuple]:
+    names = _sorted_checkpoints(run_path)
+    if not names:
+        return [("无", "")]
+    return [("无", ""), ("最新", "__latest__")] + [(n, n) for n in names]
+
+
+def resolve_lora_adapter_path(run_path: str, checkpoint_value: str) -> str:
+    if not run_path:
+        return ""
+    if not checkpoint_value:
+        return run_path
+    if checkpoint_value == "__latest__":
+        names = _sorted_checkpoints(run_path)
+        if not names:
+            return run_path
+        return str(Path(run_path) / names[-1])
+    return str(Path(run_path) / checkpoint_value)
+
+
+def update_lora_run_dropdown(model_family: str, current_value: Optional[str] = None) -> gr.Dropdown:
+    choices = get_inference_models(model_family)
+    values = {v for _, v in choices}
+    value = current_value if current_value in values else (choices[0][1] if choices else None)
+    return gr.Dropdown(choices=choices, value=value)
+
+
+def update_checkpoint_dropdown(run_path: str, current_value: Optional[str] = None) -> gr.Dropdown:
+    choices = get_checkpoint_choices(run_path)
+    values = {v for _, v in choices}
+    value = current_value if current_value in values else ""
+    return gr.Dropdown(choices=choices, value=value)
+
+
+def sync_lora_family_from_algo(algorithm: str, current_family: str) -> gr.Dropdown:
+    value = algorithm if algorithm in TRAINING_MODEL_FAMILIES else current_family
+    return gr.Dropdown(value=value)
+
+
 def get_trained_models() -> List[str]:
-    """获取已训练模型列表"""
-    models = adapter.list_models()
-    return [m["name"] for m in models]
+    """获取已训练模型列表 (保留旧接口，默认 chatts/all/不含 checkpoint)"""
+    return [label for label, _ in get_trained_model_choices("chatts", "all", False)]
 
 
-def get_model_info(model_name: str) -> str:
+def get_model_info(model_path: str, model_family: str) -> str:
     """获取模型详细信息"""
-    if not model_name:
+    if not model_path:
         return "请选择一个模型"
     
-    models = adapter.list_models()
-    model = next((m for m in models if m["name"] == model_name), None)
+    models = get_training_adapter(model_family).list_models()
+    model = next((m for m in models if str(m.get("path")) == str(model_path)), None)
     
     if not model:
         return "模型不存在"
@@ -332,13 +451,13 @@ def get_model_info(model_name: str) -> str:
     return "\n\n".join(info_lines)
 
 
-def get_loss_plot(model_name: str):
+def get_loss_plot(model_path: str, model_family: str):
     """获取 Loss 曲线图"""
-    if not model_name:
+    if not model_path:
         return None
     
-    models = adapter.list_models()
-    model = next((m for m in models if m["name"] == model_name), None)
+    models = get_training_adapter(model_family).list_models()
+    model = next((m for m in models if str(m.get("path")) == str(model_path)), None)
     
     if not model or not model.get("loss_image"):
         return None
@@ -349,9 +468,9 @@ def get_loss_plot(model_name: str):
     return None
 
 
-def get_comparison_plot(model_names: List[str]):
+def get_comparison_plot(model_paths: List[str], model_family: str):
     """获取多个模型的 Loss 对比图 (使用 Matplotlib 动态生成)"""
-    if not model_names or len(model_names) == 0:
+    if not model_paths or len(model_paths) == 0:
         return None
     
     import matplotlib.pyplot as plt
@@ -359,9 +478,9 @@ def get_comparison_plot(model_names: List[str]):
     
     plt.figure(figsize=(10, 6))
     
-    for name in model_names:
-        models = adapter.list_models()
-        model = next((m for m in models if m["name"] == name), None)
+    models = get_training_adapter(model_family).list_models()
+    for path in model_paths:
+        model = next((m for m in models if str(m.get("path")) == str(path)), None)
         if not model:
             continue
             
@@ -472,10 +591,23 @@ def preview_dataset(filename: str) -> tuple:
         # 假设图片在 DATA_IMAGES_DIR 或 DATA_DOWNSAMPLED_DIR (用户可能手动放这)
         # 优先查 DATA_IMAGES_DIR
         possible_img_name = filename.replace(".csv", ".jpg")
-        pre_gen_img_path = Path(settings.DATA_IMAGES_DIR) / possible_img_name
+        img_dir = Path(settings.DATA_IMAGES_DIR)
+        img_dir.mkdir(parents=True, exist_ok=True)
+        pre_gen_img_path = img_dir / possible_img_name
         
+        # 如果图片不存在，尝试使用公共组件自动生成
+        if not pre_gen_img_path.exists():
+            print(f"[DEBUG] Generating missing thumbnail: {pre_gen_img_path}")
+            try:
+                # 优先使用 value 列，否则使用第一列
+                target_col = 'value' if 'value' in df.columns else (numeric_cols[0] if numeric_cols else df.columns[0])
+                if target_col in df.columns:
+                    generate_ts_thumbnail(df[[target_col]], str(pre_gen_img_path))
+            except Exception as e:
+                print(f"[ERROR] Failed to auto-generate thumbnail: {e}")
+
         if pre_gen_img_path.exists():
-            print(f"[DEBUG] Using pre-generated image: {pre_gen_img_path}")
+            print(f"[DEBUG] Using image: {pre_gen_img_path}")
             plot_path = str(pre_gen_img_path)
             
         # 如果没有找到，或者用户选择了特定的列组合(这里初始化默认选第一列，假设预生成图也是画的主列)
@@ -501,32 +633,24 @@ def preview_dataset(filename: str) -> tuple:
 
 
 def generate_plot(df: pd.DataFrame, filename: str, selected_cols: list):
-    """根据选择的列生成曲线图"""
+    """根据选择的列生成曲线图 (统一风格)"""
     if df.empty or not selected_cols:
         return None
     
-    import matplotlib.pyplot as plt
-    plt.figure(figsize=(12, 4))
-    
-    for col in selected_cols:
-        if col in df.columns:
-            plt.plot(df.index, df[col], label=col, alpha=0.8)
-    
-    plt.xlabel("Index")
-    plt.ylabel("Value")
-    plt.title(f"Data Preview: {filename}")
-    if selected_cols:
-        plt.legend()
-    plt.grid(True, alpha=0.3)
-    
-    temp_dir = Path("temp_images")
-    temp_dir.mkdir(exist_ok=True)
-    import uuid
-    plot_path = temp_dir / f"preview_{uuid.uuid4().hex[:8]}.png"
-    plt.savefig(str(plot_path), dpi=100, bbox_inches='tight')
-    plt.close()
-    
-    return str(plot_path)
+    try:
+        temp_dir = Path("temp_images")
+        temp_dir.mkdir(exist_ok=True)
+        import uuid
+        plot_path = temp_dir / f"preview_{uuid.uuid4().hex[:8]}.jpg"
+        
+        # 使用统一绘图组件 (仅支持单列/第一列风格)
+        data_subset = df[selected_cols]
+        generate_ts_thumbnail(data_subset, str(plot_path))
+        
+        return str(plot_path)
+    except Exception as e:
+        print(f"Plot generation failed: {e}")
+        return None
 
 
 def update_plot_from_selection(filename: str, selected_cols: list):
@@ -582,11 +706,9 @@ def get_algorithms() -> List[str]:
     return ["chatts", "qwen", "adtk_hbos", "ensemble", "timer"]
 
 
-def get_inference_models() -> List[str]:
-    """获取可用于推理的模型列表"""
-    # 过滤 lora 模型（假设 ChatTS 推理主要用 LoRA）
-    models = training_adapter.list_models()
-    return [m["path"] for m in models] # 直接返回路径，方便 adapter 处理
+def get_inference_models(model_family: str) -> List[tuple]:
+    """获取可用于推理的 LoRA 训练任务列表 (不含 checkpoint)"""
+    return get_lora_run_choices(model_family)
 
 def toggle_algo_params(algorithm: str):
     """根据选择的算法切换参数组可见性"""
@@ -602,10 +724,15 @@ def toggle_algo_params(algorithm: str):
 def start_inference_task(
     algorithm: str, 
     base_model_path: str,
-    lora_adapter_path: str,
+    lora_run_path: str,
+    lora_checkpoint: str,
     files: List[str],
     n_downsample: int,
     threshold: float,
+    downsample_mode: str,
+    downsampler: str,
+    ratio: float,
+    min_threshold: int,
     # ChatTS args
     load_in_4bit: str,
     prompt_template: str,
@@ -640,6 +767,9 @@ def start_inference_task(
     import uuid
     task_id = str(uuid.uuid4())
     
+    # 解析 LoRA Adapter 路径（支持 checkpoint 分层选择）
+    lora_adapter_path = resolve_lora_adapter_path(lora_run_path, lora_checkpoint)
+
     # 保存任务到数据库
     from datetime import datetime
     from src.db.database import SessionLocal, Task
@@ -676,10 +806,26 @@ def start_inference_task(
     )
     
     try:
+        # Resolve downsample args
+        resolved_downsampler = downsampler or "m4"
+        resolved_n_downsample = n_downsample
+        resolved_ratio = ratio
+        resolved_min_threshold = min_threshold
+
+        if str(downsample_mode).lower() in ["off", "none", "关闭", "no"]:
+            resolved_downsampler = "none"
+        elif str(downsample_mode).lower() in ["ratio", "比例"]:
+            # ratio + min_threshold only affects adtk_hbos/stl_wavelet
+            pass
+        # auto/fixed keep defaults
+
         # 准备高级参数
         advanced_args = {
-            "n_downsample": n_downsample,
+            "n_downsample": resolved_n_downsample,
             "threshold": threshold,
+            "downsampler": resolved_downsampler,
+            "ratio": resolved_ratio,
+            "min_threshold": resolved_min_threshold,
             "base_model_path": base_model_path,
             "lora_adapter_path": lora_adapter_path, 
             # ChatTS
@@ -1089,11 +1235,23 @@ def create_training_ui() -> gr.Blocks:
                             value="/home/share/llm_models/bytedance-research/ChatTS-8B",
                             info="基础模型路径"
                         )
-                        lora_adapter_select = gr.Dropdown(
-                            label="LoRA Adapter Path (可选)",
-                            choices=get_inference_models(), # 返回的是 LoRA 路径列表
+                        lora_family_select = gr.Dropdown(
+                            label="LoRA 模型类型 (Model Family)",
+                            choices=TRAINING_MODEL_FAMILIES,
+                            value="chatts",
+                            interactive=True
+                        )
+                        lora_run_select = gr.Dropdown(
+                            label="LoRA 适配器 (训练任务)",
+                            choices=get_inference_models("chatts"),
                             interactive=True,
-                            info="微调后的 LoRA 适配器路径"
+                            info="仅显示训练任务目录，不含 checkpoint"
+                        )
+                        lora_checkpoint_select = gr.Dropdown(
+                            label="Checkpoint (可选)",
+                            choices=get_checkpoint_choices(""),
+                            value="",
+                            interactive=True
                         )
                         
                     files_select = gr.CheckboxGroup(
@@ -1102,14 +1260,34 @@ def create_training_ui() -> gr.Blocks:
                     )
                     
                     with gr.Accordion("⚙️ 高级配置 (可选)", open=False):
+                        gr.Markdown("#### 降采样配置")
+                        with gr.Row():
+                            downsample_mode_input = gr.Dropdown(
+                                label="降采样模式",
+                                choices=["auto", "off", "fixed", "ratio"],
+                                value="auto",
+                                info="auto: 长度>n_downsample 才降采样; off: 关闭"
+                            )
+                            downsampler_input = gr.Dropdown(
+                                label="降采样算法",
+                                choices=["m4", "minmax", "none"],
+                                value="m4"
+                            )
                         with gr.Row():
                             n_downsample_input = gr.Slider(
                                 label="降采样点数 (n_downsample)", 
                                 minimum=100, maximum=10000, step=100, value=settings.DEFAULT_DOWNSAMPLE_POINTS
                             )
-                            threshold_input = gr.Number(
-                                label="异常阈值 (threshold)", value=8.0
+                            ratio_input = gr.Slider(
+                                label="降采样比例 (ratio)", 
+                                minimum=0.01, maximum=1.0, step=0.01, value=0.1
                             )
+                        min_threshold_input = gr.Number(
+                            label="最小点数阈值 (min_threshold)", value=200000, precision=0
+                        )
+                        threshold_input = gr.Number(
+                            label="异常阈值 (threshold)", value=8.0
+                        )
                         
                         # ChatTS 专属参数
                         with gr.Group(visible=True) as chatts_group:
@@ -1223,9 +1401,10 @@ def create_training_ui() -> gr.Blocks:
             submit_event = submit_inference_btn.click(
                 fn=start_inference_task,
                 inputs=[
-                    algo_dropdown, base_model_input, lora_adapter_select, files_select,
+                    algo_dropdown, base_model_input, lora_run_select, lora_checkpoint_select, files_select,
                     # 通用参数
                     n_downsample_input, threshold_input,
+                    downsample_mode_input, downsampler_input, ratio_input, min_threshold_input,
                     # ChatTS 参数
                     load_in_4bit_input, prompt_template_input, max_new_tokens_input, chatts_device_input, chatts_use_cache_input,
                     # Timer 参数
@@ -1265,8 +1444,30 @@ def create_training_ui() -> gr.Blocks:
                 outputs=files_select
             )
             refresh_tasks_btn.click(
-                fn=lambda: gr.Dropdown(choices=get_inference_models()),
-                outputs=lora_adapter_select
+                fn=update_lora_run_dropdown,
+                inputs=[lora_family_select, lora_run_select],
+                outputs=lora_run_select
+            )
+            refresh_tasks_btn.click(
+                fn=update_checkpoint_dropdown,
+                inputs=[lora_run_select, lora_checkpoint_select],
+                outputs=lora_checkpoint_select
+            )
+
+            lora_family_select.change(
+                fn=update_lora_run_dropdown,
+                inputs=[lora_family_select, lora_run_select],
+                outputs=lora_run_select
+            ).then(
+                fn=update_checkpoint_dropdown,
+                inputs=[lora_run_select, lora_checkpoint_select],
+                outputs=lora_checkpoint_select
+            )
+
+            lora_run_select.change(
+                fn=update_checkpoint_dropdown,
+                inputs=[lora_run_select, lora_checkpoint_select],
+                outputs=lora_checkpoint_select
             )
             
             # Tab 切换时自动刷新文件列表
@@ -1275,8 +1476,14 @@ def create_training_ui() -> gr.Blocks:
                 outputs=files_select
             )
             inference_tab.select(
-                fn=lambda: gr.Dropdown(choices=get_inference_models()),
-                outputs=lora_adapter_select
+                fn=update_lora_run_dropdown,
+                inputs=[lora_family_select, lora_run_select],
+                outputs=lora_run_select
+            )
+            inference_tab.select(
+                fn=update_checkpoint_dropdown,
+                inputs=[lora_run_select, lora_checkpoint_select],
+                outputs=lora_checkpoint_select
             )
             # 清空历史记录
             clear_tasks_btn.click(
@@ -1318,6 +1525,20 @@ def create_training_ui() -> gr.Blocks:
                 fn=toggle_algo_params,
                 inputs=algo_dropdown,
                 outputs=[chatts_group, timer_group, adtk_group]
+            )
+
+            algo_dropdown.change(
+                fn=sync_lora_family_from_algo,
+                inputs=[algo_dropdown, lora_family_select],
+                outputs=lora_family_select
+            ).then(
+                fn=update_lora_run_dropdown,
+                inputs=[lora_family_select, lora_run_select],
+                outputs=lora_run_select
+            ).then(
+                fn=update_checkpoint_dropdown,
+                inputs=[lora_run_select, lora_checkpoint_select],
+                outputs=lora_checkpoint_select
             )
             
             # 自动同步筛选方法 (User requested unification)
@@ -1420,9 +1641,9 @@ def create_training_ui() -> gr.Blocks:
                             return []
 
                     # 初始加载
-                    # 初始加载
                     default_ann_dir = str(Path(settings.ANNOTATIONS_ROOT) / settings.DEFAULT_USER)
-                    initial_choices = get_file_choices(default_ann_dir)
+                    # 默认 filter="chatts" 对应 conv_model_family default value
+                    initial_choices = get_file_choices(default_ann_dir, "chatts")
                     initial_val = initial_choices[0] if initial_choices else None
 
                     ann_file_dropdown = gr.Dropdown(
@@ -1437,7 +1658,7 @@ def create_training_ui() -> gr.Blocks:
                     def refresh_files(ann_dir, family):
                         choices = get_file_choices(ann_dir, family)
                         val = choices[0] if choices else None
-                        return gr.Dropdown(choices=choices, value=val)
+                        return gr.update(choices=choices, value=val)
                         
                     refresh_files_btn = gr.Button("🔄 刷新列表 (Refresh)", size="sm")
                     
@@ -1674,6 +1895,12 @@ def create_training_ui() -> gr.Blocks:
                     gr.Markdown("### 📝 标注文件管理")
                     with gr.Row():
                         with gr.Column(scale=1):
+                            ann_mgr_family = gr.Dropdown(
+                                label="模型类型",
+                                choices=["all", "chatts", "qwen", "timer", "adtk_hbos", "ensemble"],
+                                value="all",
+                                interactive=True
+                            )
                             ann_mgr_dir = gr.Textbox(label="标注目录", value=str(Path(settings.ANNOTATIONS_ROOT) / "douff"), interactive=False)
                             ann_mgr_list = gr.Dropdown(label="选择文件", interactive=True)
                             refresh_ann_mgr = gr.Button("🔄 刷新列表")
@@ -1684,12 +1911,31 @@ def create_training_ui() -> gr.Blocks:
                             ann_mgr_view = gr.JSON(label="文件内容预览", height=600)
 
                     # Logic
-                    def list_ann_files(path_str):
+                    def list_ann_files(path_str, model_type="all"):
                         p = Path(path_str)
                         if not p.exists(): return []
                         files = list(p.glob("*.json"))
                         files.sort(key=lambda x: x.stat().st_mtime, reverse=True)
-                        return [f.name for f in files]
+                        names = [f.name for f in files]
+                        mt = (model_type or "all").lower()
+                        if mt == "all":
+                            return names
+
+                        def _matches(name: str) -> bool:
+                            lower = name.lower()
+                            if mt == "qwen":
+                                return "qwen" in lower
+                            if mt == "timer":
+                                return "timer" in lower
+                            if mt == "adtk_hbos":
+                                return "adtk_hbos" in lower
+                            if mt == "ensemble":
+                                return "ensemble" in lower
+                            if mt == "chatts":
+                                return not any(k in lower for k in ["qwen", "timer", "adtk_hbos", "ensemble"])
+                            return True
+
+                        return [n for n in names if _matches(n)]
 
                     def load_ann_content(path_str, filename):
                         if not filename: return None
@@ -1711,8 +1957,21 @@ def create_training_ui() -> gr.Blocks:
                             return f"删除失败: {e}", gr.update()
 
                     # Bindings
-                    ann_mgr_dir.change(fn=lambda p: gr.update(choices=list_ann_files(p)), inputs=ann_mgr_dir, outputs=ann_mgr_list)
-                    refresh_ann_mgr.click(fn=lambda p: gr.update(choices=list_ann_files(p)), inputs=ann_mgr_dir, outputs=ann_mgr_list)
+                    ann_mgr_dir.change(
+                        fn=lambda p, mt: gr.update(choices=list_ann_files(p, mt)),
+                        inputs=[ann_mgr_dir, ann_mgr_family],
+                        outputs=ann_mgr_list
+                    )
+                    ann_mgr_family.change(
+                        fn=lambda p, mt: gr.update(choices=list_ann_files(p, mt)),
+                        inputs=[ann_mgr_dir, ann_mgr_family],
+                        outputs=ann_mgr_list
+                    )
+                    refresh_ann_mgr.click(
+                        fn=lambda p, mt: gr.update(choices=list_ann_files(p, mt)),
+                        inputs=[ann_mgr_dir, ann_mgr_family],
+                        outputs=ann_mgr_list
+                    )
                     ann_mgr_list.change(fn=load_ann_content, inputs=[ann_mgr_dir, ann_mgr_list], outputs=ann_mgr_view)
                     delete_ann_btn.click(fn=delete_ann_file, inputs=[ann_mgr_dir, ann_mgr_list], outputs=[ann_op_status, ann_mgr_list])
 
@@ -1745,6 +2004,13 @@ def create_training_ui() -> gr.Blocks:
                         p = Path(path_str)
                         if not p.exists(): return []
                         files = list(p.glob("*.json")) + list(p.glob("*.jsonl"))
+                        # Filter useless files
+                        files = [
+                            f for f in files 
+                            if not f.name.startswith("dataset_info") 
+                            and not f.name.startswith(".") 
+                            and not f.name.startswith("_")
+                        ]
                         files.sort(key=lambda x: x.stat().st_mtime, reverse=True)
                         return [f.name for f in files]
 
@@ -1843,13 +2109,19 @@ def create_training_ui() -> gr.Blocks:
                             value=get_training_adapter("chatts").get_dataset_list()[0] if get_training_adapter("chatts").get_dataset_list() else None,
                             interactive=True
                         )
-
-                    config_dropdown = gr.Dropdown(
-                        label="训练模板 (Template Script)",
-                        choices=get_training_configs("chatts"),
-                        interactive=True,
-                        info="选择一个脚本作为参数模板 (如 DeepSpeed 配置)"
-                    )
+                    with gr.Row():
+                        train_method_dropdown = gr.Dropdown(
+                            label="训练方式 (Method)",
+                            choices=TRAINING_METHODS,
+                            value="lora",
+                            interactive=True
+                        )
+                        config_dropdown = gr.Dropdown(
+                            label="训练模板 (Template Script)",
+                            choices=get_training_configs("chatts", "lora"),
+                            interactive=True,
+                            info="选择一个脚本作为参数模板 (如 DeepSpeed 配置)"
+                        )
                     output_name = gr.Textbox(
                         label="输出目录名称",
                         placeholder="例如: my_model_v1"
@@ -1888,6 +2160,108 @@ def create_training_ui() -> gr.Blocks:
                                 maximum=256,
                                 value=16,
                                 step=1
+                            )
+
+                    # 运行与显存配置（折叠）
+                    with gr.Accordion("运行与显存配置", open=False):
+                        with gr.Row():
+                            nproc_per_node = gr.Slider(
+                                label="NPROC_PER_NODE (进程数)",
+                                minimum=1,
+                                maximum=8,
+                                value=1,
+                                step=1
+                            )
+                            cuda_visible_devices = gr.Textbox(
+                                label="CUDA_VISIBLE_DEVICES",
+                                value="0",
+                                placeholder="例如: 0 或 0,1 (留空=不设置)"
+                            )
+                        with gr.Row():
+                            grad_accum_steps = gr.Slider(
+                                label="Gradient Accumulation Steps",
+                                minimum=1,
+                                maximum=64,
+                                value=8,
+                                step=1
+                            )
+                            precision = gr.Dropdown(
+                                label="Precision",
+                                choices=["bf16", "fp16", "fp32"],
+                                value="bf16"
+                            )
+                        with gr.Row():
+                            cutoff_len = gr.Number(
+                                label="cutoff_len",
+                                value=4096
+                            )
+                            image_max_pixels = gr.Number(
+                                label="image_max_pixels",
+                                value=3200000
+                            )
+                            image_min_pixels = gr.Number(
+                                label="image_min_pixels",
+                                value=1024
+                            )
+                        extra_args = gr.Textbox(
+                            label="额外参数 (Raw Args)",
+                            placeholder="例如: --logging_steps 5 --save_steps 50",
+                            lines=2
+                        )
+
+                    # 高级训练参数（折叠）
+                    with gr.Accordion("高级训练参数", open=False):
+                        with gr.Row():
+                            logging_steps = gr.Textbox(
+                                label="logging_steps (可选)",
+                                placeholder="留空不覆盖"
+                            )
+                            save_steps = gr.Textbox(
+                                label="save_steps (可选)",
+                                placeholder="留空不覆盖"
+                            )
+                            lr_scheduler_type = gr.Dropdown(
+                                label="lr_scheduler_type (可选)",
+                                choices=["", "cosine", "linear", "constant", "polynomial", "cosine_with_restarts", "constant_with_warmup"],
+                                value=""
+                            )
+                        with gr.Row():
+                            warmup_steps = gr.Textbox(
+                                label="warmup_steps (可选)",
+                                placeholder="留空不覆盖"
+                            )
+                            warmup_ratio = gr.Textbox(
+                                label="warmup_ratio (可选)",
+                                placeholder="留空不覆盖"
+                            )
+                        with gr.Row():
+                            lora_dropout = gr.Textbox(
+                                label="lora_dropout (可选)",
+                                placeholder="留空不覆盖"
+                            )
+                            lora_target = gr.Textbox(
+                                label="lora_target (可选)",
+                                placeholder="如: q_proj,k_proj,v_proj,o_proj"
+                            )
+                        with gr.Row():
+                            freeze_vision_tower = gr.Dropdown(
+                                label="freeze_vision_tower (可选)",
+                                choices=["", "True", "False"],
+                                value=""
+                            )
+                            freeze_multi_modal_projector = gr.Dropdown(
+                                label="freeze_multi_modal_projector (可选)",
+                                choices=["", "True", "False"],
+                                value=""
+                            )
+                        with gr.Row():
+                            freeze_trainable_layers = gr.Textbox(
+                                label="freeze_trainable_layers (可选)",
+                                placeholder="留空不覆盖"
+                            )
+                            freeze_trainable_modules = gr.Textbox(
+                                label="freeze_trainable_modules (可选)",
+                                placeholder="如: all"
                             )
                     
                     # 控制按钮
@@ -1932,7 +2306,9 @@ def create_training_ui() -> gr.Blocks:
 
                     def start_training_wrap(
                         model_family, config_name, lr, epochs, batch_size, rank, alpha, output_name,
-                        model_path, dataset_name
+                        model_path, dataset_name, nproc, cuda_devices, grad_accum, prec, cutoff,
+                        img_max, img_min, extra_args, log_steps, save_steps, lr_sched, warm_steps,
+                        warm_ratio, lora_drop, lora_tgt, freeze_vision, freeze_proj, freeze_layers, freeze_modules
                     ):
                         if not config_name:
                             return "❌ 请选择训练模板", "", model_family
@@ -1940,6 +2316,21 @@ def create_training_ui() -> gr.Blocks:
                         task_id = f"qs_{int(time.time())}"
                         
                         local_adapter = get_training_adapter(model_family)
+                        print(f"[TRAIN_UI] start_training_wrap task_id={task_id} model_family={model_family} config={config_name}")
+
+                        cuda_devices = (cuda_devices or "").strip() or None
+                        extra_args = (extra_args or "").strip() or None
+                        log_steps = (log_steps or "").strip() or None
+                        save_steps = (save_steps or "").strip() or None
+                        lr_sched = (lr_sched or "").strip() or None
+                        warm_steps = (warm_steps or "").strip() or None
+                        warm_ratio = (warm_ratio or "").strip() or None
+                        lora_drop = (lora_drop or "").strip() or None
+                        lora_tgt = (lora_tgt or "").strip() or None
+                        freeze_vision = (freeze_vision or "").strip() or None
+                        freeze_proj = (freeze_proj or "").strip() or None
+                        freeze_layers = (freeze_layers or "").strip() or None
+                        freeze_modules = (freeze_modules or "").strip() or None
 
                         # Call backend
                         overrides = {
@@ -1949,7 +2340,26 @@ def create_training_ui() -> gr.Blocks:
                             "override_lora_rank": rank,
                             "override_lora_alpha": alpha,
                             "override_model_path": model_path,
-                            "override_dataset": dataset_name
+                            "override_dataset": dataset_name,
+                            "override_nproc_per_node": nproc,
+                            "override_cuda_visible_devices": cuda_devices,
+                            "override_grad_accum_steps": grad_accum,
+                            "override_precision": prec,
+                            "override_cutoff_len": cutoff,
+                            "override_image_max_pixels": img_max,
+                            "override_image_min_pixels": img_min,
+                            "override_extra_args": extra_args,
+                            "override_logging_steps": log_steps,
+                            "override_save_steps": save_steps,
+                            "override_lr_scheduler_type": lr_sched,
+                            "override_warmup_steps": warm_steps,
+                            "override_warmup_ratio": warm_ratio,
+                            "override_lora_dropout": lora_drop,
+                            "override_lora_target": lora_tgt,
+                            "override_freeze_vision_tower": freeze_vision,
+                            "override_freeze_multi_modal_projector": freeze_proj,
+                            "override_freeze_trainable_layers": freeze_layers,
+                            "override_freeze_trainable_modules": freeze_modules
                         }
                         
                         res = local_adapter.run_training(task_id, config_name, version_tag=output_name, **overrides)
@@ -2011,9 +2421,15 @@ def create_training_ui() -> gr.Blocks:
                             inputs=[
                                 model_family_dropdown, config_dropdown, learning_rate, num_epochs,
                                 batch_size, lora_rank, lora_alpha, output_name,
-                                model_path_dropdown, dataset_dropdown
+                                model_path_dropdown, dataset_dropdown,
+                                nproc_per_node, cuda_visible_devices, grad_accum_steps, precision,
+                                cutoff_len, image_max_pixels, image_min_pixels, extra_args,
+                                logging_steps, save_steps, lr_scheduler_type, warmup_steps,
+                                warmup_ratio, lora_dropout, lora_target, freeze_vision_tower,
+                                freeze_multi_modal_projector, freeze_trainable_layers, freeze_trainable_modules
                             ],
-                            outputs=[output_box, task_id_state, task_family_state]
+                            outputs=[output_box, task_id_state, task_family_state],
+                            queue=False
                         ).then(
                             fn=lambda: 0, outputs=log_offset_state # Reset offset
                         ).then(
@@ -2023,24 +2439,15 @@ def create_training_ui() -> gr.Blocks:
                         )
 
                         model_family_dropdown.change(
-                            fn=lambda mf: (
-                                gr.Dropdown(
-                                    choices=get_training_configs(mf),
-                                    value=(get_training_configs(mf)[0] if get_training_configs(mf) else None)
-                                ),
-                                gr.Dropdown(
-                                    choices=get_training_adapter(mf).get_dataset_list(),
-                                    value=(get_training_adapter(mf).get_dataset_list()[0]
-                                           if get_training_adapter(mf).get_dataset_list() else None)
-                                ),
-                                gr.Dropdown(
-                                    choices=get_training_adapter(mf).get_base_models(),
-                                    value=(get_training_adapter(mf).get_base_models()[0]
-                                           if get_training_adapter(mf).get_base_models() else None)
-                                )
-                            ),
-                            inputs=[model_family_dropdown],
+                            fn=update_training_dropdowns,
+                            inputs=[model_family_dropdown, train_method_dropdown],
                             outputs=[config_dropdown, dataset_dropdown, model_path_dropdown]
+                        )
+
+                        train_method_dropdown.change(
+                            fn=update_training_config_only,
+                            inputs=[model_family_dropdown, train_method_dropdown],
+                            outputs=config_dropdown
                         )
                         
                         stop_btn.click(
@@ -2059,26 +2466,12 @@ def create_training_ui() -> gr.Blocks:
                         timer.tick(
                             fn=stream_logs,
                             inputs=[task_family_state, task_id_state, training_log_state, log_offset_state],
-                            outputs=[log_box, training_log_state, log_offset_state]
+                            outputs=[log_box, training_log_state, log_offset_state],
+                            queue=False
                         )
                         refresh_btn.click(
-                            fn=lambda mf: (
-                                gr.Dropdown(
-                                    choices=get_training_configs(mf),
-                                    value=(get_training_configs(mf)[0] if get_training_configs(mf) else None)
-                                ),
-                                gr.Dropdown(
-                                    choices=get_training_adapter(mf).get_dataset_list(),
-                                    value=(get_training_adapter(mf).get_dataset_list()[0]
-                                           if get_training_adapter(mf).get_dataset_list() else None)
-                                ),
-                                gr.Dropdown(
-                                    choices=get_training_adapter(mf).get_base_models(),
-                                    value=(get_training_adapter(mf).get_base_models()[0]
-                                           if get_training_adapter(mf).get_base_models() else None)
-                                )
-                            ),
-                            inputs=[model_family_dropdown],
+                            fn=update_training_dropdowns,
+                            inputs=[model_family_dropdown, train_method_dropdown],
                             outputs=[config_dropdown, dataset_dropdown, model_path_dropdown]
                         )
 
@@ -2117,9 +2510,26 @@ def create_training_ui() -> gr.Blocks:
             with gr.Row():
                 with gr.Column(scale=1):
                     gr.Markdown("### 模型列表")
+                    with gr.Row():
+                        model_family_view = gr.Dropdown(
+                            label="模型类型 (Model Family)",
+                            choices=TRAINING_MODEL_FAMILIES,
+                            value="chatts",
+                            interactive=True
+                        )
+                        model_type_view = gr.Dropdown(
+                            label="训练方式 (Method)",
+                            choices=TRAINING_METHODS,
+                            value="all",
+                            interactive=True
+                        )
+                        include_ckpt_view = gr.Checkbox(
+                            label="显示 checkpoint",
+                            value=False
+                        )
                     model_dropdown = gr.Dropdown(
                         label="选择模型",
-                        choices=get_trained_models(),
+                        choices=get_trained_model_choices("chatts", "all", False),
                         interactive=True
                     )
                     refresh_models_btn = gr.Button("🔄 刷新列表")
@@ -2134,16 +2544,32 @@ def create_training_ui() -> gr.Blocks:
             # 事件绑定
             model_dropdown.change(
                 fn=get_model_info,
-                inputs=model_dropdown,
+                inputs=[model_dropdown, model_family_view],
                 outputs=model_info
             )
             model_dropdown.change(
                 fn=get_loss_plot,
-                inputs=model_dropdown,
+                inputs=[model_dropdown, model_family_view],
                 outputs=loss_image
             )
             refresh_models_btn.click(
-                fn=lambda: gr.Dropdown(choices=get_trained_models()),
+                fn=lambda mf, mt, ck: gr.Dropdown(choices=get_trained_model_choices(mf, mt, ck)),
+                inputs=[model_family_view, model_type_view, include_ckpt_view],
+                outputs=model_dropdown
+            )
+            model_family_view.change(
+                fn=lambda mf, mt, ck: gr.Dropdown(choices=get_trained_model_choices(mf, mt, ck)),
+                inputs=[model_family_view, model_type_view, include_ckpt_view],
+                outputs=model_dropdown
+            )
+            model_type_view.change(
+                fn=lambda mf, mt, ck: gr.Dropdown(choices=get_trained_model_choices(mf, mt, ck)),
+                inputs=[model_family_view, model_type_view, include_ckpt_view],
+                outputs=model_dropdown
+            )
+            include_ckpt_view.change(
+                fn=lambda mf, mt, ck: gr.Dropdown(choices=get_trained_model_choices(mf, mt, ck)),
+                inputs=[model_family_view, model_type_view, include_ckpt_view],
                 outputs=model_dropdown
             )
             
@@ -2151,9 +2577,26 @@ def create_training_ui() -> gr.Blocks:
             with gr.Row():
                 with gr.Column(scale=1):
                     gr.Markdown("### 选择对比模型")
+                    with gr.Row():
+                        compare_family = gr.Dropdown(
+                            label="模型类型 (Model Family)",
+                            choices=TRAINING_MODEL_FAMILIES,
+                            value="chatts",
+                            interactive=True
+                        )
+                        compare_type = gr.Dropdown(
+                            label="训练方式 (Method)",
+                            choices=TRAINING_METHODS,
+                            value="all",
+                            interactive=True
+                        )
+                        compare_include_ckpt = gr.Checkbox(
+                            label="显示 checkpoint",
+                            value=False
+                        )
                     compare_models = gr.CheckboxGroup(
                         label="模型列表",
-                        choices=get_trained_models()
+                        choices=get_trained_model_choices("chatts", "all", False)
                     )
                     compare_btn = gr.Button("📊 生成对比图", variant="primary")
                     refresh_compare_btn = gr.Button("🔄 刷新列表")
@@ -2165,11 +2608,27 @@ def create_training_ui() -> gr.Blocks:
             # 事件绑定
             compare_btn.click(
                 fn=get_comparison_plot,
-                inputs=compare_models,
+                inputs=[compare_models, compare_family],
                 outputs=comparison_plot
             )
             refresh_compare_btn.click(
-                fn=lambda: gr.CheckboxGroup(choices=get_trained_models()),
+                fn=lambda mf, mt, ck: gr.CheckboxGroup(choices=get_trained_model_choices(mf, mt, ck)),
+                inputs=[compare_family, compare_type, compare_include_ckpt],
+                outputs=compare_models
+            )
+            compare_family.change(
+                fn=lambda mf, mt, ck: gr.CheckboxGroup(choices=get_trained_model_choices(mf, mt, ck)),
+                inputs=[compare_family, compare_type, compare_include_ckpt],
+                outputs=compare_models
+            )
+            compare_type.change(
+                fn=lambda mf, mt, ck: gr.CheckboxGroup(choices=get_trained_model_choices(mf, mt, ck)),
+                inputs=[compare_family, compare_type, compare_include_ckpt],
+                outputs=compare_models
+            )
+            compare_include_ckpt.change(
+                fn=lambda mf, mt, ck: gr.CheckboxGroup(choices=get_trained_model_choices(mf, mt, ck)),
+                inputs=[compare_family, compare_type, compare_include_ckpt],
                 outputs=compare_models
             )
         

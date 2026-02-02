@@ -14,10 +14,16 @@ DATASET_DIR="${DATASET_DIR:-/home/share/data/training_qwen}"
 OUTPUT_DIR="${OUTPUT_DIR:-saves/qwen3-vl-8b/lora/v1}"
 
 # Run training
-# Using torchrun for distributed training compatibility with platform standards
-# Note: Ensure --template matches the template supported by LLaMA-Factory version in containers
+# Use NPROC_PER_NODE to control DDP world size (default: single GPU to avoid NCCL/NVML issues).
 
-torchrun --nproc_per_node=2 src/train.py \
+NPROC_PER_NODE="${NPROC_PER_NODE:-1}"
+if [ "${NPROC_PER_NODE}" -le 1 ]; then
+    RUN_CMD=(python src/train.py)
+else
+    RUN_CMD=(torchrun --nproc_per_node="${NPROC_PER_NODE}" src/train.py)
+fi
+
+"${RUN_CMD[@]}" \
     --stage sft \
     --do_train \
     --model_name_or_path "${MODEL_PATH}" \
@@ -32,6 +38,7 @@ torchrun --nproc_per_node=2 src/train.py \
     --output_dir "${OUTPUT_DIR}" \
     --overwrite_output_dir \
     --per_device_train_batch_size 2 \
+    --dataloader_pin_memory False \
     --gradient_accumulation_steps 8 \
     --lr_scheduler_type cosine \
     --logging_steps 1 \
