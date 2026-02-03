@@ -1,6 +1,7 @@
 import os
 import json
 import time
+import uuid
 from datetime import datetime
 
 from flask import Flask, jsonify, request, send_from_directory
@@ -8,6 +9,7 @@ from flask_cors import CORS
 import pandas as pd
 import numpy as np
 from pathlib import Path
+from typing import Optional, Tuple, Dict, Any
 from tsdownsample import M4Downsampler
 from configs.settings import settings
 from .file_registry import init_db, sync_directory, list_files, rebuild_directory
@@ -45,6 +47,7 @@ ALLOWED_DATA_DIRS = [
 ]
 
 _ALLOWED_ROOTS = [Path(p).resolve() for p in ALLOWED_DATA_DIRS]
+_CSV_PATH_CACHE = {}
 
 
 def _normalize_annotation_name(filename: str) -> str:
@@ -136,6 +139,231 @@ def _allowed_root_dirs():
                 'has_data_files': True,
             })
     return dirs
+
+
+def _annotation_csv_candidates(source_id: str) -> list[str]:
+    candidates = []
+    if not source_id:
+        return candidates
+    name = str(source_id)
+    if name.endswith(".csv"):
+        candidates.append(name)
+    if name.endswith(".json"):
+        candidates.append(name[:-5] + ".csv")
+    if name.startswith("annotations_"):
+        base = name.replace("annotations_", "", 1)
+        if base.endswith(".json"):
+            base = base[:-5]
+        if not base.endswith(".csv"):
+            base = base + ".csv"
+        candidates.append(base)
+    if not name.endswith(".csv") and not name.endswith(".json"):
+        candidates.append(name + ".csv")
+    if os.path.sep in name or "/" in name:
+        base = os.path.basename(name)
+        if base and base != name:
+            candidates.append(base)
+    # Deduplicate while preserving order
+    seen = set()
+    ordered = []
+    for c in candidates:
+        if c not in seen:
+            ordered.append(c)
+            seen.add(c)
+    return ordered
+
+
+def _find_csv_path_for_candidates(candidates: list[str]) -> Optional[Path]:
+    if not candidates:
+        return None
+    safe_candidates: list[str] = []
+    for name in candidates:
+        cached = _CSV_PATH_CACHE.get(name)
+        if cached:
+            return Path(cached)
+        if os.path.isabs(name):
+            if _is_allowed_path(name):
+                safe_candidates.append(name)
+            continue
+        safe_candidates.append(name)
+    if not safe_candidates:
+        return None
+
+    # Direct match at root
+    for root in _ALLOWED_ROOTS:
+        if not root.exists():
+            continue
+        for name in safe_candidates:
+            if os.path.isabs(name):
+                p = Path(name)
+            else:
+                p = root / name
+            if p.exists():
+                _CSV_PATH_CACHE[name] = str(p)
+                return p
+
+    name_set = set(safe_candidates)
+    stems = {Path(n).stem for n in safe_candidates}
+
+    for root in _ALLOWED_ROOTS:
+        if not root.exists():
+            continue
+        for dirpath, _, filenames in os.walk(root):
+            for f in filenames:
+                if f in name_set:
+                    p = Path(dirpath) / f
+                    _CSV_PATH_CACHE[f] = str(p)
+                    return p
+            # fallback: stem include
+            for f in filenames:
+                if not f.endswith(".csv"):
+                    continue
+                if any(stem in f for stem in stems):
+                    return Path(dirpath) / f
+    return None
+
+
+def _normalize_method(value: Optional[str]) -> Optional[str]:
+    if not value:
+        return None
+    normalized = str(value).strip().lower()
+    if normalized in {"all", "any", "none", ""}:
+        return None
+    return normalized
+
+
+def _parse_float_arg(value: Optional[str]) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _fetch_inference_index_map(
+    path: str,
+    method: Optional[str],
+    min_score: Optional[float],
+    max_score: Optional[float],
+    score_by: str = "score_avg",
+    strategy: Optional[str] = None,
+    limit: Optional[int] = None,
+) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    try:
+        from src.db.database import SessionLocal, InferenceResult
+    except Exception as e:
+        return None, f"DB import failed: {e}"
+
+    score_by = (score_by or "score_avg").strip().lower()
+    score_col = InferenceResult.score_avg if score_by in {"avg", "score_avg", "mean"} else InferenceResult.score_max
+    strategy = (strategy or "").strip().lower()
+
+    db = SessionLocal()
+    try:
+        query = db.query(InferenceResult)
+        if path:
+            query = query.filter(InferenceResult.result_path.like(f"{path}%"))
+        if method:
+            query = query.filter(InferenceResult.method == method)
+        if min_score is not None:
+            query = query.filter(score_col >= min_score)
+        if max_score is not None:
+            query = query.filter(score_col <= max_score)
+        if strategy in {"topk", "high", "score_desc"}:
+            query = query.order_by(score_col.desc(), InferenceResult.created_at.desc())
+        elif strategy in {"low_score", "low", "score_asc"}:
+            query = query.order_by(score_col.asc(), InferenceResult.created_at.desc())
+        elif strategy == "random":
+            try:
+                from sqlalchemy import func as _sa_func
+                query = query.order_by(_sa_func.random())
+            except Exception:
+                query = query.order_by(InferenceResult.created_at.desc())
+        else:
+            query = query.order_by(InferenceResult.created_at.desc())
+        if limit is not None and limit > 0:
+            query = query.limit(limit)
+
+        rows = query.all()
+        index: Dict[str, Any] = {}
+        for row in rows:
+            filename = os.path.basename(row.result_path or "")
+            if not filename:
+                continue
+            if filename in index:
+                continue
+            meta = {}
+            if row.meta:
+                try:
+                    meta = json.loads(row.meta)
+                except Exception:
+                    meta = {}
+            index[filename] = {
+                "id": row.id,
+                "method": row.method,
+                "model": row.model,
+                "result_path": row.result_path,
+                "metrics_path": row.metrics_path,
+                "segments_path": row.segments_path,
+                "score_avg": row.score_avg,
+                "score_max": row.score_max,
+                "segment_count": row.segment_count,
+                "created_at": row.created_at.isoformat() if row.created_at else None,
+                "meta": meta,
+            }
+        return index, None
+    except Exception as e:
+        return None, str(e)
+    finally:
+        db.close()
+
+
+def _sample_inference_rows(
+    method: Optional[str],
+    min_score: Optional[float],
+    max_score: Optional[float],
+    score_by: str,
+    strategy: str,
+    limit: int,
+):
+    try:
+        from src.db.database import SessionLocal, InferenceResult
+        from sqlalchemy import func as _sa_func
+    except Exception as e:
+        return None, f"DB import failed: {e}"
+
+    score_by = (score_by or "score_avg").strip().lower()
+    score_col = InferenceResult.score_avg if score_by in {"avg", "score_avg", "mean"} else InferenceResult.score_max
+    strategy = (strategy or "topk").strip().lower()
+
+    db = SessionLocal()
+    try:
+        query = db.query(InferenceResult)
+        if method:
+            query = query.filter(InferenceResult.method == method)
+        if min_score is not None:
+            query = query.filter(score_col >= min_score)
+        if max_score is not None:
+            query = query.filter(score_col <= max_score)
+
+        if strategy in {"topk", "high", "score_desc"}:
+            query = query.order_by(score_col.desc(), InferenceResult.created_at.desc())
+        elif strategy in {"low_score", "low", "score_asc"}:
+            query = query.order_by(score_col.asc(), InferenceResult.created_at.desc())
+        elif strategy == "random":
+            query = query.order_by(_sa_func.random())
+        else:
+            query = query.order_by(InferenceResult.created_at.desc())
+
+        if limit and limit > 0:
+            query = query.limit(limit)
+        rows = query.all()
+        return rows, None
+    except Exception as e:
+        return None, str(e)
+    finally:
+        db.close()
 
 
 def fetch_from_iotdb(metadata: dict) -> pd.DataFrame:
@@ -359,6 +587,20 @@ def get_files(current_user):
     try:
         from auth import load_users
         
+        min_score = _parse_float_arg(request.args.get('min_score'))
+        max_score = _parse_float_arg(request.args.get('max_score'))
+        score_by = request.args.get('score_by', 'score_avg')
+        method_param = _normalize_method(request.args.get('method'))
+        strategy = request.args.get('strategy')
+        limit = request.args.get('limit', type=int)
+        use_score_filter = (
+            min_score is not None
+            or max_score is not None
+            or method_param is not None
+            or strategy is not None
+            or limit is not None
+        )
+
         # Get user's data path
         users = load_users()
         user_path = users.get(current_user, {}).get('data_path', DATA_DIR)
@@ -373,14 +615,30 @@ def get_files(current_user):
         
         # Sync and query file registry for this directory
         sync_directory(REGISTRY_DB, user_path)
-        method_filter = infer_method_from_path(user_path)
+        method_filter = method_param or infer_method_from_path(user_path)
         registry_files = list_files(REGISTRY_DB, user_path, method_filter or None)
+
+        inference_index = None
+        if use_score_filter:
+            inference_index, err = _fetch_inference_index_map(
+                user_path,
+                method_filter,
+                min_score,
+                max_score,
+                score_by=score_by,
+                strategy=strategy,
+                limit=limit,
+            )
+            if inference_index is None:
+                return jsonify({'success': False, 'error': f'Inference index unavailable: {err}'}), 500
         
         files = []
         for entry in registry_files:
             f = entry["name"]
             full_path = os.path.join(user_path, f)
             if not os.path.isfile(full_path):
+                continue
+            if inference_index is not None and f not in inference_index:
                 continue
 
             # Check for annotations in user's annotation directory
@@ -431,23 +689,346 @@ def get_files(current_user):
                     print(f"  -> Error reading annotation: {e}")
                     pass
             
-            files.append({
+            file_info = {
                 'name': f,
                 'has_annotations': has_annotations,
                 'annotation_count': annotation_count
-            })
+            }
+
+            if inference_index is not None:
+                idx_info = inference_index.get(f, {})
+                file_info.update({
+                    'score_avg': idx_info.get('score_avg'),
+                    'score_max': idx_info.get('score_max'),
+                    'segment_count': idx_info.get('segment_count'),
+                    'inference_id': idx_info.get('id'),
+                    'method': idx_info.get('method'),
+                    'metrics_path': idx_info.get('metrics_path'),
+                    'segments_path': idx_info.get('segments_path'),
+                })
+
+            files.append(file_info)
 
         print(f"Matched files: {[f['name'] for f in files]}")
         
         return jsonify({
             'success': True,
             'files': files,
-            'path': user_path
+            'path': user_path,
+            'filtered': use_score_filter,
+            'score_by': score_by if use_score_filter else None,
+            'strategy': strategy if use_score_filter else None,
+            'limit': limit if use_score_filter else None
         })
     except Exception as e:
         print(f"Error in get_files: {e}")
         import traceback
         traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/review/sample', methods=['POST'])
+@login_required
+def review_sample(current_user):
+    """Sample inference results into review queue."""
+    try:
+        data = request.get_json(silent=True) or {}
+        source_type = data.get('source_type', 'inference')
+        strategy = data.get('strategy', 'topk')
+        limit = int(data.get('limit', 50) or 50)
+        score_by = data.get('score_by', 'score_avg')
+        method = _normalize_method(data.get('method'))
+        min_score = _parse_float_arg(data.get('min_score'))
+        max_score = _parse_float_arg(data.get('max_score'))
+
+        from src.db.database import SessionLocal, ReviewQueue, InferenceResult, init_db
+        init_db()
+
+        rows = []
+        err = None
+        if source_type == 'annotation':
+            ann_dir = os.path.join(ANNOTATIONS_DIR, current_user)
+            if not os.path.isdir(ann_dir):
+                return jsonify({'success': True, 'created': 0, 'skipped': 0, 'total': 0})
+            entries = []
+            for name in os.listdir(ann_dir):
+                if not name.endswith('.json'):
+                    continue
+                full_path = os.path.join(ann_dir, name)
+                try:
+                    stat = os.stat(full_path)
+                except OSError:
+                    continue
+                filename = None
+                try:
+                    with open(full_path, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                        filename = data.get('filename')
+                except Exception:
+                    filename = None
+                if not filename:
+                    filename = name.replace('.json', '')
+                entries.append((filename, stat.st_mtime))
+
+            if strategy == 'random':
+                np.random.shuffle(entries)
+            elif strategy in {'low_score', 'low'}:
+                entries.sort(key=lambda x: x[1])
+            else:
+                entries.sort(key=lambda x: x[1], reverse=True)
+
+            if limit and limit > 0:
+                entries = entries[:limit]
+            rows = entries
+        else:
+            rows, err = _sample_inference_rows(
+                method=method,
+                min_score=min_score,
+                max_score=max_score,
+                score_by=score_by,
+                strategy=strategy,
+                limit=limit,
+            )
+            if rows is None:
+                return jsonify({'success': False, 'error': err}), 500
+
+        db = SessionLocal()
+        created = 0
+        skipped = 0
+        try:
+            if source_type == 'annotation':
+                for filename, _mtime in rows:
+                    exists = db.query(ReviewQueue).filter(
+                        ReviewQueue.source_type == 'annotation',
+                        ReviewQueue.source_id == filename
+                    ).first()
+                    if exists:
+                        skipped += 1
+                        continue
+                    db.add(ReviewQueue(
+                        id=str(uuid.uuid4()),
+                        source_type='annotation',
+                        source_id=filename,
+                        method=method,
+                        model=None,
+                        point_name=filename,
+                        score=None,
+                        strategy=strategy,
+                        status='pending',
+                        reviewer=None,
+                    ))
+                    created += 1
+            else:
+                for row in rows:
+                    exists = db.query(ReviewQueue).filter(
+                        ReviewQueue.source_type == 'inference',
+                        ReviewQueue.source_id == row.id
+                    ).first()
+                    if exists:
+                        skipped += 1
+                        continue
+
+                    score = row.score_avg if score_by in {"avg", "score_avg", "mean"} else row.score_max
+                    db.add(ReviewQueue(
+                        id=str(uuid.uuid4()),
+                        source_type='inference',
+                        source_id=row.id,
+                        method=row.method,
+                        model=row.model,
+                        point_name=row.point_name,
+                        score=score,
+                        strategy=strategy,
+                        status='pending',
+                        reviewer=None,
+                    ))
+                    created += 1
+            db.commit()
+        except Exception as e:
+            db.rollback()
+            return jsonify({'success': False, 'error': str(e)}), 500
+        finally:
+            db.close()
+
+        return jsonify({
+            'success': True,
+            'created': created,
+            'skipped': skipped,
+            'total': len(rows),
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/review/queue', methods=['GET'])
+@login_required
+def review_queue(current_user):
+    """List review queue items with filters."""
+    try:
+        source_type = request.args.get('source_type')
+        status = request.args.get('status')
+        method = _normalize_method(request.args.get('method'))
+        reviewer = request.args.get('reviewer')
+        limit = request.args.get('limit', type=int) or 200
+
+        from src.db.database import SessionLocal, ReviewQueue, InferenceResult
+
+        db = SessionLocal()
+        try:
+            query = db.query(ReviewQueue, InferenceResult).outerjoin(
+                InferenceResult, ReviewQueue.source_id == InferenceResult.id
+            )
+            if source_type:
+                query = query.filter(ReviewQueue.source_type == source_type)
+            if status:
+                query = query.filter(ReviewQueue.status == status)
+            if method:
+                query = query.filter(ReviewQueue.method == method)
+            if reviewer:
+                query = query.filter(ReviewQueue.reviewer == reviewer)
+            query = query.order_by(ReviewQueue.updated_at.desc())
+            if limit and limit > 0:
+                query = query.limit(limit)
+
+            items = []
+            for review, inference in query.all():
+                result_path = inference.result_path if inference else None
+                filename = os.path.basename(result_path) if result_path else None
+                result_dir = os.path.dirname(result_path) if result_path else None
+                if review.source_type == 'annotation':
+                    if not filename or not result_dir:
+                        candidates = _annotation_csv_candidates(review.source_id)
+                        found = _find_csv_path_for_candidates(candidates)
+                        if found:
+                            result_path = str(found)
+                            result_dir = str(found.parent)
+                            filename = found.name
+                        elif not filename:
+                            filename = candidates[0] if candidates else review.source_id
+                items.append({
+                    'id': review.id,
+                    'source_id': review.source_id,
+                    'source_type': review.source_type,
+                    'method': review.method,
+                    'model': review.model,
+                    'point_name': review.point_name,
+                    'score': review.score,
+                    'strategy': review.strategy,
+                    'status': review.status,
+                    'reviewer': review.reviewer,
+                    'created_at': review.created_at.isoformat() if review.created_at else None,
+                    'updated_at': review.updated_at.isoformat() if review.updated_at else None,
+                    'result_path': result_path,
+                    'result_dir': result_dir,
+                    'filename': filename,
+                })
+        finally:
+            db.close()
+
+        return jsonify({'success': True, 'items': items})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/review/queue/<item_id>', methods=['PATCH'])
+@login_required
+def review_queue_update(current_user, item_id):
+    """Update review queue item status."""
+    try:
+        data = request.get_json(silent=True) or {}
+        status = data.get('status')
+        reviewer = data.get('reviewer') or current_user
+        if status not in {'pending', 'approved', 'rejected', 'needs_fix'}:
+            return jsonify({'success': False, 'error': 'Invalid status'}), 400
+
+        from src.db.database import SessionLocal, ReviewQueue
+
+        db = SessionLocal()
+        try:
+            item = db.query(ReviewQueue).filter(ReviewQueue.id == item_id).first()
+            if not item:
+                return jsonify({'success': False, 'error': 'Item not found'}), 404
+            item.status = status
+            item.reviewer = reviewer
+            item.updated_at = datetime.utcnow()
+            db.commit()
+        except Exception as e:
+            db.rollback()
+            return jsonify({'success': False, 'error': str(e)}), 500
+        finally:
+            db.close()
+
+        return jsonify({'success': True, 'id': item_id, 'status': status})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/review/queue/batch', methods=['PATCH'])
+@login_required
+def review_queue_batch_update(current_user):
+    """Batch update review queue status."""
+    try:
+        data = request.get_json(silent=True) or {}
+        status = data.get('status')
+        reviewer = data.get('reviewer') or current_user
+        ids = data.get('ids') or []
+        if status not in {'pending', 'approved', 'rejected', 'needs_fix'}:
+            return jsonify({'success': False, 'error': 'Invalid status'}), 400
+        if not isinstance(ids, list) or not ids:
+            return jsonify({'success': False, 'error': 'No ids provided'}), 400
+
+        from src.db.database import SessionLocal, ReviewQueue
+        db = SessionLocal()
+        try:
+            updated = db.query(ReviewQueue).filter(ReviewQueue.id.in_(ids)).update(
+                {
+                    ReviewQueue.status: status,
+                    ReviewQueue.reviewer: reviewer,
+                    ReviewQueue.updated_at: datetime.utcnow(),
+                },
+                synchronize_session=False
+            )
+            db.commit()
+        except Exception as e:
+            db.rollback()
+            return jsonify({'success': False, 'error': str(e)}), 500
+        finally:
+            db.close()
+
+        return jsonify({'success': True, 'updated': updated, 'status': status})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/review/stats', methods=['GET'])
+@login_required
+def review_stats(current_user):
+    """Get review queue stats."""
+    try:
+        source_type = request.args.get('source_type')
+        method = _normalize_method(request.args.get('method'))
+
+        from src.db.database import SessionLocal, ReviewQueue
+        from sqlalchemy import func as _sa_func
+
+        db = SessionLocal()
+        try:
+            query = db.query(ReviewQueue.status, _sa_func.count(ReviewQueue.id))
+            if source_type:
+                query = query.filter(ReviewQueue.source_type == source_type)
+            if method:
+                query = query.filter(ReviewQueue.method == method)
+            rows = query.group_by(ReviewQueue.status).all()
+            stats = {status: count for status, count in rows}
+            total = sum(stats.values())
+        finally:
+            db.close()
+
+        return jsonify({
+            'success': True,
+            'stats': stats,
+            'total': total
+        })
+    except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 
 

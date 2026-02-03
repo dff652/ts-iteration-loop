@@ -1620,8 +1620,43 @@ def create_training_ui() -> gr.Blocks:
                             value=str(Path(settings.DATA_TRAINING_CHATTS_DIR) / "converted_data.json")
                         )
 
+                    def _normalize_ann_name(name: str) -> str:
+                        if not name:
+                            return ""
+                        text = str(name)
+                        for ext in (".csv", ".json"):
+                            if text.lower().endswith(ext):
+                                text = text[: -len(ext)]
+                        if text.startswith("annotations_"):
+                            text = text.replace("annotations_", "", 1)
+                        return text
+
+                    def _get_approved_set():
+                        try:
+                            from src.db.database import SessionLocal, ReviewQueue
+                        except Exception:
+                            return set()
+                        db = SessionLocal()
+                        try:
+                            rows = db.query(ReviewQueue.source_id).filter(
+                                ReviewQueue.source_type == "annotation",
+                                ReviewQueue.status == "approved"
+                            ).all()
+                            return {_normalize_ann_name(r[0]) for r in rows if r and r[0]}
+                        finally:
+                            db.close()
+
+                    def _is_approved_json(path: Path, approved_set: set) -> bool:
+                        try:
+                            with open(path, "r", encoding="utf-8") as f:
+                                data = json.load(f)
+                            filename = data.get("filename") or path.stem
+                        except Exception:
+                            filename = path.stem
+                        return _normalize_ann_name(filename) in approved_set
+
                     # 获取标注文件列表
-                    def get_file_choices(ann_dir, filter_keyword=None):
+                    def get_file_choices(ann_dir, filter_keyword=None, approved_only_flag=False):
                         path_obj = Path(ann_dir)
                         if not path_obj.exists():
                             return []
@@ -1629,6 +1664,11 @@ def create_training_ui() -> gr.Blocks:
                             files = list(path_obj.glob("*.json"))
                             # 按修改时间排序
                             files.sort(key=lambda x: x.stat().st_mtime, reverse=True)
+                            if approved_only_flag:
+                                approved_set = _get_approved_set()
+                                if not approved_set:
+                                    return []
+                                files = [f for f in files if _is_approved_json(f, approved_set)]
                             
                             # 过滤逻辑
                             if filter_keyword == "qwen":
@@ -1645,7 +1685,7 @@ def create_training_ui() -> gr.Blocks:
                     # 初始加载
                     default_ann_dir = str(Path(settings.ANNOTATIONS_ROOT) / settings.DEFAULT_USER)
                     # 默认 filter="chatts" 对应 conv_model_family default value
-                    initial_choices = get_file_choices(default_ann_dir, "chatts")
+                    initial_choices = get_file_choices(default_ann_dir, "chatts", True)
                     initial_val = initial_choices[0] if initial_choices else None
 
                     ann_file_dropdown = gr.Dropdown(
@@ -1656,9 +1696,10 @@ def create_training_ui() -> gr.Blocks:
                         interactive=True,
                         allow_custom_value=False
                     )
-                    
-                    def refresh_files(ann_dir, family):
-                        choices = get_file_choices(ann_dir, family)
+                    approved_only = gr.Checkbox(label="仅导出审核通过", value=True, interactive=False)
+
+                    def refresh_files(ann_dir, family, approved_only_flag):
+                        choices = get_file_choices(ann_dir, family, approved_only_flag)
                         val = choices[0] if choices else None
                         return gr.update(choices=choices, value=val)
                         
@@ -1738,7 +1779,7 @@ def create_training_ui() -> gr.Blocks:
                 
                 return source_content, converted_content
 
-            def convert_core(selected_file, input_dir, image_dir, output_path, model_family, mode="single"):
+            def convert_core(selected_file, input_dir, image_dir, output_path, model_family, approved_only_flag, mode="single"):
                 """核心转换逻辑"""
                 # 创建输出目录
                 try:
@@ -1747,91 +1788,128 @@ def create_training_ui() -> gr.Blocks:
                     return f"❌ 创建输出目录失败: {str(e)}", {}, {}
                 
                 target_filename = selected_file if mode == "single" else None
-                
-                # 执行转换
-                result = data_adapter.convert_annotations(
-                    input_dir, 
-                    output_path, 
-                    image_dir=image_dir,
-                    filename=target_filename,
-                    model_family=model_family,
-                    csv_src_dir=str(RESULTS_BASE_PATH / "qwen") if model_family == "qwen" else settings.DATA_DOWNSAMPLED_DIR
-                )
-                
-                status_msg = ""
-                source_sample = {}
-                target_sample = {}
-                
-                if result.get("success"):
-                    log_output = result.get("stdout", "")
-                    prefix = "单文件" if mode == "single" else "批量"
-                    final_output_path = result.get("output_path") or output_path
-                    status_msg = f"✅ {prefix}转换成功! \n输出: {final_output_path}\n\n执行日志:\n{log_output}"
-                    
-                    # 尝试读取源文件进行预览
-                    try:
-                         # 如果是批量转换但依然选了文件，或者单文件模式
-                         preview_file = selected_file
-                         if not preview_file and Path(input_dir).exists():
-                             # 如果都没选，找第一个
-                             all_jsons = list(Path(input_dir).glob("*.json"))
-                             if all_jsons:
-                                 preview_file = all_jsons[0].name
-                         
-                         if preview_file:
-                             src_p = Path(input_dir) / preview_file
-                             if src_p.exists():
-                                 with open(src_p, 'r', encoding='utf-8') as f:
-                                    source_sample = json.load(f)
-                    except Exception as e:
-                        source_sample = {"error": f"Read source failed: {str(e)}"}
 
-                    # 读取转换后的结果
-                    try:
-                        with open(final_output_path, 'r', encoding='utf-8') as f:
-                            converted_data = json.load(f)
-                            if converted_data and isinstance(converted_data, list):
-                                if preview_file:
-                                    # 尝试匹配 image 路径
-                                    core_name = preview_file.replace("annotations_数据集", "").replace(".json", "")
-                                    # 简单去后缀
-                                    core_name = core_name.replace(".csv", "")
-                                    
-                                    matched = False
-                                    for item in converted_data:
-                                        if core_name in item.get("image", ""):
-                                            target_sample = item
-                                            matched = True
-                                            break
-                                    if not matched:
-                                        target_sample = converted_data[-1] if mode == "single" else converted_data[0]
-                                        status_msg = f"(注意：预览未精确匹配，显示{'最后一条' if mode=='single' else '第一条'})\n" + status_msg
-                                else:
-                                    target_sample = converted_data[0]
-                    except Exception as e:
-                        target_sample = {"error": f"Read output failed: {str(e)}"}
-                        
+                def _run_convert(work_dir, preview_dir, preview_file):
+                    # 执行转换
+                    result = data_adapter.convert_annotations(
+                        work_dir,
+                        output_path,
+                        image_dir=image_dir,
+                        filename=target_filename,
+                        model_family=model_family,
+                        csv_src_dir=str(RESULTS_BASE_PATH / "qwen") if model_family == "qwen" else settings.DATA_DOWNSAMPLED_DIR
+                    )
+
+                    status_msg = ""
+                    source_sample = {}
+                    target_sample = {}
+
+                    if result.get("success"):
+                        log_output = result.get("stdout", "")
+                        prefix = "单文件" if mode == "single" else "批量"
+                        final_output_path = result.get("output_path") or output_path
+                        status_msg = f"✅ {prefix}转换成功! \n输出: {final_output_path}\n\n执行日志:\n{log_output}"
+
+                        # 尝试读取源文件进行预览
+                        try:
+                            if preview_file:
+                                src_p = Path(preview_dir) / preview_file
+                                if src_p.exists():
+                                    with open(src_p, 'r', encoding='utf-8') as f:
+                                        source_sample = json.load(f)
+                        except Exception as e:
+                            source_sample = {"error": f"Read source failed: {str(e)}"}
+
+                        # 读取转换后的结果
+                        try:
+                            with open(final_output_path, 'r', encoding='utf-8') as f:
+                                converted_data = json.load(f)
+                                if converted_data and isinstance(converted_data, list):
+                                    if preview_file:
+                                        # 尝试匹配 image 路径
+                                        core_name = preview_file.replace("annotations_数据集", "").replace(".json", "")
+                                        core_name = core_name.replace(".csv", "")
+                                        matched = False
+                                        for item in converted_data:
+                                            if core_name in item.get("image", ""):
+                                                target_sample = item
+                                                matched = True
+                                                break
+                                        if not matched:
+                                            target_sample = converted_data[-1] if mode == "single" else converted_data[0]
+                                            status_msg = f"(注意：预览未精确匹配，显示{'最后一条' if mode=='single' else '第一条'})\n" + status_msg
+                                    else:
+                                        target_sample = converted_data[0]
+                        except Exception as e:
+                            target_sample = {"error": f"Read output failed: {str(e)}"}
+                    else:
+                        status_msg = f"❌ 转换失败: {result.get('error')}\n日志:\n{result.get('stderr', '')}"
+
+                    return status_msg, source_sample, target_sample
+
+                if not approved_only_flag:
+                    preview_file = selected_file
+                    if not preview_file and Path(input_dir).exists():
+                        all_jsons = list(Path(input_dir).glob("*.json"))
+                        if all_jsons:
+                            preview_file = all_jsons[0].name
+                    return _run_convert(input_dir, input_dir, preview_file)
+
+                approved_set = _get_approved_set()
+                if not approved_set:
+                    return "❌ 未找到已审核通过的标注", {}, {}
+
+                src_dir = Path(input_dir)
+                if not src_dir.exists():
+                    return "❌ 标注目录不存在", {}, {}
+
+                candidate_files = []
+                if mode == "single":
+                    if not selected_file:
+                        return "❌ 未选择文件", {}, {}
+                    src_file = src_dir / selected_file
+                    if not src_file.exists():
+                        return "❌ 标注文件不存在", {}, {}
+                    if not _is_approved_json(src_file, approved_set):
+                        return "❌ 该文件未审核通过", {}, {}
+                    candidate_files = [src_file]
                 else:
-                    status_msg = f"❌ 转换失败: {result.get('error')}\n日志:\n{result.get('stderr', '')}"
-                
-                return status_msg, source_sample, target_sample
+                    for p in src_dir.glob("*.json"):
+                        if _is_approved_json(p, approved_set):
+                            candidate_files.append(p)
+                    if not candidate_files:
+                        return "❌ 未找到已审核通过的标注", {}, {}
+
+                preview_file = candidate_files[0].name if candidate_files else None
+
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    tmp_path = Path(tmpdir)
+                    for src_file in candidate_files:
+                        try:
+                            with open(src_file, "r", encoding="utf-8") as f:
+                                data = json.load(f)
+                            with open(tmp_path / src_file.name, "w", encoding="utf-8") as wf:
+                                json.dump(data, wf, ensure_ascii=False, indent=2)
+                        except Exception:
+                            continue
+                    return _run_convert(str(tmp_path), input_dir, preview_file)
 
             # 绑定事件
             # 绑定事件
             convert_curr_btn.click(
-                fn=lambda f, i, m, o, fam: convert_core(f, i, m, o, fam, mode="single"),
-                inputs=[ann_file_dropdown, conf_input_dir, conf_image_dir, conf_output_path, conv_model_family],
+                fn=lambda f, i, m, o, fam, approved: convert_core(f, i, m, o, fam, approved, mode="single"),
+                inputs=[ann_file_dropdown, conf_input_dir, conf_image_dir, conf_output_path, conv_model_family, approved_only],
                 outputs=[convert_status, before_json, after_json]
             )
             
             convert_all_btn.click(
-                fn=lambda f, i, m, o, fam: convert_core(f, i, m, o, fam, mode="batch"),
-                inputs=[ann_file_dropdown, conf_input_dir, conf_image_dir, conf_output_path, conv_model_family],
+                fn=lambda f, i, m, o, fam, approved: convert_core(f, i, m, o, fam, approved, mode="batch"),
+                inputs=[ann_file_dropdown, conf_input_dir, conf_image_dir, conf_output_path, conv_model_family, approved_only],
                 outputs=[convert_status, before_json, after_json]
             )
             
             # 动态更新输出路径和Label
-            def on_model_family_change(family, ann_dir):
+            def on_model_family_change(family, ann_dir, approved_only_flag):
                 new_path = settings.DATA_TRAINING_CHATTS_DIR if family == "chatts" else settings.DATA_TRAINING_QWEN_DIR
                 new_conf = str(Path(new_path) / "converted_data.json")
                 
@@ -1847,7 +1925,7 @@ def create_training_ui() -> gr.Blocks:
                     img_dir_val = settings.DATA_IMAGES_DIR
                 
                 # Filter file choices
-                new_choices = get_file_choices(ann_dir, family)
+                new_choices = get_file_choices(ann_dir, family, approved_only_flag)
                 new_val = new_choices[0] if new_choices else None
                 
                 return (
@@ -1859,13 +1937,19 @@ def create_training_ui() -> gr.Blocks:
 
             conv_model_family.change(
                 fn=on_model_family_change,
-                inputs=[conv_model_family, conf_input_dir],
+                inputs=[conv_model_family, conf_input_dir, approved_only],
                 outputs=[conf_output_path, after_json_label, conf_image_dir, ann_file_dropdown]
             )
             
             refresh_files_btn.click(
                 fn=refresh_files,
-                inputs=[conf_input_dir, conv_model_family],
+                inputs=[conf_input_dir, conv_model_family, approved_only],
+                outputs=ann_file_dropdown
+            )
+            
+            approved_only.change(
+                fn=refresh_files,
+                inputs=[conf_input_dir, conv_model_family, approved_only],
                 outputs=ann_file_dropdown
             )
             

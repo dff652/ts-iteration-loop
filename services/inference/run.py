@@ -38,6 +38,16 @@ warnings.filterwarnings("ignore", message=".*is deprecated.*")
 import patch_transformers
 # =======================================================================
 
+import sys
+import uuid
+from datetime import datetime
+from pathlib import Path
+
+# Ensure project root is on sys.path for DB access (src/...)
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
 from iotdb.Session import Session
 import pandas as pd
 import numpy as np
@@ -564,7 +574,8 @@ def save_results(results, sensor_info, args, position_index=None):
 
     # 只保存一个完整的CSV文件，包含所有信息
     file_name = f"{args.method}_{args.downsampler}_{output_point}_{date_str}.csv"
-    df_to_save.to_csv(os.path.join(folder_path, file_name))
+    file_path = os.path.join(folder_path, file_name)
+    df_to_save.to_csv(file_path)
     print(f"保存结果: {file_name}")
     
     # 如果启用了聚类算法，在文件名中标识
@@ -575,6 +586,312 @@ def save_results(results, sensor_info, args, position_index=None):
         print(f"  - local_mask: 固定阈值方法的局部异常掩码")
         print(f"  - global_mask_cluster: {args.clustering_method}聚类方法的全局异常掩码")
         print(f"  - local_mask_cluster: {args.clustering_method}聚类方法的局部异常掩码")
+
+    return {
+        "folder_path": folder_path,
+        "file_name": file_name,
+        "file_path": file_path,
+        "file_stem": os.path.splitext(file_name)[0],
+        "output_point": output_point,
+        "date_str": date_str,
+    }
+
+
+def _safe_json_dump(path, payload):
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logging.warning(f"Failed to write JSON: {path}. Error: {e}")
+
+
+def _safe_float(value, default=0.0):
+    try:
+        if value is None or pd.isna(value):
+            return default
+        return float(value)
+    except Exception:
+        return default
+
+
+def _safe_int(value, default=0):
+    try:
+        if value is None or pd.isna(value):
+            return default
+        return int(value)
+    except Exception:
+        return default
+
+
+def _parse_segment_index(value):
+    if isinstance(value, (list, tuple)) and len(value) == 2:
+        return _safe_int(value[0], None), _safe_int(value[1], None)
+    if value is None:
+        return None, None
+    text = str(value)
+    if "-" in text:
+        parts = text.split("-", 1)
+        return _safe_int(parts[0], None), _safe_int(parts[1], None)
+    return None, None
+
+
+def _segments_from_eval_df(df):
+    segments = []
+    if df is None or df.empty:
+        return segments
+    for _, row in df.iterrows():
+        start, end = _parse_segment_index(row.get("index"))
+        if start is None or end is None:
+            continue
+        seg = {
+            "start": int(start),
+            "end": int(end),
+            "score": _safe_float(row.get("score"), 0.0),
+            "raw_p": _safe_float(row.get("raw_p"), 0.0),
+            "left": _safe_float(row.get("left"), 0.0),
+            "right": _safe_float(row.get("right"), 0.0),
+            "length": _safe_int(row.get("data_len"), max(0, end - start + 1)),
+        }
+        segments.append(seg)
+    return segments
+
+
+def _compute_score_summary(segments):
+    scores = [seg.get("score", 0.0) for seg in segments if seg.get("score") is not None]
+    if scores:
+        score_max = float(np.max(scores))
+        score_min = float(np.min(scores))
+        score_p50 = float(np.percentile(scores, 50))
+        try:
+            from evaluation.lb_eval import avg_score
+            score_avg = float(avg_score(scores))
+            avg_method = "p_norm_5"
+        except Exception:
+            score_avg = float(np.mean(scores))
+            avg_method = "mean"
+    else:
+        score_max = 0.0
+        score_min = 0.0
+        score_p50 = 0.0
+        score_avg = 0.0
+        avg_method = "none"
+    return {
+        "score_avg": score_avg,
+        "score_max": score_max,
+        "score_min": score_min,
+        "score_p50": score_p50,
+        "segment_count": len(segments),
+        "score_avg_method": avg_method,
+    }
+
+
+def _map_indices_to_raw(indices, position_index, raw_len):
+    if len(indices) == 0:
+        return np.array([], dtype=int)
+    try:
+        segments = split_continuous_outliers(indices)
+    except Exception:
+        segments = [indices.tolist()]
+    mapped = []
+    for seg in segments:
+        if not seg:
+            continue
+        start = int(seg[0])
+        end = int(seg[-1])
+        if start >= len(position_index):
+            continue
+        end = min(end, len(position_index) - 1)
+        raw_start = int(position_index[start])
+        raw_end = int(position_index[end])
+        raw_start = max(0, min(raw_start, raw_len - 1))
+        raw_end = max(raw_start, min(raw_end, raw_len - 1))
+        mapped.extend(range(raw_start, raw_end + 1))
+    if not mapped:
+        return np.array([], dtype=int)
+    return np.unique(np.array(mapped, dtype=int))
+
+
+def _compute_lb_eval_outputs(series, mask, position_index=None):
+    if series is None or mask is None:
+        return {"summary": _compute_score_summary([]), "segments": [], "index_space": "unknown"}
+    raw_series = np.asarray(series)
+    mask_arr = np.asarray(mask)
+    if raw_series.size == 0 or mask_arr.size == 0:
+        return {"summary": _compute_score_summary([]), "segments": [], "index_space": "empty"}
+
+    indices = np.where(mask_arr > 0)[0].astype(int)
+    eval_series = raw_series
+    eval_indices = indices
+    index_space = "raw"
+
+    if len(mask_arr) != len(raw_series):
+        if position_index is not None and len(position_index) == len(mask_arr):
+            mapped = _map_indices_to_raw(indices, position_index, len(raw_series))
+            if len(mapped) > 0:
+                eval_indices = mapped
+                index_space = "raw_mapped"
+            else:
+                eval_series = raw_series[np.asarray(position_index)]
+                eval_indices = indices
+                index_space = "downsample"
+        else:
+            eval_series = raw_series[: len(mask_arr)]
+            eval_indices = indices
+            index_space = "downsample"
+
+    try:
+        from evaluation import get_evaluator
+        evaluator = get_evaluator("lb_eval")
+        result = evaluator.evaluate(eval_series, eval_indices)
+        df = result.get("result") if isinstance(result, dict) else None
+    except Exception as e:
+        logging.warning(f"lb_eval failed: {e}")
+        df = None
+
+    segments = _segments_from_eval_df(df if isinstance(df, pd.DataFrame) else None)
+    summary = _compute_score_summary(segments)
+    summary["index_space"] = index_space
+    return {"summary": summary, "segments": segments, "index_space": index_space}
+
+
+def _write_eval_outputs(series, mask, save_info, args, position_index=None, extra_meta=None):
+    if not save_info:
+        return None
+    eval_result = _compute_lb_eval_outputs(series, mask, position_index=position_index)
+    summary = eval_result["summary"]
+    segments = eval_result["segments"]
+
+    metrics_path = os.path.join(save_info["folder_path"], f"{save_info['file_stem']}_metrics.json")
+    segments_path = os.path.join(save_info["folder_path"], f"{save_info['file_stem']}_segments.json")
+
+    model_path = _get_model_path(args)
+    generated_at = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    metrics_payload = {
+        "version": 1,
+        "summary": summary,
+        "method": getattr(args, "method", ""),
+        "downsampler": getattr(args, "downsampler", ""),
+        "task_name": getattr(args, "task_name", ""),
+        "task_id": getattr(args, "task_id", None),
+        "point_name": save_info.get("output_point", ""),
+        "result_csv": save_info.get("file_name", ""),
+        "result_path": save_info.get("file_path", ""),
+        "metrics_path": metrics_path,
+        "segments_path": segments_path,
+        "model_path": model_path,
+        "generated_at": generated_at,
+    }
+    if extra_meta:
+        metrics_payload["meta"] = extra_meta
+
+    _safe_json_dump(metrics_path, metrics_payload)
+    _safe_json_dump(segments_path, segments)
+
+    return {
+        "summary": summary,
+        "segments": segments,
+        "metrics_path": metrics_path,
+        "segments_path": segments_path,
+        "metrics_payload": metrics_payload,
+    }
+
+
+def _get_model_path(args):
+    method = getattr(args, "method", "")
+    if method in {"chatts", "qwen"}:
+        return getattr(args, "chatts_model_path", "")
+    if method == "timer":
+        return getattr(args, "timer_model_path", "")
+    return ""
+
+
+def _write_inference_to_db(task_id, save_info, eval_result, args, sensor_info):
+    try:
+        from src.db.database import SessionLocal, InferenceResult, SegmentScore, init_db
+    except Exception as e:
+        logging.warning(f"DB models unavailable, skip DB write: {e}")
+        return None
+
+    if not save_info or not eval_result:
+        return None
+
+    try:
+        init_db()
+    except Exception as e:
+        logging.warning(f"DB init failed: {e}")
+        return None
+
+    db = SessionLocal()
+    inference_id = str(uuid.uuid4())
+    summary = eval_result.get("summary", {})
+    segments = eval_result.get("segments", [])
+
+    path, column, st, et = sensor_info
+    meta = {
+        "task_name": getattr(args, "task_name", ""),
+        "downsampler": getattr(args, "downsampler", ""),
+        "save_mode": getattr(args, "save_mode", ""),
+        "index_space": summary.get("index_space", ""),
+        "score_min": summary.get("score_min", 0.0),
+        "score_p50": summary.get("score_p50", 0.0),
+        "score_avg_method": summary.get("score_avg_method", ""),
+        "sensor_path": path,
+        "sensor_column": column,
+        "start_time": st,
+        "end_time": et,
+    }
+
+    try:
+        record = InferenceResult(
+            id=inference_id,
+            task_id=task_id,
+            method=getattr(args, "method", ""),
+            model=_get_model_path(args),
+            point_name=save_info.get("output_point", ""),
+            result_path=save_info.get("file_path", ""),
+            metrics_path=eval_result.get("metrics_path", ""),
+            segments_path=eval_result.get("segments_path", ""),
+            score_avg=summary.get("score_avg", 0.0),
+            score_max=summary.get("score_max", 0.0),
+            segment_count=summary.get("segment_count", 0),
+            meta=json.dumps(meta, ensure_ascii=False),
+        )
+        db.add(record)
+
+        for seg in segments:
+            db.add(SegmentScore(
+                inference_id=inference_id,
+                start=seg.get("start"),
+                end=seg.get("end"),
+                score=seg.get("score"),
+                raw_p=seg.get("raw_p"),
+                left=seg.get("left"),
+                right=seg.get("right"),
+            ))
+
+        db.commit()
+        return inference_id
+    except Exception as e:
+        db.rollback()
+        logging.warning(f"DB write failed: {e}")
+        return None
+    finally:
+        db.close()
+
+
+def _finalize_inference_outputs(raw_series, mask, save_info, args, sensor_info, position_index=None):
+    try:
+        eval_result = _write_eval_outputs(
+            raw_series,
+            mask,
+            save_info,
+            args,
+            position_index=position_index,
+        )
+        task_id = getattr(args, "task_id", None)
+        _write_inference_to_db(task_id, save_info, eval_result, args, sensor_info)
+    except Exception as e:
+        logging.warning(f"Finalize outputs failed: {e}")
 
 
 def post_process(data, indices, threshold=0.2):
@@ -752,8 +1069,17 @@ def process_sensor(sensor_info, args):
             # 保存结果
             with Timer("save") as t_save:
                 print(f"Saving results for {sensor_info} with shape {data.shape}")
-                save_results(data, sensor_info, args, position_index=position_index_ds)
+                save_info = save_results(data, sensor_info, args, position_index=position_index_ds)
             metrics.save_time = t_save.elapsed
+
+            _finalize_inference_outputs(
+                raw_data[point_name].values,
+                global_mask,
+                save_info,
+                args,
+                sensor_info,
+                position_index=position_index_ds,
+            )
             
             # 获取系统资源
             sys_metrics = perf_logger.get_system_metrics()
@@ -852,8 +1178,17 @@ def process_sensor(sensor_info, args):
             # 保存结果
             with Timer("save") as t_save:
                 print(f"Saving results for {sensor_info} with shape {data.shape}")
-                save_results(data, sensor_info, args, position_index=position_index_ds)
+                save_info = save_results(data, sensor_info, args, position_index=position_index_ds)
             metrics.save_time = t_save.elapsed
+
+            _finalize_inference_outputs(
+                raw_data[point_name].values,
+                global_mask,
+                save_info,
+                args,
+                sensor_info,
+                position_index=position_index_ds,
+            )
             
             # 获取系统资源
             sys_metrics = perf_logger.get_system_metrics()
@@ -937,8 +1272,17 @@ def process_sensor(sensor_info, args):
             # Save
             with Timer("save") as t_save:
                 print(f"Saving results for {sensor_info} with shape {data.shape}")
-                save_results(data, sensor_info, args, position_index=position_index_ds)
+                save_info = save_results(data, sensor_info, args, position_index=position_index_ds)
             metrics.save_time = t_save.elapsed
+
+            _finalize_inference_outputs(
+                raw_data[point_name].values,
+                global_mask,
+                save_info,
+                args,
+                sensor_info,
+                position_index=position_index_ds,
+            )
             
             # System metrics
             sys_metrics = perf_logger.get_system_metrics()
@@ -1020,8 +1364,17 @@ def process_sensor(sensor_info, args):
             # 保存结果
             with Timer("save") as t_save:
                 print(f"Saving results for {sensor_info} with shape {data.shape}")
-                save_results(data, sensor_info, args, position_index=position_index_ds)
+                save_info = save_results(data, sensor_info, args, position_index=position_index_ds)
             metrics.save_time = t_save.elapsed
+
+            _finalize_inference_outputs(
+                raw_data[point_name].values,
+                global_mask,
+                save_info,
+                args,
+                sensor_info,
+                position_index=position_index_ds,
+            )
             
             # 获取系统资源
             sys_metrics = perf_logger.get_system_metrics()
@@ -1088,6 +1441,7 @@ def process_sensor(sensor_info, args):
             metrics.is_step_data = step_type
             metrics.is_noisy_data = noise_type
             metrics.data_type = data_type
+            raw_series = raw_data[column].values
             del raw_data
             print(f"Data type for {sensor_info}: {data_type}")
 
@@ -1190,8 +1544,17 @@ def process_sensor(sensor_info, args):
             # 9. 保存结果
             with Timer("save") as t_save:
                 print(f"Saving results for {sensor_info} with shape {data.shape}")
-                save_results(data, sensor_info, args, position_index=position_index)
+                save_info = save_results(data, sensor_info, args, position_index=position_index)
             metrics.save_time = t_save.elapsed
+
+            _finalize_inference_outputs(
+                raw_series,
+                global_mask,
+                save_info,
+                args,
+                sensor_info,
+                position_index=position_index,
+            )
             
             # 获取系统资源
             sys_metrics = perf_logger.get_system_metrics()
@@ -1244,6 +1607,8 @@ def main():
     parser.add_argument('--path_iotdb', type=str, default='all', help='whlj, hbsn, gdsh')
     parser.add_argument('--input', type=str, default=None, help='Input CSV file path (overrides IoTDB)')
     parser.add_argument('--task_name', type=str, default='global', help='global or local')
+    parser.add_argument('--task_id', '--task-id', dest='task_id', type=str, default=None,
+                        help='Task id for DB indexing')
     parser.add_argument('--processing_interval', type=str, default='7D', help='7D or 1M')
     parser.add_argument('--method', type=str, default='chatts',
                         help='piecewise_linear, stl_wavelet, standardized, iforest, cv, adtk_hbos, chatts, timer')

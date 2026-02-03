@@ -67,7 +67,8 @@ class CheckOutlierAdapter:
                 result = self._run_single_inference(
                     input_file, 
                     algorithm, 
-                    algorithm_args
+                    algorithm_args,
+                    task_id=task_id
                 )
                 results.append(result)
             except Exception as e:
@@ -107,7 +108,8 @@ class CheckOutlierAdapter:
         self, 
         input_file: str, 
         algorithm: str,
-        args: Dict
+        args: Dict,
+        task_id: Optional[str] = None
     ) -> Dict:
         """执行单个文件推理"""
         # 使用 Python 解释器（统一模式使用 PYTHON_UNIFIED）
@@ -118,6 +120,10 @@ class CheckOutlierAdapter:
             "--method", algorithm,
             "--task_name", ""  # Suppress default 'global' subfolder
         ]
+        if task_id:
+            cmd.extend(["--task-id", str(task_id)])
+        if task_id:
+            cmd.extend(["--task-id", str(task_id)])
         
         # 处理参数映射
         # 1. 必需参数
@@ -414,4 +420,3 @@ class CheckOutlierAdapter:
         except Exception as e:
             yield {"success": False, "error": str(e)}
             yield f"❌ Execution error: {str(e)}\n"
-

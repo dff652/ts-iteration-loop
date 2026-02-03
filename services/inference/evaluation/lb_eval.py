@@ -1,7 +1,10 @@
 from scipy.stats import ks_2samp
 import numpy as np
 import pandas as pd
-from check_outlier.wavelet import split_continuous_outliers
+try:
+    from check_outlier.wavelet import split_continuous_outliers
+except ImportError:
+    from wavelet import split_continuous_outliers
 import math
 from .base import BaseEvaluator
 from .registry import register_evaluator

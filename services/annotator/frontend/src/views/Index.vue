@@ -24,6 +24,8 @@
           <!-- 标签页切换 -->
           <div class="file-tabs">
             <button class="file-tab" :class="{ active: fileTab === 'csv' }" @click="fileTab = 'csv'">📄 原始数据</button>
+            <button class="file-tab" :class="{ active: fileTab === 'queue' }" @click="fileTab = 'queue'">🎯 候选队列</button>
+            <button class="file-tab" :class="{ active: fileTab === 'review' }" @click="fileTab = 'review'">✅ 审核队列</button>
             <button class="file-tab" :class="{ active: fileTab === 'json' }" @click="fileTab = 'json'"> 标注结果</button>
           </div>
           <!-- 路径输入 -->
@@ -37,13 +39,118 @@
             <select v-model="fileSortBy" class="sort-select">
               <option value="name">名称</option>
               <option value="annotation">标注数</option>
+              <option value="score">置信度</option>
             </select>
+          </div>
+          <div class="filter-control" v-if="fileTab === 'csv'">
+            <label>筛选:</label>
+            <select v-model="filterScoreBy" class="sort-select">
+              <option value="score_avg">平均分</option>
+              <option value="score_max">最高分</option>
+            </select>
+            <input type="number" step="0.1" v-model="filterMinScore" placeholder="min" class="input input-xs">
+            <input type="number" step="0.1" v-model="filterMaxScore" placeholder="max" class="input input-xs">
+            <select v-model="filterMethod" class="sort-select">
+              <option value="">方法(全部)</option>
+              <option value="chatts">chatts</option>
+              <option value="qwen">qwen</option>
+              <option value="timer">timer</option>
+              <option value="adtk_hbos">adtk_hbos</option>
+              <option value="ensemble">ensemble</option>
+            </select>
+            <button class="btn btn-xs" @click="applyScoreFilter">应用</button>
+            <button class="btn btn-xs" v-if="filterEnabled" @click="clearScoreFilter">清除</button>
+          </div>
+          <div class="filter-control" v-if="fileTab === 'queue'">
+            <label>候选:</label>
+            <select v-model="candidateStrategy" class="sort-select">
+              <option value="topk">TopK</option>
+              <option value="low_score">低分优先</option>
+              <option value="random">随机</option>
+            </select>
+            <input type="number" min="1" step="1" v-model="candidateLimit" placeholder="K" class="input input-xs">
+            <select v-model="filterScoreBy" class="sort-select">
+              <option value="score_avg">平均分</option>
+              <option value="score_max">最高分</option>
+            </select>
+            <input type="number" step="0.1" v-model="filterMinScore" placeholder="min" class="input input-xs">
+            <input type="number" step="0.1" v-model="filterMaxScore" placeholder="max" class="input input-xs">
+            <select v-model="filterMethod" class="sort-select">
+              <option value="">方法(全部)</option>
+              <option value="chatts">chatts</option>
+              <option value="qwen">qwen</option>
+              <option value="timer">timer</option>
+              <option value="adtk_hbos">adtk_hbos</option>
+              <option value="ensemble">ensemble</option>
+            </select>
+            <button class="btn btn-xs" @click="loadCandidates">加载队列</button>
+          </div>
+          <div class="filter-control" v-if="fileTab === 'review'">
+            <label>审核:</label>
+            <select v-model="reviewSourceType" class="sort-select">
+              <option value="annotation">标注</option>
+              <option value="inference">推理</option>
+            </select>
+            <select v-model="reviewStatusFilter" class="sort-select">
+              <option value="pending">待审核</option>
+              <option value="approved">已通过</option>
+              <option value="rejected">已拒绝</option>
+              <option value="needs_fix">需修正</option>
+              <option value="">全部</option>
+            </select>
+            <select v-model="reviewMethodFilter" class="sort-select">
+              <option value="">方法(全部)</option>
+              <option value="chatts">chatts</option>
+              <option value="qwen">qwen</option>
+              <option value="timer">timer</option>
+              <option value="adtk_hbos">adtk_hbos</option>
+              <option value="ensemble">ensemble</option>
+            </select>
+            <input type="number" min="1" step="1" v-model="reviewLimit" placeholder="limit" class="input input-xs">
+            <button class="btn btn-xs" @click="loadReviewQueue">刷新</button>
+            <span class="review-stats">
+              总{{ reviewStats.total }} | 待{{ reviewStats.pending }} | 过{{ reviewStats.approved }} | 拒{{ reviewStats.rejected }} | 修{{ reviewStats.needs_fix }} | 完成{{ reviewProgress }}%
+            </span>
+          </div>
+          <div class="filter-control" v-if="fileTab === 'review'">
+            <label>抽样:</label>
+            <select v-model="reviewSampleStrategy" class="sort-select">
+              <option value="topk">TopK</option>
+              <option value="low_score">低分优先</option>
+              <option value="random">随机</option>
+            </select>
+            <input type="number" min="1" step="1" v-model="reviewSampleLimit" placeholder="K" class="input input-xs">
+            <select v-model="reviewScoreBy" class="sort-select">
+              <option value="score_avg">平均分</option>
+              <option value="score_max">最高分</option>
+            </select>
+            <input type="number" step="0.1" v-model="reviewMinScore" placeholder="min" class="input input-xs">
+            <input type="number" step="0.1" v-model="reviewMaxScore" placeholder="max" class="input input-xs">
+            <select v-model="reviewMethodFilter" class="sort-select">
+              <option value="">方法(全部)</option>
+              <option value="chatts">chatts</option>
+              <option value="qwen">qwen</option>
+              <option value="timer">timer</option>
+              <option value="adtk_hbos">adtk_hbos</option>
+              <option value="ensemble">ensemble</option>
+            </select>
+            <button class="btn btn-xs btn-primary" @click="sampleReviewQueue">生成队列</button>
+            <button class="btn btn-xs" @click="toggleReviewSelectAll">全选</button>
+            <button class="btn btn-xs" @click="clearReviewSelection">清空</button>
+            <button class="btn btn-xs btn-success" @click="batchUpdateReviewStatus('approved')">批量通过</button>
+            <button class="btn btn-xs btn-danger" @click="batchUpdateReviewStatus('rejected')">批量拒绝</button>
           </div>
           <!-- CSV 文件列表 -->
           <div class="file-list" v-show="fileTab === 'csv'">
             <div v-for="file in csvFiles" :key="file.name" class="file-item" :class="{ active: file.name === selectedFileName }" @click="selectFile(file)">
               <span class="file-name">{{ file.name }}</span>
-              <span v-if="file.has_annotations" class="file-badge" :title="`${file.annotation_count} 个标注`">✓ {{ file.annotation_count }}</span>
+              <span class="file-meta">
+                <span v-if="getScoreValue(file) !== null" class="file-score" :title="`置信度(${scoreLabel}): ${formatScore(file)}`">
+                  {{ formatScore(file) }}
+                </span>
+                <span v-if="file.method" class="file-method">{{ file.method }}</span>
+                <span v-if="file.has_annotations" class="file-badge" :title="`${file.annotation_count} 个标注`">✓ {{ file.annotation_count }}</span>
+              </span>
             </div>
             <p v-if="csvFiles.length === 0 && !loading" class="empty-message">暂无 CSV 文件</p>
           </div>
@@ -54,6 +161,40 @@
               <span class="file-badge" v-if="file.annotation_count">✓</span>
             </div>
             <p v-if="jsonFiles.length === 0" class="empty-message">暂无标注结果</p>
+          </div>
+          <!-- 候选队列 -->
+          <div class="file-list" v-show="fileTab === 'queue'">
+            <div v-for="file in candidateFilesSorted" :key="file.name" class="file-item" :class="{ active: file.name === selectedFileName }" @click="selectFile(file)">
+              <span class="file-name">{{ file.name }}</span>
+              <span class="file-meta">
+                <span v-if="getScoreValue(file) !== null" class="file-score" :title="`置信度(${scoreLabel}): ${formatScore(file)}`">
+                  {{ formatScore(file) }}
+                </span>
+                <span v-if="file.method" class="file-method">{{ file.method }}</span>
+                <span v-if="file.has_annotations" class="file-badge" :title="`${file.annotation_count} 个标注`">✓ {{ file.annotation_count }}</span>
+              </span>
+            </div>
+            <p v-if="candidateFilesSorted.length === 0 && !candidateLoading" class="empty-message">暂无候选</p>
+          </div>
+          <!-- 审核队列 -->
+          <div class="file-list" v-show="fileTab === 'review'">
+            <div v-for="item in reviewItems" :key="item.id" class="file-item" @click="openReviewItem(item)">
+              <span class="review-checkbox" @click.stop>
+                <input type="checkbox" v-model="reviewSelected[item.id]">
+              </span>
+              <span class="file-name">{{ item.filename || item.point_name || item.source_id }}</span>
+              <span class="file-meta">
+                <span v-if="item.score !== null && item.score !== undefined" class="file-score">{{ Number(item.score).toFixed(1) }}</span>
+                <span v-if="item.method" class="file-method">{{ item.method }}</span>
+                <span class="review-status" :class="`status-${item.status}`">{{ item.status }}</span>
+              </span>
+              <span class="review-actions">
+                <button class="btn btn-xs btn-success" @click.stop="updateReviewStatus(item, 'approved')">通过</button>
+                <button class="btn btn-xs btn-danger" @click.stop="updateReviewStatus(item, 'rejected')">拒绝</button>
+                <button class="btn btn-xs" @click.stop="updateReviewStatus(item, 'needs_fix')">修正</button>
+              </span>
+            </div>
+            <p v-if="reviewItems.length === 0 && !reviewLoading" class="empty-message">暂无审核项</p>
           </div>
           <input type="file" ref="fileInput" @change="fileCheck" accept=".csv" style="display:none">
           <p v-if="loading" class="loading-message">加载中...</p>
@@ -491,6 +632,28 @@ export default {
       fileTab: 'csv',
       fileSortBy: 'name',  // 'name' or 'annotation'
       selectedResultFile: '',
+      filterMinScore: '',
+      filterMaxScore: '',
+      filterMethod: '',
+      filterScoreBy: 'score_avg',
+      filterEnabled: false,
+      candidateStrategy: 'topk',
+      candidateLimit: 50,
+      candidateFiles: [],
+      candidateLoading: false,
+      reviewItems: [],
+      reviewLoading: false,
+      reviewSourceType: 'annotation',
+      reviewStatusFilter: 'pending',
+      reviewMethodFilter: '',
+      reviewLimit: 200,
+      reviewSampleStrategy: 'topk',
+      reviewSampleLimit: 50,
+      reviewScoreBy: 'score_avg',
+      reviewMinScore: '',
+      reviewMaxScore: '',
+      reviewStats: { total: 0, pending: 0, approved: 0, rejected: 0, needs_fix: 0 },
+      reviewSelected: {},
       
       // Category colors for local changes - each major category gets one color
       categoryColors: {
@@ -535,6 +698,20 @@ export default {
     localCategories() {
       // Return direct reference for display (read-only)
       return this.labels.local_change || {};
+    },
+    scoreLabel() {
+      return this.filterScoreBy === 'score_max' ? '最高分' : '平均分';
+    },
+    reviewProgress() {
+      const total = this.reviewStats.total || 0;
+      if (total <= 0) return 0;
+      const done = (this.reviewStats.approved || 0)
+        + (this.reviewStats.rejected || 0)
+        + (this.reviewStats.needs_fix || 0);
+      return Math.round((done / total) * 100);
+    },
+    candidateFilesSorted() {
+      return this.sortFiles(this.candidateFiles || [], 'score');
     },
     // Flatten all local_change labels into a single array for dropdown
     flatAllLabels() {
@@ -682,6 +859,13 @@ export default {
   watch: {
     // selectedLabel watcher removed to prevent chart color reset side effects
     // We handle plottingApp updates manually where needed
+    fileTab(val) {
+      if (val === 'queue') {
+        this.loadCandidates();
+      } else if (val === 'review') {
+        this.loadReviewQueue();
+      }
+    }
   },
   mounted() {
     // Expose Vue instance to window for D3 direct access
@@ -803,6 +987,16 @@ export default {
           if (countDiff !== 0) return countDiff;
           return this.naturalSort(a.name.toLowerCase(), b.name.toLowerCase());
         });
+      } else if (sortBy === 'score') {
+        sorted.sort((a, b) => {
+          const scoreA = this.getScoreValue(a);
+          const scoreB = this.getScoreValue(b);
+          const safeA = scoreA === null ? -Infinity : scoreA;
+          const safeB = scoreB === null ? -Infinity : scoreB;
+          const diff = safeB - safeA;
+          if (diff !== 0) return diff;
+          return this.naturalSort(a.name.toLowerCase(), b.name.toLowerCase());
+        });
       } else {
         // Sort by name (natural sort)
         sorted.sort((a, b) => this.naturalSort(a.name.toLowerCase(), b.name.toLowerCase()));
@@ -810,12 +1004,270 @@ export default {
       
       return sorted;
     },
+
+    getScoreValue(file) {
+      if (!file) return null;
+      const raw = this.filterScoreBy === 'score_max' ? file.score_max : file.score_avg;
+      const fallback = this.filterScoreBy === 'score_max' ? file.score_avg : file.score_max;
+      const value = raw !== undefined && raw !== null ? raw : fallback;
+      if (value === undefined || value === null) return null;
+      const num = Number(value);
+      return Number.isFinite(num) ? num : null;
+    },
+
+    formatScore(file) {
+      const score = this.getScoreValue(file);
+      if (score === null) return '';
+      return score.toFixed(1);
+    },
+
+    applyScoreFilter() {
+      const hasFilter = (
+        this.filterMinScore !== ''
+        || this.filterMaxScore !== ''
+        || this.filterMethod
+      );
+      this.filterEnabled = hasFilter;
+      if (hasFilter) this.fileSortBy = 'score';
+      return this.loadFiles();
+    },
+
+    clearScoreFilter() {
+      this.filterMinScore = '';
+      this.filterMaxScore = '';
+      this.filterMethod = '';
+      this.filterEnabled = false;
+      return this.loadFiles();
+    },
+
+    async loadCandidates() {
+      if (!this.currentPath) return;
+      if (!this.candidateStrategy) {
+        this.candidateFiles = [];
+        return;
+      }
+
+      this.candidateLoading = true;
+      try {
+        const params = new URLSearchParams();
+        params.set('path', this.currentPath);
+        params.set('strategy', this.candidateStrategy);
+        if (this.candidateLimit) params.set('limit', this.candidateLimit);
+        if (this.filterScoreBy) params.set('score_by', this.filterScoreBy);
+        if (this.filterMinScore !== '') params.set('min_score', this.filterMinScore);
+        if (this.filterMaxScore !== '') params.set('max_score', this.filterMaxScore);
+        if (this.filterMethod) params.set('method', this.filterMethod);
+        const url = `${API_BASE}/files?${params.toString()}`;
+
+        const res = await fetch(url, {
+          headers: this.getAuthHeaders()
+        });
+        const data = await res.json();
+        if (data.success) {
+          this.candidateFiles = data.files || [];
+          if (this.fileTab === 'queue') {
+            this.showToast(`候选队列加载 ${this.candidateFiles.length} 条`, 'success');
+          }
+        } else if (res.status === 401) {
+          this.$router.push('/login');
+        } else {
+          this.showToast('候选队列加载失败: ' + (data.error || '未知错误'), 'error');
+        }
+      } catch (e) {
+        console.error('Load candidates error:', e);
+        this.showToast('候选队列加载失败: ' + e.message, 'error');
+      } finally {
+        this.candidateLoading = false;
+      }
+    },
+
+    async loadReviewQueue() {
+      this.reviewLoading = true;
+      try {
+        const params = new URLSearchParams();
+        params.set('source_type', this.reviewSourceType);
+        if (this.reviewStatusFilter) params.set('status', this.reviewStatusFilter);
+        if (this.reviewMethodFilter) params.set('method', this.reviewMethodFilter);
+        if (this.reviewLimit) params.set('limit', this.reviewLimit);
+        const url = `${API_BASE}/review/queue?${params.toString()}`;
+        const res = await fetch(url, {
+          headers: this.getAuthHeaders()
+        });
+        const data = await res.json();
+        if (data.success) {
+          this.reviewItems = data.items || [];
+          this.reviewSelected = {};
+          this.reviewItems.forEach(item => {
+            this.$set(this.reviewSelected, item.id, false);
+          });
+          await this.loadReviewStats();
+        } else if (res.status === 401) {
+          this.$router.push('/login');
+        } else {
+          this.showToast('审核队列加载失败: ' + (data.error || '未知错误'), 'error');
+        }
+      } catch (e) {
+        console.error('Load review queue error:', e);
+        this.showToast('审核队列加载失败: ' + e.message, 'error');
+      } finally {
+        this.reviewLoading = false;
+      }
+    },
+
+    async loadReviewStats() {
+      try {
+        const params = new URLSearchParams();
+        params.set('source_type', this.reviewSourceType);
+        if (this.reviewMethodFilter) params.set('method', this.reviewMethodFilter);
+        const url = `${API_BASE}/review/stats?${params.toString()}`;
+        const res = await fetch(url, {
+          headers: this.getAuthHeaders()
+        });
+        const data = await res.json();
+        if (data.success) {
+          const stats = data.stats || {};
+          this.reviewStats = {
+            total: data.total || 0,
+            pending: stats.pending || 0,
+            approved: stats.approved || 0,
+            rejected: stats.rejected || 0,
+            needs_fix: stats.needs_fix || 0,
+          };
+        }
+      } catch (e) {
+        console.error('Load review stats error:', e);
+      }
+    },
+
+    async sampleReviewQueue() {
+      this.reviewLoading = true;
+      try {
+        const payload = {
+          source_type: this.reviewSourceType,
+          strategy: this.reviewSampleStrategy,
+          limit: this.reviewSampleLimit,
+          score_by: this.reviewScoreBy,
+          min_score: this.reviewMinScore !== '' ? this.reviewMinScore : undefined,
+          max_score: this.reviewMaxScore !== '' ? this.reviewMaxScore : undefined,
+          method: this.reviewMethodFilter || undefined,
+        };
+        const res = await fetch(`${API_BASE}/review/sample`, {
+          method: 'POST',
+          headers: this.getAuthHeaders(),
+          body: JSON.stringify(payload)
+        });
+        const data = await res.json();
+        if (data.success) {
+          this.showToast(`已生成审核队列：新增 ${data.created} 条`, 'success');
+          await this.loadReviewQueue();
+        } else if (res.status === 401) {
+          this.$router.push('/login');
+        } else {
+          this.showToast('生成审核队列失败: ' + (data.error || '未知错误'), 'error');
+        }
+      } catch (e) {
+        console.error('Sample review queue error:', e);
+        this.showToast('生成审核队列失败: ' + e.message, 'error');
+      } finally {
+        this.reviewLoading = false;
+      }
+    },
+
+    toggleReviewSelectAll() {
+      if (!this.reviewItems.length) return;
+      const allSelected = this.reviewItems.every(item => this.reviewSelected[item.id]);
+      const next = !allSelected;
+      const updated = {};
+      this.reviewItems.forEach(item => {
+        updated[item.id] = next;
+      });
+      this.reviewSelected = updated;
+    },
+
+    clearReviewSelection() {
+      this.reviewSelected = {};
+    },
+
+    async batchUpdateReviewStatus(status) {
+      const ids = Object.keys(this.reviewSelected).filter(id => this.reviewSelected[id]);
+      if (ids.length === 0) {
+        this.showToast('未选择任何审核项', 'info');
+        return;
+      }
+      try {
+        const res = await fetch(`${API_BASE}/review/queue/batch`, {
+          method: 'PATCH',
+          headers: this.getAuthHeaders(),
+          body: JSON.stringify({ status, ids })
+        });
+        const data = await res.json();
+        if (data.success) {
+          this.showToast(`批量更新完成：${data.updated} 条`, 'success');
+          await this.loadReviewQueue();
+        } else if (res.status === 401) {
+          this.$router.push('/login');
+        } else {
+          this.showToast('批量更新失败: ' + (data.error || '未知错误'), 'error');
+        }
+      } catch (e) {
+        console.error('Batch update review status error:', e);
+        this.showToast('批量更新失败: ' + e.message, 'error');
+      }
+    },
+
+    async updateReviewStatus(item, status) {
+      if (!item || !item.id) return;
+      try {
+        const res = await fetch(`${API_BASE}/review/queue/${item.id}`, {
+          method: 'PATCH',
+          headers: this.getAuthHeaders(),
+          body: JSON.stringify({ status })
+        });
+        const data = await res.json();
+        if (data.success) {
+          item.status = status;
+          this.showToast(`已标记为 ${status}`, 'success');
+        } else if (res.status === 401) {
+          this.$router.push('/login');
+        } else {
+          this.showToast('状态更新失败: ' + (data.error || '未知错误'), 'error');
+        }
+      } catch (e) {
+        console.error('Update review status error:', e);
+        this.showToast('状态更新失败: ' + e.message, 'error');
+      }
+    },
+
+    async openReviewItem(item) {
+      if (!item) return;
+      if (item.source_type === 'annotation' && !item.filename) {
+        this.showToast('该审核项缺少文件名', 'error');
+        return;
+      }
+      if (item.result_dir && item.result_dir !== this.currentPath) {
+        this.dataPath = item.result_dir;
+        await this.setDataPath();
+      }
+      if (item.filename) {
+        await this.selectFile({ name: item.filename });
+      } else {
+        this.showToast('未找到关联数据文件', 'error');
+      }
+    },
     
     async loadFiles() {
       if (!this.currentPath) return;
       
       try {
-        const url = `${API_BASE}/files?path=${encodeURIComponent(this.currentPath)}`;
+        const params = new URLSearchParams();
+        params.set('path', this.currentPath);
+        if (this.filterEnabled) {
+          if (this.filterMinScore !== '') params.set('min_score', this.filterMinScore);
+          if (this.filterMaxScore !== '') params.set('max_score', this.filterMaxScore);
+          if (this.filterMethod) params.set('method', this.filterMethod);
+          if (this.filterScoreBy) params.set('score_by', this.filterScoreBy);
+        }
+        const url = `${API_BASE}/files?${params.toString()}`;
         
         const res = await fetch(url, {
           headers: this.getAuthHeaders()
@@ -852,9 +1304,15 @@ export default {
           body: JSON.stringify({ path: this.currentPath })
         });
         const data = await res.json();
-        if (data.success) {
-          this.showToast(`索引已重建（${data.count || 0} 个文件）`, 'success');
-          await this.loadFiles();
+          if (data.success) {
+            this.showToast(`索引已重建（${data.count || 0} 个文件）`, 'success');
+            if (this.fileTab === 'queue') {
+              await this.loadCandidates();
+            } else if (this.fileTab === 'review') {
+              await this.loadReviewQueue();
+            } else {
+              await this.loadFiles();
+            }
         } else if (res.status === 401) {
           this.$router.push('/login');
         } else {
@@ -868,6 +1326,12 @@ export default {
     
     // Alias for backward compatibility
     refreshFiles() {
+      if (this.fileTab === 'queue') {
+        return this.loadCandidates();
+      }
+      if (this.fileTab === 'review') {
+        return this.loadReviewQueue();
+      }
       return this.loadFiles();
     },
     
@@ -2647,6 +3111,8 @@ textarea:disabled { background-color: #f5f5f5; color: #999; cursor: not-allowed;
 .btn-primary { background: #7E4C64; color: white; }
 .btn-primary:hover { background: #6a3f54; }
 .btn-success { background: #22c55e; color: white; }
+.btn-danger { background: #ef4444; color: white; }
+.btn-danger:hover { background: #dc2626; }
 .btn-sm { padding: 6px 12px; font-size: 0.8125rem; }
 .btn-lg { padding: 12px 24px; font-size: 1rem; }
 .btn-icon { background: none; border: none; font-size: 1rem; cursor: pointer; padding: 4px; }
@@ -2725,6 +3191,27 @@ textarea:disabled { background-color: #f5f5f5; color: #999; cursor: not-allowed;
 .sort-control { display: flex; align-items: center; gap: 6px; margin: 8px 0; font-size: 0.75rem; }
 .sort-control label { color: #666; font-weight: 500; }
 .sort-select { padding: 4px 8px; border: 1px solid #ddd; border-radius: 4px; font-size: 0.75rem; cursor: pointer; }
+
+/* Filter Control */
+.filter-control { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 6px 0 8px; font-size: 0.75rem; }
+.filter-control label { color: #666; font-weight: 500; }
+.filter-control .input { width: 72px; }
+.filter-control .btn { padding: 4px 8px; font-size: 0.75rem; }
+.review-stats { color: #555; font-size: 0.7rem; margin-left: 6px; }
+
+/* File Meta */
+.file-item { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.file-name { flex: 1; min-width: 0; word-break: break-all; }
+.file-meta { display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.file-score { background: #eef5ff; color: #1f4f9a; border: 1px solid #cfe0ff; padding: 1px 6px; border-radius: 10px; font-size: 0.7rem; }
+.file-method { background: #f6f0f4; color: #7E4C64; border: 1px solid #e7d8e1; padding: 1px 6px; border-radius: 10px; font-size: 0.7rem; text-transform: lowercase; }
+.review-actions { display: inline-flex; gap: 4px; margin-left: 6px; }
+.review-checkbox { display: inline-flex; align-items: center; margin-right: 6px; }
+.review-status { padding: 1px 6px; border-radius: 10px; font-size: 0.7rem; border: 1px solid #ddd; text-transform: lowercase; }
+.status-pending { background: #fff7ed; color: #c2410c; border-color: #fed7aa; }
+.status-approved { background: #ecfdf3; color: #166534; border-color: #bbf7d0; }
+.status-rejected { background: #fef2f2; color: #b91c1c; border-color: #fecaca; }
+.status-needs_fix { background: #eff6ff; color: #1d4ed8; border-color: #bfdbfe; }
 
 /* File Badge */
 .file-badge { color: #22c55e; font-weight: bold; margin-left: 4px; }

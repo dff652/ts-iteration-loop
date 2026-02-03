@@ -5,6 +5,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from typing import List
+import json
 import httpx
 
 from src.db.database import get_db
@@ -129,35 +130,76 @@ async def import_inference_results_internal(inference_file: str) -> dict:
 
 
 @router.get("/export/training-data", response_model=ApiResponse)
-async def export_training_data(output_path: str = None):
+async def export_training_data(output_path: str = None, approved_only: bool = True):
     """
     导出标注结果为微调训练数据格式
     用于迭代循环中标注→微调的转换
     """
     try:
+        import tempfile
+        from pathlib import Path
         from src.adapters.data_processing import DataProcessingAdapter
+        from src.db.database import SessionLocal, ReviewQueue
         
         adapter = DataProcessingAdapter()
         
-        # 获取所有标注
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(f"{ANNOTATOR_API}/api/annotations/all")
-            if resp.status_code != 200:
-                raise HTTPException(status_code=resp.status_code, detail="获取标注失败")
-            
-            all_annotations = resp.json()
+        ann_dir = Path(settings.ANNOTATIONS_ROOT) / settings.DEFAULT_USER
+        if not ann_dir.exists():
+            raise HTTPException(status_code=404, detail="标注目录不存在")
+
+        approved_set = None
+        if approved_only:
+            db = SessionLocal()
+            try:
+                rows = db.query(ReviewQueue.source_id).filter(
+                    ReviewQueue.source_type == 'annotation',
+                    ReviewQueue.status == 'approved'
+                ).all()
+                approved_set = {str(row[0]).replace('.csv', '').replace('.json', '') for row in rows}
+            finally:
+                db.close()
+
+        # 构建临时标注目录（仅 approved）
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            selected = 0
+            for json_file in ann_dir.glob("*.json"):
+                try:
+                    with open(json_file, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                except Exception:
+                    continue
+
+                filename = data.get('filename') or json_file.stem
+                normalized = str(filename).replace('.csv', '').replace('.json', '')
+                if approved_set is not None and normalized not in approved_set:
+                    continue
+
+                out_name = json_file.name if json_file.name.endswith('.json') else f"{json_file.stem}.json"
+                with open(tmp_path / out_name, 'w', encoding='utf-8') as wf:
+                    json.dump(data, wf, ensure_ascii=False, indent=2)
+                selected += 1
+
+            if selected == 0:
+                return ApiResponse(
+                    success=False,
+                    data={"output_path": output_path or ""},
+                    message="未找到已审核通过的标注"
+                )
+
+            # 使用 Data-Processing 转换脚本
+            output = output_path or "/tmp/training_data.jsonl"
+            result = adapter.convert_annotations(
+                input_dir=str(tmp_path),
+                output_path=output,
+                csv_src_dir=settings.DATA_DOWNSAMPLED_DIR,
+                model_family="qwen"
+            )
         
-        # 使用 Data-Processing 转换脚本
-        output = output_path or "/tmp/training_data.jsonl"
-        result = adapter.convert_annotations(
-            input_dir="",  # 使用 API 获取的数据
-            output_path=output
-        )
-        
-        return ApiResponse(
-            success=result.get("success", False),
-            data={"output_path": output},
-            message="导出训练数据成功" if result.get("success") else "导出失败"
-        )
+            return ApiResponse(
+                success=result.get("success", False),
+                data={"output_path": output},
+                message="导出训练数据成功" if result.get("success") else "导出失败"
+            )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
