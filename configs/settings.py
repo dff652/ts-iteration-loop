@@ -13,7 +13,7 @@ class Settings(BaseSettings):
     
     # 应用信息
     APP_NAME: str = "TS-Iteration-Loop"
-    APP_VERSION: str = "0.2.0"  # 版本升级：Monorepo 整合
+    APP_VERSION: str = "0.3.3"  # 索引与审核闭环
     DEBUG: bool = True
     
     # 服务端口

@@ -11,7 +11,7 @@ export NCCL_DEBUG=WARN
 MODEL_PATH="/home/share/models/Qwen3-VL-8B-TR"
 DATASET="qwen_converted_1_20260202"
 DATASET_DIR="${DATASET_DIR:-/home/share/data/training_qwen}"
-OUTPUT_DIR="/home/douff/ts/ts-iteration-loop/services/training/saves/qwen/train_qwen_vl_test"
+OUTPUT_DIR="/home/douff/ts/ts-iteration-loop/services/training/saves/qwen/train_qwen_vl_test1"
 
 # Run training
 # Use NPROC_PER_NODE to control DDP world size (default: single GPU to avoid NCCL/NVML issues).
