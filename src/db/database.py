@@ -66,6 +66,30 @@ class Dataset(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
+class DatasetAsset(Base):
+    """数据资产集（点位集合）"""
+    __tablename__ = "dataset_assets"
+
+    id = Column(String(36), primary_key=True)
+    name = Column(String(200), nullable=False)
+    dataset_type = Column(String(20), nullable=False)  # train / golden
+    status = Column(String(20), default="draft")  # draft / frozen
+    point_count = Column(Integer, default=0)
+    meta = Column(Text)  # JSON
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=func.now())
+
+
+class DatasetItem(Base):
+    """数据资产集条目（点位）"""
+    __tablename__ = "dataset_items"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    dataset_id = Column(String(36), nullable=False)
+    point_name = Column(String(200), nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
 class InferenceResult(Base):
     """推理结果索引（含置信度摘要）"""
     __tablename__ = "inference_results"

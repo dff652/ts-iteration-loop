@@ -84,6 +84,25 @@ class TrainingTaskRequest(BaseModel):
     config_name: str
     version_tag: Optional[str] = None
     model_family: str = "chatts"
+    auto_eval: bool = False
+    eval_truth_dir: Optional[str] = None
+    eval_data_dir: Optional[str] = None
+    eval_dataset_name: Optional[str] = None
+    eval_output_dir: Optional[str] = None
+    eval_device: Optional[str] = None
+    eval_method: Optional[str] = None
+
+
+class TrainingEvalRequest(BaseModel):
+    """训练模型评估请求"""
+    model_path: str
+    model_family: str = "chatts"
+    truth_dir: str
+    data_dir: str
+    dataset_name: str = "golden"
+    output_dir: Optional[str] = None
+    device: Optional[str] = None
+    method: Optional[str] = None
 
 
 # ==================== 推理服务 ====================

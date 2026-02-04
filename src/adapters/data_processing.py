@@ -59,13 +59,25 @@ class DataProcessingAdapter:
         return df.to_dict(orient="records")
     
     def delete_dataset(self, filename: str) -> Dict:
-        """删除数据集文件"""
+        """删除数据集文件及关联的图片"""
         file_path = self.data_path / filename
         if not file_path.exists():
             return {"success": False, "error": f"文件不存在: {filename}"}
         
         try:
+            # 删除 CSV 文件
             file_path.unlink()
+            
+            # 删除关联的图片文件（如果存在）
+            img_name = filename.replace(".csv", ".jpg")
+            img_path = Path(settings.DATA_IMAGES_DIR) / img_name
+            deleted_img = False
+            if img_path.exists():
+                img_path.unlink()
+                deleted_img = True
+            
+            if deleted_img:
+                return {"success": True, "message": f"已删除: {filename} 和关联图片"}
             return {"success": True, "message": f"已删除: {filename}"}
         except Exception as e:
             return {"success": False, "error": str(e)}

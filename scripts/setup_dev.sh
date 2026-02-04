@@ -176,3 +176,8 @@ echo -e "${BLUE}访问地址:${NC}"
 echo "  API 文档: http://localhost:8000/docs"
 echo "  管理界面: http://localhost:8000/train-ui"
 echo ""
+
+echo -e "${BLUE}环境模式:${NC}"
+echo "  默认使用统一环境 (推荐)。"
+echo "  如需使用旧版独立环境，请设置: export ENV_MODE=legacy"
+echo ""

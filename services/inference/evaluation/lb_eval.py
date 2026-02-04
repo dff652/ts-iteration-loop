@@ -4,7 +4,10 @@ import pandas as pd
 try:
     from check_outlier.wavelet import split_continuous_outliers
 except ImportError:
-    from wavelet import split_continuous_outliers
+    try:
+        from services.inference.wavelet import split_continuous_outliers
+    except ImportError:
+        from ..wavelet import split_continuous_outliers
 import math
 from .base import BaseEvaluator
 from .registry import register_evaluator

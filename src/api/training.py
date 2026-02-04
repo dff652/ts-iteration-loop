@@ -11,6 +11,7 @@ import uuid
 from src.db.database import get_db, Task
 from src.models.schemas import (
     TrainingConfig, TrainingTaskRequest,
+    TrainingEvalRequest,
     TaskResponse, TaskStatus, ApiResponse
 )
 from src.adapters.chatts_training import ChatTSTrainingAdapter
@@ -98,7 +99,14 @@ async def start_training(
         get_adapter(request.model_family).run_training,
         task_id=task_id,
         config_name=request.config_name,
-        version_tag=request.version_tag
+        version_tag=request.version_tag,
+        auto_eval=request.auto_eval,
+        eval_truth_dir=request.eval_truth_dir,
+        eval_data_dir=request.eval_data_dir,
+        eval_dataset_name=request.eval_dataset_name,
+        eval_output_dir=request.eval_output_dir,
+        eval_device=request.eval_device,
+        eval_method=request.eval_method,
     )
     
     return TaskResponse(
@@ -227,5 +235,29 @@ async def get_model_loss_image(model_name: str, model_family: str = Query("chatt
         )
     except HTTPException:
         raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/evaluate", response_model=ApiResponse)
+async def evaluate_model(request: TrainingEvalRequest):
+    """手动触发模型评估（黄金集）"""
+    try:
+        from src.utils.model_eval import evaluate_model_on_golden
+        result = evaluate_model_on_golden(
+            model_path=request.model_path,
+            model_family=request.model_family,
+            truth_dir=request.truth_dir,
+            data_dir=request.data_dir,
+            dataset_name=request.dataset_name,
+            output_dir=request.output_dir,
+            device=request.device,
+            method=request.method,
+        )
+        return ApiResponse(
+            success=bool(result.get("success")),
+            data=result,
+            message="评估完成" if result.get("success") else (result.get("error") or "评估失败")
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

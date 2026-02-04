@@ -7,6 +7,7 @@ import json
 import subprocess
 import signal
 import sys
+import threading
 from pathlib import Path
 from typing import List, Dict, Optional
 
@@ -434,6 +435,13 @@ class ChatTSTrainingAdapter:
         task_id: str,
         config_name: str,
         version_tag: Optional[str] = None,
+        auto_eval: bool = False,
+        eval_truth_dir: Optional[str] = None,
+        eval_data_dir: Optional[str] = None,
+        eval_dataset_name: Optional[str] = None,
+        eval_output_dir: Optional[str] = None,
+        eval_device: Optional[str] = None,
+        eval_method: Optional[str] = None,
         # Overrides
         override_model_path: Optional[str] = None,
         override_dataset: Optional[str] = None,
@@ -620,8 +628,23 @@ class ChatTSTrainingAdapter:
             self._running_processes[task_id] = {
                 "process": process,
                 "log_file": str(log_file),
-                "file_handle": f_log
+                "file_handle": f_log,
+                "output_dir": str(output_dir),
+                "auto_eval": bool(auto_eval),
+                "auto_eval_status": "pending" if auto_eval else "disabled",
             }
+
+            if auto_eval:
+                self._schedule_auto_eval(
+                    task_id=task_id,
+                    model_path=str(output_dir),
+                    truth_dir=eval_truth_dir or settings.EVAL_GOLDEN_TRUTH_DIR,
+                    data_dir=eval_data_dir or settings.EVAL_GOLDEN_DATA_DIR,
+                    dataset_name=eval_dataset_name or settings.EVAL_DEFAULT_DATASET_NAME,
+                    output_dir=eval_output_dir or settings.EVAL_DEFAULT_OUTPUT_DIR,
+                    device=eval_device,
+                    method=eval_method,
+                )
             
             return {
                 "success": True,
@@ -631,6 +654,61 @@ class ChatTSTrainingAdapter:
             }
         except Exception as e:
              return {"success": False, "error": str(e)}
+
+    def _schedule_auto_eval(
+        self,
+        task_id: str,
+        model_path: str,
+        truth_dir: Optional[str],
+        data_dir: Optional[str],
+        dataset_name: str,
+        output_dir: Optional[str],
+        device: Optional[str],
+        method: Optional[str],
+    ) -> None:
+        if not truth_dir or not data_dir:
+            info = self._running_processes.get(task_id)
+            if info is not None:
+                info["auto_eval_status"] = "skipped_missing_paths"
+            return
+
+        def _watch_and_eval():
+            info = self._running_processes.get(task_id)
+            if not info:
+                return
+            process = info.get("process")
+            if not process:
+                return
+            process.wait()
+            f_handle = info.get("file_handle")
+            if f_handle:
+                try:
+                    f_handle.close()
+                except Exception:
+                    pass
+            if process.returncode != 0:
+                info["auto_eval_status"] = "skipped_failed_training"
+                return
+            try:
+                from src.utils.model_eval import evaluate_model_on_golden
+                info["auto_eval_status"] = "running"
+                result = evaluate_model_on_golden(
+                    model_path=model_path,
+                    model_family=self.model_family,
+                    truth_dir=truth_dir,
+                    data_dir=data_dir,
+                    dataset_name=dataset_name,
+                    output_dir=output_dir or None,
+                    device=device,
+                    method=method,
+                )
+                info["auto_eval_result"] = result
+                info["auto_eval_status"] = "completed" if result.get("success") else "failed"
+            except Exception as e:
+                info["auto_eval_status"] = f"failed: {e}"
+
+        t = threading.Thread(target=_watch_and_eval, daemon=True)
+        t.start()
 
     def get_training_log(self, task_id: str, offset: int = 0) -> Dict:
         """获取增量日志"""

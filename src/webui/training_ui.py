@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import List, Dict, Optional
 import json
 import time
+import uuid
 import pandas as pd
 import tempfile
 import os
@@ -17,10 +18,23 @@ from src.adapters.data_processing import DataProcessingAdapter
 from src.adapters.check_outlier import CheckOutlierAdapter
 from src.utils.iotdb_config import load_iotdb_config
 from src.utils.file_filters import is_inference_or_generated_csv, match_result_method
+from src.utils.model_eval import evaluate_model_on_golden
+from src.utils.plot_utils import generate_ts_thumbnail
 
 
 TRAINING_MODEL_FAMILIES = ["chatts", "qwen"]
 TRAINING_METHODS = ["all", "lora", "full"]
+
+# 算法 -> 默认基础模型路径映射
+ALGORITHM_DEFAULT_MODELS = {
+    "chatts": "/home/share/llm_models/bytedance-research/ChatTS-8B",
+    "qwen": "/home/share/models/Qwen3-VL-8B-train-8192_base",
+    "timer": "/home/share/llm_models/thuml/timer-base-84m",
+    "adtk_hbos": "",  # 不需要模型路径
+    "stl_wavelet": "",
+    "iforest": "",
+    "piecewise_linear": "",
+}
 
 # 初始化适配器
 chatts_adapter = ChatTSTrainingAdapter(model_family="chatts")
@@ -377,7 +391,10 @@ def _sorted_checkpoints(run_path: str) -> List[str]:
 
 
 def get_lora_run_choices(model_family: str) -> List[tuple]:
-    return get_trained_model_choices(model_family, model_type="lora", include_checkpoints=False)
+    """获取可用的 LoRA 训练任务列表，包含"无"选项"""
+    choices = get_trained_model_choices(model_family, model_type="lora", include_checkpoints=False)
+    # 添加 "无/不使用 LoRA" 选项，允许使用原始模型
+    return [("无 (使用原始模型)", "")] + choices
 
 
 def get_checkpoint_choices(run_path: str) -> List[tuple]:
@@ -450,6 +467,43 @@ def get_model_info(model_path: str, model_family: str) -> str:
         info_lines.append(f"**训练时长**: {train_results.get('train_runtime', 'N/A'):.1f}s")
     
     return "\n\n".join(info_lines)
+
+
+def run_model_evaluation_ui(
+    model_path: str,
+    model_family: str,
+    truth_dir: str,
+    data_dir: str,
+    dataset_name: str,
+    output_dir: str,
+    device: str,
+):
+    if not model_path:
+        return "❌ 请选择模型", {}
+    if not truth_dir or not data_dir:
+        return "❌ 请填写黄金集标注目录与数据目录", {}
+
+    res = evaluate_model_on_golden(
+        model_path=model_path,
+        model_family=model_family,
+        truth_dir=truth_dir,
+        data_dir=data_dir,
+        dataset_name=dataset_name or settings.EVAL_DEFAULT_DATASET_NAME,
+        output_dir=output_dir or None,
+        device=device or None,
+    )
+    if not res.get("success"):
+        return f"❌ 评估失败: {res.get('error')}", {}
+
+    summary = res.get("summary") or {}
+    summary.update({
+        "results_path": res.get("results_path"),
+        "results_csv": res.get("results_csv"),
+        "output_dir": res.get("output_dir"),
+        "skipped": len(res.get("skipped") or []),
+        "points": res.get("points"),
+    })
+    return "✅ 评估完成", summary
 
 
 def get_loss_plot(model_path: str, model_family: str):
@@ -713,14 +767,19 @@ def get_inference_models(model_family: str) -> List[tuple]:
     return get_lora_run_choices(model_family)
 
 def toggle_algo_params(algorithm: str):
-    """根据选择的算法切换参数组可见性"""
+    """根据选择的算法切换参数组可见性，并返回默认模型路径"""
     show_chatts = (algorithm == "chatts" or algorithm == "qwen")
     show_timer = (algorithm == "timer")
     show_adtk = (algorithm == "adtk_hbos")
+    
+    # 获取该算法的默认模型路径
+    default_model = ALGORITHM_DEFAULT_MODELS.get(algorithm, "")
+    
     return (
         gr.update(visible=show_chatts), 
         gr.update(visible=show_timer), 
-        gr.update(visible=show_adtk)
+        gr.update(visible=show_adtk),
+        gr.update(value=default_model),  # 更新 base_model_input
     )
 
 def start_inference_task(
@@ -758,6 +817,31 @@ def start_inference_task(
     if not files:
         yield "❌ 请选择输入文件", "❌ 请选择输入文件"
         return
+    
+    # 验证模型路径与算法是否匹配
+    if algorithm in ["chatts", "qwen"] and base_model_path:
+        expected_model = ALGORITHM_DEFAULT_MODELS.get(algorithm, "")
+        path_lower = base_model_path.lower()
+        
+        # 简单的关键词检查
+        if algorithm == "qwen" and "chatts" in path_lower:
+            yield (
+                "⚠️ 警告：选择了 Qwen 算法，但模型路径似乎是 ChatTS 模型。\n"
+                f"当前路径: {base_model_path}\n"
+                f"建议路径: {expected_model}\n"
+                "请确认模型路径是否正确，或点击算法下拉框重新选择以自动切换。",
+                "⚠️ 模型路径警告"
+            )
+            return
+        if algorithm == "chatts" and "qwen" in path_lower:
+            yield (
+                "⚠️ 警告：选择了 ChatTS 算法，但模型路径似乎是 Qwen 模型。\n"
+                f"当前路径: {base_model_path}\n"
+                f"建议路径: {expected_model}\n"
+                "请确认模型路径是否正确，或点击算法下拉框重新选择以自动切换。",
+                "⚠️ 模型路径警告"
+            )
+            return
     
     # 将选中的文件名转换为完整路径（使用统一数据源映射）
     file_paths = resolve_filenames_to_paths(files)
@@ -834,6 +918,7 @@ def start_inference_task(
             "chatts_load_in_4bit": load_in_4bit,
             "chatts_prompt_template": prompt_template,
             "chatts_max_new_tokens": max_new_tokens,
+            "qwen_max_new_tokens": max_new_tokens,
             "chatts_device": chatts_device,
             "chatts_use_cache": chatts_use_cache,
             # Timer
@@ -951,8 +1036,35 @@ def start_inference_task(
         except Exception as e:
             print(f"[Auto-Link Error] Failed to link results: {e}")
         
+        # 读取并汇总评分信息
+        score_summary = ""
+        for gen_file in generated_files:
+            try:
+                gen_path = Path(gen_file)
+                # 尝试查找 metrics.json 文件
+                metrics_path = gen_path.parent / f"{gen_path.stem}_metrics.json"
+                if not metrics_path.exists():
+                    # 尝试在推理输出目录中查找
+                    metrics_path = RESULTS_BASE_PATH / algorithm / f"{gen_path.stem}_metrics.json"
+                
+                if metrics_path.exists():
+                    with open(metrics_path, "r", encoding="utf-8") as f:
+                        metrics = json.load(f)
+                    summary = metrics.get("summary", {})
+                    point_name = metrics.get("point_name", gen_path.stem)
+                    score_summary += f"\n📊 **{point_name}** 评分:\n"
+                    score_summary += f"   - 平均分 (score_avg): {summary.get('score_avg', 0):.4f}\n"
+                    score_summary += f"   - 最高分 (score_max): {summary.get('score_max', 0):.4f}\n"
+                    score_summary += f"   - 异常段数: {summary.get('segment_count', 0)}\n"
+            except Exception as score_err:
+                print(f"[Score Summary] Failed to read metrics for {gen_file}: {score_err}")
+        
+        final_log = accumulated_log + "\n✅ 所有任务已完成"
+        if score_summary:
+            final_log += "\n\n---\n### 📈 评分摘要" + score_summary
+        
         yield (
-            format_log_html(accumulated_log + "\n✅ 所有任务已完成"), 
+            format_log_html(final_log), 
             "✅ 任务完成",
              gr.update(visible=False),
              gr.update(visible=True),
@@ -1241,7 +1353,8 @@ def create_training_ui() -> gr.Blocks:
                             label="LoRA 模型类型 (Model Family)",
                             choices=TRAINING_MODEL_FAMILIES,
                             value="chatts",
-                            interactive=True
+                            interactive=True,
+                            visible=False  # 隐藏：自动跟随算法选择
                         )
                         lora_run_select = gr.Dropdown(
                             label="LoRA 适配器 (训练任务)",
@@ -1522,11 +1635,11 @@ def create_training_ui() -> gr.Blocks:
                 outputs=[history_download_files, operation_status]
             )
             
-            # 算法切换事件：控制参数组显示
+            # 算法切换事件：控制参数组显示 + 切换默认模型路径
             algo_dropdown.change(
                 fn=toggle_algo_params,
                 inputs=algo_dropdown,
-                outputs=[chatts_group, timer_group, adtk_group]
+                outputs=[chatts_group, timer_group, adtk_group, base_model_input]
             )
 
             algo_dropdown.change(
@@ -2166,6 +2279,631 @@ def create_training_ui() -> gr.Blocks:
                         inputs=train_mgr_dir,
                         outputs=train_mgr_list
                     )
+
+                # 2.5 降采样数据预览
+                with gr.Tab("降采样数据 (Downsampled)"):
+                    gr.Markdown("### 📉 降采样数据预览 (CSV + 曲线)")
+                    with gr.Row():
+                        with gr.Column(scale=1):
+                            ds_preview_dropdown = gr.Dropdown(
+                                label="选择数据集",
+                                choices=get_dataset_names(),
+                                interactive=True
+                            )
+                            ds_refresh_btn = gr.Button("🔄 刷新列表", size="sm")
+                            ds_column_selector = gr.CheckboxGroup(
+                                label="Select columns to plot",
+                                choices=[],
+                                interactive=True
+                            )
+                        with gr.Column(scale=2):
+                            ds_preview_plot = gr.Image(label="Curve Preview", height=350)
+
+                    with gr.Accordion("📋 Data Table (first 5000 rows)", open=False):
+                        ds_preview_table = gr.Dataframe(label="", interactive=False)
+
+                    ds_refresh_btn.click(
+                        fn=lambda: gr.Dropdown(choices=get_dataset_names(), value=None),
+                        outputs=ds_preview_dropdown
+                    )
+                    ds_preview_dropdown.change(
+                        fn=preview_dataset,
+                        inputs=ds_preview_dropdown,
+                        outputs=[ds_preview_table, ds_column_selector, ds_preview_plot]
+                    )
+                    ds_column_selector.change(
+                        fn=update_plot_from_selection,
+                        inputs=[ds_preview_dropdown, ds_column_selector],
+                        outputs=ds_preview_plot
+                    )
+
+                # 3. 数据集构建
+                with gr.Tab("数据集构建 (Train / Golden)"):
+                    gr.Markdown("### 📦 数据集构建 (点位级)")
+                    with gr.Row():
+                        with gr.Column(scale=2):
+                            dataset_type = gr.Dropdown(
+                                label="数据集类型",
+                                choices=["train", "golden"],
+                                value="train",
+                                interactive=True
+                            )
+                            dataset_name = gr.Textbox(
+                                label="数据集名称",
+                                placeholder="例如: train_v1 / golden_100"
+                            )
+                            dataset_note = gr.Textbox(
+                                label="备注 (可选)",
+                                placeholder="筛选条件 / 备注说明",
+                                lines=2
+                            )
+                            only_annotated = gr.Checkbox(
+                                label="仅显示已标注点位",
+                                value=False
+                            )
+                            point_filter = gr.Textbox(
+                                label="点位筛选 (包含)",
+                                placeholder="输入关键字过滤点位"
+                            )
+                            refresh_points_btn = gr.Button("🔄 刷新点位列表")
+                            points_selector = gr.CheckboxGroup(
+                                label="点位列表 (手动勾选)",
+                                choices=[],
+                            )
+                            clear_points_btn = gr.Button("🧹 清空选择")
+                        with gr.Column(scale=1):
+                            gr.Markdown("#### 半自动抽样 (基于推理置信度)")
+                            sample_strategy = gr.Dropdown(
+                                label="策略",
+                                choices=["topk", "low_score", "random"],
+                                value="topk"
+                            )
+                            sample_score_by = gr.Dropdown(
+                                label="置信度字段",
+                                choices=["score_avg", "score_max"],
+                                value="score_avg"
+                            )
+                            sample_limit = gr.Number(
+                                label="K",
+                                value=50
+                            )
+                            sample_min_score = gr.Number(
+                                label="min_score",
+                                value=None
+                            )
+                            sample_max_score = gr.Number(
+                                label="max_score",
+                                value=None
+                            )
+                            sample_method = gr.Dropdown(
+                                label="method (可选)",
+                                choices=["", "chatts", "qwen", "timer", "adtk_hbos", "ensemble"],
+                                value=""
+                            )
+                            sample_btn = gr.Button("🎯 生成候选")
+                            candidate_view = gr.Dataframe(
+                                label="候选点位（含评分）",
+                                headers=["点位", "平均分", "最高分", "异常段数", "方法"],
+                                row_count=5,
+                                col_count=5,
+                                interactive=False
+                            )
+                            add_candidates_btn = gr.Button("➕ 加入选择")
+                    with gr.Row():
+                        with gr.Column(scale=2):
+                            allow_overwrite = gr.Checkbox(
+                                label="允许覆盖同名数据集",
+                                value=False
+                            )
+                            freeze_dataset = gr.Checkbox(
+                                label="冻结数据集 (黄金集自动冻结)",
+                                value=False
+                            )
+                        with gr.Column(scale=1):
+                            build_btn = gr.Button("✅ 保存数据集", variant="primary")
+                            build_status = gr.Textbox(label="构建状态", interactive=False)
+
+                    gr.Markdown("### 已构建数据集")
+                    with gr.Row():
+                        with gr.Column(scale=2):
+                            dataset_list = gr.Dropdown(
+                                label="数据集列表",
+                                choices=[],
+                                interactive=True
+                            )
+                            refresh_dataset_btn = gr.Button("🔄 刷新数据集")
+                            dataset_detail = gr.JSON(label="数据集详情")
+                        with gr.Column(scale=1):
+                            load_dataset_btn = gr.Button("⬇️ 加载到选择")
+                            freeze_btn = gr.Button("🧊 冻结")
+                            force_delete = gr.Checkbox(label="强制删除冻结集", value=False)
+                            delete_btn = gr.Button("🗑️ 删除", variant="stop")
+                            dataset_op_status = gr.Textbox(label="操作状态", interactive=False)
+
+                    gr.Markdown("### 训练集导出 (JSONL)")
+                    with gr.Row():
+                        with gr.Column(scale=2):
+                            export_family = gr.Dropdown(
+                                label="模型类型",
+                                choices=TRAINING_MODEL_FAMILIES,
+                                value="chatts",
+                                interactive=True
+                            )
+                            export_output_name = gr.Textbox(
+                                label="输出文件名 (不含扩展名)",
+                                placeholder="留空默认使用数据集名称"
+                            )
+                            export_approved_only = gr.Checkbox(
+                                label="仅导出已审核通过 (approved)",
+                                value=True
+                            )
+                        with gr.Column(scale=1):
+                            export_btn = gr.Button("📤 导出训练数据", variant="primary")
+                            export_status = gr.Textbox(label="导出状态", interactive=False)
+
+                    def _normalize_point_name(raw: str) -> str:
+                        name = Path(raw).stem
+                        if name.endswith("_ds"):
+                            name = name[:-3]
+                        return name
+
+                    def _list_annotated_points() -> set:
+                        ann_dir = Path(settings.ANNOTATIONS_ROOT) / settings.DEFAULT_USER
+                        if not ann_dir.exists():
+                            return set()
+                        points = set()
+                        for f in ann_dir.glob("*.json"):
+                            try:
+                                with open(f, "r", encoding="utf-8") as fp:
+                                    data = json.load(fp)
+                                filename = data.get("filename") or f.stem
+                            except Exception:
+                                filename = f.stem
+                            filename = str(filename).replace(".csv", "").replace(".json", "")
+                            points.add(_normalize_point_name(filename))
+                        return points
+
+                    def _list_all_points(only_ann: bool, keyword: str) -> List[str]:
+                        rows = data_adapter.list_datasets()
+                        points = [_normalize_point_name(r["filename"]) for r in rows]
+                        points = sorted(set(points))
+                        if only_ann:
+                            ann_points = _list_annotated_points()
+                            points = [p for p in points if p in ann_points]
+                        if keyword:
+                            kw = keyword.strip().lower()
+                            if kw:
+                                points = [p for p in points if kw in p.lower()]
+                        return points
+
+                    def refresh_point_choices(only_ann: bool, keyword: str, current_selected: List[str]):
+                        points = _list_all_points(only_ann, keyword)
+                        selected = [p for p in (current_selected or []) if p in points]
+                        return gr.CheckboxGroup(choices=points, value=selected)
+
+                    def sample_candidate_points(strategy, limit, score_by, min_score, max_score, method):
+                        try:
+                            from src.db.database import SessionLocal, InferenceResult, init_db
+                            from sqlalchemy.sql import func as sa_func
+                            init_db()
+                            db = SessionLocal()
+                            query = db.query(InferenceResult)
+                            if method:
+                                query = query.filter(InferenceResult.method == method)
+                            score_col = (InferenceResult.score_avg
+                                         if (score_by or "score_avg") in {"score_avg", "avg", "mean"}
+                                         else InferenceResult.score_max)
+                            if min_score is not None:
+                                query = query.filter(score_col >= float(min_score))
+                            if max_score is not None:
+                                query = query.filter(score_col <= float(max_score))
+                            strat = (strategy or "topk").lower()
+                            if strat == "low_score":
+                                query = query.order_by(score_col.asc())
+                            elif strat == "random":
+                                query = query.order_by(sa_func.random())
+                            else:
+                                query = query.order_by(score_col.desc())
+                            if limit and int(limit) > 0:
+                                query = query.limit(int(limit))
+                            rows = query.all()
+                            # 返回包含分数的详细信息
+                            seen = set()
+                            result = []
+                            for r in rows:
+                                if r.point_name and r.point_name not in seen:
+                                    seen.add(r.point_name)
+                                    result.append({
+                                        "点位": r.point_name,
+                                        "平均分": round(r.score_avg or 0, 4),
+                                        "最高分": round(r.score_max or 0, 4),
+                                        "异常段数": r.segment_count or 0,
+                                        "方法": r.method or ""
+                                    })
+                            return result
+                        except Exception as e:
+                            return [{"error": str(e)}]
+                        finally:
+                            try:
+                                db.close()
+                            except Exception:
+                                pass
+
+                    def add_candidates_to_selection(candidates, selected):
+                        # 处理新格式（包含分数的字典列表）
+                        if isinstance(candidates, list):
+                            if candidates and isinstance(candidates[0], dict):
+                                # 新格式：从字典中提取点位名称
+                                if candidates[0].get("error"):
+                                    return selected
+                                cand_list = [c.get("点位") for c in candidates if c.get("点位")]
+                            else:
+                                # 旧格式：直接是点位名称列表
+                                cand_list = candidates
+                        else:
+                            cand_list = []
+                        merged = sorted(set((selected or []) + cand_list))
+                        return merged
+
+                    def clear_selection():
+                        return []
+
+                    def _list_dataset_assets():
+                        try:
+                            from src.db.database import SessionLocal, DatasetAsset, init_db
+                            init_db()
+                            db = SessionLocal()
+                            rows = db.query(DatasetAsset).order_by(DatasetAsset.created_at.desc()).all()
+                            items = []
+                            for r in rows:
+                                items.append({
+                                    "id": r.id,
+                                    "name": r.name,
+                                    "type": r.dataset_type,
+                                    "status": r.status,
+                                    "points": r.point_count,
+                                    "created_at": r.created_at.isoformat() if r.created_at else None,
+                                })
+                            return items
+                        except Exception:
+                            return []
+                        finally:
+                            try:
+                                db.close()
+                            except Exception:
+                                pass
+
+                    def refresh_dataset_list():
+                        items = _list_dataset_assets()
+                        choices = [(f"{i['name']} ({i['type']}/{i['status']}, {i['points']} pts)", i["id"]) for i in items]
+                        return gr.Dropdown(choices=choices)
+
+                    def load_dataset_detail(dataset_id: str):
+                        if not dataset_id:
+                            return {}
+                        try:
+                            from src.db.database import SessionLocal, DatasetAsset, DatasetItem, init_db
+                            init_db()
+                            db = SessionLocal()
+                            asset = db.query(DatasetAsset).filter(DatasetAsset.id == dataset_id).first()
+                            if not asset:
+                                return {}
+                            points = db.query(DatasetItem.point_name).filter(DatasetItem.dataset_id == dataset_id).all()
+                            meta = {}
+                            if asset.meta:
+                                try:
+                                    meta = json.loads(asset.meta)
+                                except Exception:
+                                    meta = {"raw": asset.meta}
+                            return {
+                                "id": asset.id,
+                                "name": asset.name,
+                                "type": asset.dataset_type,
+                                "status": asset.status,
+                                "points": [p[0] for p in points],
+                                "meta": meta,
+                            }
+                        except Exception as e:
+                            return {"error": str(e)}
+                        finally:
+                            try:
+                                db.close()
+                            except Exception:
+                                pass
+
+                    def load_dataset_into_selection(dataset_id: str):
+                        detail = load_dataset_detail(dataset_id)
+                        if not detail or detail.get("error"):
+                            return gr.Dropdown(), gr.CheckboxGroup(), "❌ 加载失败"
+                        return (
+                            gr.Dropdown(value=detail.get("type")),
+                            gr.CheckboxGroup(value=detail.get("points", [])),
+                            f"✅ 已加载 {len(detail.get('points', []))} 个点位"
+                        )
+
+                    def save_dataset(
+                        ds_type: str,
+                        ds_name: str,
+                        note: str,
+                        selected_points: List[str],
+                        allow_overwrite_val: bool,
+                        freeze_val: bool,
+                    ):
+                        if not ds_name:
+                            return "❌ 数据集名称不能为空"
+                        if not selected_points:
+                            return "❌ 至少选择 1 个点位"
+                        ds_type = (ds_type or "train").lower()
+                        status = "frozen" if (ds_type == "golden" or freeze_val) else "draft"
+                        try:
+                            from src.db.database import SessionLocal, DatasetAsset, DatasetItem, init_db
+                            init_db()
+                            db = SessionLocal()
+
+                            # overlap check
+                            other_type = "golden" if ds_type == "train" else "train"
+                            other_items = db.query(DatasetItem.point_name).join(
+                                DatasetAsset, DatasetItem.dataset_id == DatasetAsset.id
+                            ).filter(DatasetAsset.dataset_type == other_type).all()
+                            other_points = {p[0] for p in other_items}
+                            overlap = sorted(set(selected_points) & other_points)
+                            if overlap:
+                                return f"❌ 与 {other_type} 集重叠: {', '.join(overlap[:20])}"
+
+                            asset = db.query(DatasetAsset).filter(DatasetAsset.name == ds_name).first()
+                            if asset and asset.status == "frozen":
+                                return "❌ 数据集已冻结，无法修改"
+                            if asset and asset.dataset_type != ds_type:
+                                return "❌ 同名数据集类型不一致，请更换名称"
+                            if asset and not allow_overwrite_val:
+                                return "❌ 同名数据集已存在，勾选允许覆盖"
+
+                            if not asset:
+                                asset = DatasetAsset(
+                                    id=str(uuid.uuid4()),
+                                    name=ds_name,
+                                    dataset_type=ds_type,
+                                    status=status,
+                                    point_count=len(selected_points),
+                                    meta=json.dumps({"note": note or ""}, ensure_ascii=False),
+                                )
+                                db.add(asset)
+                            else:
+                                asset.dataset_type = ds_type
+                                asset.status = status
+                                asset.point_count = len(selected_points)
+                                asset.meta = json.dumps({"note": note or ""}, ensure_ascii=False)
+                                db.query(DatasetItem).filter(DatasetItem.dataset_id == asset.id).delete()
+
+                            for p in selected_points:
+                                db.add(DatasetItem(dataset_id=asset.id, point_name=p))
+                            db.commit()
+                            return f"✅ 已保存 {ds_name} ({ds_type}, {len(selected_points)} pts, {status})"
+                        except Exception as e:
+                            try:
+                                db.rollback()
+                            except Exception:
+                                pass
+                            return f"❌ 保存失败: {e}"
+                        finally:
+                            try:
+                                db.close()
+                            except Exception:
+                                pass
+
+                    def freeze_dataset_asset(dataset_id: str):
+                        if not dataset_id:
+                            return "❌ 未选择数据集"
+                        try:
+                            from src.db.database import SessionLocal, DatasetAsset, init_db
+                            init_db()
+                            db = SessionLocal()
+                            asset = db.query(DatasetAsset).filter(DatasetAsset.id == dataset_id).first()
+                            if not asset:
+                                return "❌ 数据集不存在"
+                            asset.status = "frozen"
+                            db.commit()
+                            return "✅ 已冻结"
+                        except Exception as e:
+                            try:
+                                db.rollback()
+                            except Exception:
+                                pass
+                            return f"❌ 冻结失败: {e}"
+                        finally:
+                            try:
+                                db.close()
+                            except Exception:
+                                pass
+
+                    def delete_dataset_asset(dataset_id: str, force: bool):
+                        if not dataset_id:
+                            return "❌ 未选择数据集"
+                        try:
+                            from src.db.database import SessionLocal, DatasetAsset, DatasetItem, init_db
+                            init_db()
+                            db = SessionLocal()
+                            asset = db.query(DatasetAsset).filter(DatasetAsset.id == dataset_id).first()
+                            if not asset:
+                                return "❌ 数据集不存在"
+                            if asset.status == "frozen" and not force:
+                                return "❌ 已冻结，需勾选强制删除"
+                            db.query(DatasetItem).filter(DatasetItem.dataset_id == dataset_id).delete()
+                            db.delete(asset)
+                            db.commit()
+                            return "✅ 已删除"
+                        except Exception as e:
+                            try:
+                                db.rollback()
+                            except Exception:
+                                pass
+                            return f"❌ 删除失败: {e}"
+                        finally:
+                            try:
+                                db.close()
+                            except Exception:
+                                pass
+
+                    # Bindings
+                    refresh_points_btn.click(
+                        fn=refresh_point_choices,
+                        inputs=[only_annotated, point_filter, points_selector],
+                        outputs=points_selector
+                    )
+                    point_filter.change(
+                        fn=refresh_point_choices,
+                        inputs=[only_annotated, point_filter, points_selector],
+                        outputs=points_selector
+                    )
+                    only_annotated.change(
+                        fn=refresh_point_choices,
+                        inputs=[only_annotated, point_filter, points_selector],
+                        outputs=points_selector
+                    )
+                    clear_points_btn.click(fn=clear_selection, outputs=points_selector)
+
+                    sample_btn.click(
+                        fn=sample_candidate_points,
+                        inputs=[sample_strategy, sample_limit, sample_score_by, sample_min_score, sample_max_score, sample_method],
+                        outputs=candidate_view
+                    )
+                    add_candidates_btn.click(
+                        fn=add_candidates_to_selection,
+                        inputs=[candidate_view, points_selector],
+                        outputs=points_selector
+                    )
+                    build_btn.click(
+                        fn=save_dataset,
+                        inputs=[dataset_type, dataset_name, dataset_note, points_selector, allow_overwrite, freeze_dataset],
+                        outputs=build_status
+                    ).then(
+                        fn=refresh_dataset_list,
+                        outputs=dataset_list
+                    )
+
+                    dataset_list.change(
+                        fn=load_dataset_detail,
+                        inputs=dataset_list,
+                        outputs=dataset_detail
+                    )
+                    refresh_dataset_btn.click(
+                        fn=refresh_dataset_list,
+                        outputs=dataset_list
+                    )
+                    load_dataset_btn.click(
+                        fn=load_dataset_into_selection,
+                        inputs=dataset_list,
+                        outputs=[dataset_type, points_selector, build_status]
+                    )
+                    freeze_btn.click(
+                        fn=freeze_dataset_asset,
+                        inputs=dataset_list,
+                        outputs=dataset_op_status
+                    ).then(
+                        fn=refresh_dataset_list,
+                        outputs=dataset_list
+                    )
+                    delete_btn.click(
+                        fn=delete_dataset_asset,
+                        inputs=[dataset_list, force_delete],
+                        outputs=dataset_op_status
+                    ).then(
+                        fn=refresh_dataset_list,
+                        outputs=dataset_list
+                    )
+
+                    def export_training_dataset(dataset_id: str, model_family: str, output_name: str, approved_only: bool):
+                        db = None
+                        if not dataset_id:
+                            return "❌ 未选择数据集"
+                        try:
+                            from src.db.database import SessionLocal, DatasetAsset, DatasetItem, ReviewQueue, init_db
+                            import tempfile
+                            init_db()
+                            db = SessionLocal()
+                            asset = db.query(DatasetAsset).filter(DatasetAsset.id == dataset_id).first()
+                            if not asset:
+                                return "❌ 数据集不存在"
+                            if asset.dataset_type != "train":
+                                return "❌ 仅允许导出 train 数据集"
+
+                            points = db.query(DatasetItem.point_name).filter(DatasetItem.dataset_id == dataset_id).all()
+                            point_set = {str(p[0]) for p in points}
+                            if not point_set:
+                                return "❌ 数据集为空"
+
+                            approved_set = None
+                            if approved_only:
+                                rows = db.query(ReviewQueue.source_id).filter(
+                                    ReviewQueue.source_type == 'annotation',
+                                    ReviewQueue.status == 'approved'
+                                ).all()
+                                approved_set = {str(r[0]).replace('.csv', '').replace('.json', '') for r in rows}
+
+                            ann_dir = Path(settings.ANNOTATIONS_ROOT) / settings.DEFAULT_USER
+                            if not ann_dir.exists():
+                                return "❌ 标注目录不存在"
+
+                            with tempfile.TemporaryDirectory() as tmpdir:
+                                tmp_path = Path(tmpdir)
+                                selected = 0
+                                for json_file in ann_dir.glob("*.json"):
+                                    try:
+                                        payload = json.loads(json_file.read_text(encoding="utf-8"))
+                                    except Exception:
+                                        continue
+
+                                    filename = payload.get('filename') or json_file.stem
+                                    normalized = str(filename).replace('.csv', '').replace('.json', '')
+                                    if normalized not in point_set:
+                                        continue
+                                    if approved_set is not None and normalized not in approved_set:
+                                        continue
+
+                                    out_name = json_file.name if json_file.name.endswith('.json') else f"{json_file.stem}.json"
+                                    (tmp_path / out_name).write_text(
+                                        json.dumps(payload, ensure_ascii=False, indent=2),
+                                        encoding="utf-8"
+                                    )
+                                    selected += 1
+
+                                if selected == 0:
+                                    return "❌ 未匹配到可导出的标注"
+
+                                output_base = output_name.strip() if output_name else asset.name
+                                out_dir = (settings.DATA_TRAINING_QWEN_DIR
+                                           if model_family == "qwen"
+                                           else settings.DATA_TRAINING_CHATTS_DIR)
+                                out_path = Path(out_dir) / f"{output_base}.jsonl"
+
+                                result = data_adapter.convert_annotations(
+                                    input_dir=str(tmp_path),
+                                    output_path=str(out_path),
+                                    image_dir=settings.DATA_IMAGES_DIR,
+                                    model_family=model_family,
+                                    csv_src_dir=settings.DATA_DOWNSAMPLED_DIR,
+                                )
+
+                            if not result.get("success"):
+                                return f"❌ 导出失败: {result.get('error') or result.get('stderr')}"
+
+                            # refresh dataset_info.json
+                            get_training_adapter(model_family).get_dataset_list()
+                            return f"✅ 导出完成: {result.get('output_path')}"
+                        except Exception as e:
+                            return f"❌ 导出失败: {e}"
+                        finally:
+                            try:
+                                if db:
+                                    db.close()
+                            except Exception:
+                                pass
+
+                    export_btn.click(
+                        fn=export_training_dataset,
+                        inputs=[dataset_list, export_family, export_output_name, export_approved_only],
+                        outputs=export_status
+                    )
         
         # ==================== 微调训练 Tab (原有) ====================
         with gr.Tab("🎯 开始训练"):
@@ -2349,6 +3087,36 @@ def create_training_ui() -> gr.Blocks:
                                 label="freeze_trainable_modules (可选)",
                                 placeholder="如: all"
                             )
+
+                    with gr.Accordion("评估设置 (黄金集)", open=False):
+                        auto_eval = gr.Checkbox(
+                            label="训练完成后自动评估",
+                            value=False
+                        )
+                        eval_truth_dir = gr.Textbox(
+                            label="黄金标注目录 (truth_dir)",
+                            value=settings.EVAL_GOLDEN_TRUTH_DIR,
+                            placeholder="例如: /path/to/ground_truth"
+                        )
+                        eval_data_dir = gr.Textbox(
+                            label="黄金数据目录 (data_dir)",
+                            value=settings.EVAL_GOLDEN_DATA_DIR,
+                            placeholder="例如: /path/to/data"
+                        )
+                        eval_dataset_name = gr.Textbox(
+                            label="数据集名称",
+                            value=settings.EVAL_DEFAULT_DATASET_NAME,
+                            placeholder="例如: golden_100"
+                        )
+                        eval_output_dir = gr.Textbox(
+                            label="评估输出目录 (可选)",
+                            value=settings.EVAL_DEFAULT_OUTPUT_DIR,
+                            placeholder="留空则写入模型目录/eval_outputs"
+                        )
+                        eval_device = gr.Textbox(
+                            label="评估设备 (可选)",
+                            placeholder="例如: cuda:0 或 cpu"
+                        )
                     
                     # 控制按钮
                     # --- Backend Functions ---
@@ -2394,7 +3162,8 @@ def create_training_ui() -> gr.Blocks:
                         model_family, config_name, lr, epochs, batch_size, rank, alpha, output_name,
                         model_path, dataset_name, nproc, cuda_devices, grad_accum, prec, cutoff,
                         img_max, img_min, extra_args, log_steps, save_steps, lr_sched, warm_steps,
-                        warm_ratio, lora_drop, lora_tgt, freeze_vision, freeze_proj, freeze_layers, freeze_modules
+                        warm_ratio, lora_drop, lora_tgt, freeze_vision, freeze_proj, freeze_layers, freeze_modules,
+                        auto_eval_enabled, eval_truth, eval_data, eval_dataset, eval_output, eval_device_val
                     ):
                         if not config_name:
                             return "❌ 请选择训练模板", "", model_family
@@ -2417,6 +3186,11 @@ def create_training_ui() -> gr.Blocks:
                         freeze_proj = (freeze_proj or "").strip() or None
                         freeze_layers = (freeze_layers or "").strip() or None
                         freeze_modules = (freeze_modules or "").strip() or None
+                        eval_truth = (eval_truth or "").strip() or None
+                        eval_data = (eval_data or "").strip() or None
+                        eval_dataset = (eval_dataset or "").strip() or None
+                        eval_output = (eval_output or "").strip() or None
+                        eval_device_val = (eval_device_val or "").strip() or None
 
                         # Call backend
                         overrides = {
@@ -2448,7 +3222,18 @@ def create_training_ui() -> gr.Blocks:
                             "override_freeze_trainable_modules": freeze_modules
                         }
                         
-                        res = local_adapter.run_training(task_id, config_name, version_tag=output_name, **overrides)
+                        res = local_adapter.run_training(
+                            task_id,
+                            config_name,
+                            version_tag=output_name,
+                            auto_eval=auto_eval_enabled,
+                            eval_truth_dir=eval_truth,
+                            eval_data_dir=eval_data,
+                            eval_dataset_name=eval_dataset,
+                            eval_output_dir=eval_output,
+                            eval_device=eval_device_val,
+                            **overrides,
+                        )
                         
                         if res.get("success"):
                             return f"✅ 训练任务已成功启动!\n任务ID: {task_id}\n输出目录: {res.get('output_dir')}\n\n正在后台运行中... 请留意下方实时日志。", task_id, model_family
@@ -2512,7 +3297,8 @@ def create_training_ui() -> gr.Blocks:
                                 cutoff_len, image_max_pixels, image_min_pixels, extra_args,
                                 logging_steps, save_steps, lr_scheduler_type, warmup_steps,
                                 warmup_ratio, lora_dropout, lora_target, freeze_vision_tower,
-                                freeze_multi_modal_projector, freeze_trainable_layers, freeze_trainable_modules
+                                freeze_multi_modal_projector, freeze_trainable_layers, freeze_trainable_modules,
+                                auto_eval, eval_truth_dir, eval_data_dir, eval_dataset_name, eval_output_dir, eval_device
                             ],
                             outputs=[output_box, task_id_state, task_family_state],
                             queue=False
@@ -2626,6 +3412,31 @@ def create_training_ui() -> gr.Blocks:
                     
                     gr.Markdown("### Loss 曲线")
                     loss_image = gr.Image(label="Training Loss", type="filepath")
+
+                    gr.Markdown("### 模型评估 (黄金集)")
+                    eval_status = gr.Textbox(label="评估状态", lines=2)
+                    eval_summary = gr.JSON(label="评估摘要")
+                    eval_truth_dir_ui = gr.Textbox(
+                        label="黄金标注目录 (truth_dir)",
+                        value=settings.EVAL_GOLDEN_TRUTH_DIR,
+                    )
+                    eval_data_dir_ui = gr.Textbox(
+                        label="黄金数据目录 (data_dir)",
+                        value=settings.EVAL_GOLDEN_DATA_DIR,
+                    )
+                    eval_dataset_name_ui = gr.Textbox(
+                        label="数据集名称",
+                        value=settings.EVAL_DEFAULT_DATASET_NAME,
+                    )
+                    eval_output_dir_ui = gr.Textbox(
+                        label="评估输出目录 (可选)",
+                        value=settings.EVAL_DEFAULT_OUTPUT_DIR,
+                    )
+                    eval_device_ui = gr.Textbox(
+                        label="评估设备 (可选)",
+                        placeholder="例如: cuda:0 或 cpu"
+                    )
+                    eval_btn = gr.Button("✅ 运行评估", variant="primary")
             
             # 事件绑定
             model_dropdown.change(
@@ -2637,6 +3448,19 @@ def create_training_ui() -> gr.Blocks:
                 fn=get_loss_plot,
                 inputs=[model_dropdown, model_family_view],
                 outputs=loss_image
+            )
+            eval_btn.click(
+                fn=run_model_evaluation_ui,
+                inputs=[
+                    model_dropdown,
+                    model_family_view,
+                    eval_truth_dir_ui,
+                    eval_data_dir_ui,
+                    eval_dataset_name_ui,
+                    eval_output_dir_ui,
+                    eval_device_ui,
+                ],
+                outputs=[eval_status, eval_summary],
             )
             refresh_models_btn.click(
                 fn=lambda mf, mt, ck: gr.Dropdown(choices=get_trained_model_choices(mf, mt, ck)),

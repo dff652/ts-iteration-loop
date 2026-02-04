@@ -94,8 +94,8 @@ def get_timer_detect():
 
 # 引入 Qwen 检测方法
 def get_qwen_detect():
-    from qwen_detect import qwen_detect
-    return qwen_detect
+    from qwen_detect import qwen_detect, QwenInferenceError
+    return qwen_detect, QwenInferenceError
 
 from config import load_args, save_args_to_file
 
@@ -888,8 +888,9 @@ def _finalize_inference_outputs(raw_series, mask, save_info, args, sensor_info, 
             args,
             position_index=position_index,
         )
-        task_id = getattr(args, "task_id", None)
-        _write_inference_to_db(task_id, save_info, eval_result, args, sensor_info)
+        if not getattr(args, "skip_db", False):
+            task_id = getattr(args, "task_id", None)
+            _write_inference_to_db(task_id, save_info, eval_result, args, sensor_info)
     except Exception as e:
         logging.warning(f"Finalize outputs failed: {e}")
 
@@ -988,22 +989,45 @@ def process_sensor(sensor_info, args):
                     # 如果没有时间列，尝试使用推断频率或生成索引
                     print("Warning: No time column found, using auto-generated index")
                 
-                # 如果指定了列名但不在数据中，尝试使用第一列
+                # 如果指定了列名但不在数据中，或非数值列，则尝试使用数值列
                 # 注意：保留原始 column（点位名）用于文件命名，使用 data_column 读取数据
                 original_point_name = column  # 保留原始点位名
                 data_column = column  # 实际读取数据的列名
-                
-                if column not in raw_data.columns and not raw_data.empty:
-                    # 排除时间列（如果它是列而不是索引）
-                    numeric_cols = raw_data.select_dtypes(include=[np.number]).columns
-                    if len(numeric_cols) > 0:
-                        print(f"Column '{column}' not found in CSV, using '{numeric_cols[0]}' for data")
+
+                if not raw_data.empty:
+                    numeric_cols = raw_data.select_dtypes(include=[np.number]).columns.tolist()
+
+                    def _is_time_like(col_name: str) -> bool:
+                        name = str(col_name).strip().lower()
+                        if name in {"time", "date", "datetime", "timestamp", "ts"}:
+                            return True
+                        if "time" in name or "date" in name:
+                            return True
+                        return False
+
+                    needs_fallback = False
+                    if column not in raw_data.columns:
+                        needs_fallback = True
+                    elif column in raw_data.columns and column not in numeric_cols:
+                        print(f"Column '{column}' is not numeric, will fallback to numeric column")
+                        needs_fallback = True
+
+                    if needs_fallback:
+                        if not numeric_cols:
+                            raise ValueError(f"No numeric columns found in CSV: {args.input}")
+
+                        # Prefer 'value' if present, otherwise prefer non-time-like numeric columns
+                        if "value" in numeric_cols:
+                            picked = "value"
+                        else:
+                            non_time = [c for c in numeric_cols if not _is_time_like(c)]
+                            picked = non_time[0] if non_time else numeric_cols[0]
+
+                        print(f"Column '{column}' not found or invalid, using '{picked}' for data")
                         print(f"Keeping original point name '{original_point_name}' for result filename")
-                        data_column = numeric_cols[0]
                         # 重命名列以统一处理
-                        raw_data = raw_data.rename(columns={data_column: original_point_name})
+                        raw_data = raw_data.rename(columns={picked: original_point_name})
                         data_column = original_point_name
-                        # sensor_info 保持不变，使用原始点位名
             
             except Exception as e:
                 print(f"Error reading CSV: {e}")
@@ -1216,22 +1240,73 @@ def process_sensor(sensor_info, args):
     elif args.method == 'qwen':
         # Qwen VLM 异常检测
         try:
-            qwen_detect = get_qwen_detect()
+            qwen_detect, QwenInferenceError = get_qwen_detect()
             point_name = column
             input_df = pd.DataFrame({point_name: raw_data[point_name]})
+            
+            def _resolve_preview_image(input_path: str):
+                if not input_path:
+                    return None
+                candidates = []
+                # Prefer configured image directory if available
+                try:
+                    from configs.settings import settings as _settings
+                    img_dir = Path(_settings.DATA_IMAGES_DIR)
+                    stem = Path(input_path).stem
+                    candidates.append(img_dir / f"{stem}.jpg")
+                    candidates.append(img_dir / f"{stem}.png")
+                except Exception:
+                    pass
+                # Fallback: same directory as input
+                p = Path(input_path)
+                candidates.append(p.with_suffix(".jpg"))
+                candidates.append(p.with_suffix(".png"))
+                for c in candidates:
+                    try:
+                        if c and c.exists():
+                            return str(c)
+                    except Exception:
+                        continue
+                return None
+            
+            def _make_debug_output_path():
+                try:
+                    base_dir = Path(args.data_path)
+                    method_dir = base_dir / (args.task_name or "") / args.method
+                    method_dir.mkdir(parents=True, exist_ok=True)
+                    if getattr(args, "input", None):
+                        stem = Path(args.input).stem
+                    else:
+                        stem = f"{column}_{pd.to_datetime(st).strftime('%Y%m%d')}"
+                    safe_stem = re.sub(r"[\\\\/:*?\"<>|\\s]+", "_", str(stem))
+                    return str(method_dir / f"{safe_stem}_qwen_output.txt")
+                except Exception:
+                    return None
             
             # 获取执行前的 GPU 状态
             device = getattr(args, 'chatts_device', 'cuda')
             gpu_metrics_before = perf_logger.get_gpu_metrics(device)
             
             with Timer("model_inference") as t_inference:
+                # 优先使用 Qwen 专属路径，否则回退到 chatts 路径
+                qwen_model_path = getattr(args, 'qwen_model_path', None) or args.chatts_model_path
+                qwen_image_path = _resolve_preview_image(getattr(args, "input", None))
+                qwen_debug_output = _make_debug_output_path()
+                if qwen_debug_output:
+                    print(f"[QWEN DEBUG] output_text will be saved to: {qwen_debug_output}")
+                else:
+                    print("[QWEN DEBUG] output_text path not set")
+                
                 global_mask, anomalies, position_index_ds = qwen_detect(
                     data=input_df,
-                    model_path=args.chatts_model_path, # Reuse ChatTS arg for generic VLM
+                    model_path=qwen_model_path,
                     device=device,
                     prompt_template_name=getattr(args, 'chatts_prompt_template', 'default'),
                     n_downsample=getattr(args, 'n_downsample', 5000), # Pass downsample config
                     downsampler=getattr(args, 'downsampler', 'm4'),
+                    max_new_tokens=getattr(args, 'qwen_max_new_tokens', 2048),
+                    image_path=qwen_image_path,
+                    debug_output_path=qwen_debug_output,
                 )
             metrics.anomaly_detect_time = t_inference.elapsed
             
@@ -1298,11 +1373,15 @@ def process_sensor(sensor_info, args):
             return data
             
         except Exception as e:
-            print(f"Qwen 方法执行失败: {e}")
+            print(f"❌ Qwen 推理失败: {e}")
+            import traceback
+            traceback.print_exc()
             metrics.status = "failed"
             metrics.error_message = str(e)
-            # import traceback
-            # traceback.print_exc()
+            metrics.total_time = time.perf_counter() - total_start_time
+            perf_logger.log_metrics(metrics)
+            # 返回 None，不保存结果文件
+            return None
 
     elif args.method == 'timer':
         # Timer 大模型残差异常检测
@@ -1648,6 +1727,7 @@ def main():
     parser.add_argument('--clustering_n_clusters', type=int, default=2, help='number of clusters for adaptive outlier split')
     parser.add_argument('--save_by_method', type=bool, default=True, help='是否按方法名保存到子目录')
     parser.add_argument('--save_mode', type=str, default='downsample', help='保存模式: raw 或 downsample')
+    parser.add_argument('--skip_db', action='store_true', help='跳过写入推理索引数据库')
     
     # ChatTS 相关参数
     parser.add_argument('--chatts_model_path', type=str, 
@@ -1665,6 +1745,12 @@ def main():
                         help='ChatTS prompt模板名称: default, detailed, minimal, industrial, english')
     parser.add_argument('--chatts_load_in_4bit', type=str, default='auto',
                         help='ChatTS 是否使用 4-bit 量化 (true/false/auto)。auto=8B模型自动禁用，14B模型启用')
+    
+    # Qwen 相关参数
+    parser.add_argument('--qwen_model_path', type=str, default=None,
+                        help='Qwen 模型路径。如果不指定，将回退使用 --chatts_model_path')
+    parser.add_argument('--qwen_max_new_tokens', type=int, default=2048,
+                        help='Qwen 最大生成token数，默认2048')
     
     # Timer 相关参数
     parser.add_argument('--timer_model_path', type=str,

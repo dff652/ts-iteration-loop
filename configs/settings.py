@@ -40,6 +40,11 @@ class Settings(BaseSettings):
     # 兼容旧配置（默认指向 ChatTS）
     DATA_TRAINING_DIR: str = DATA_TRAINING_CHATTS_DIR
     ANNOTATIONS_ROOT: str = "/home/share/data/annotations"
+    # 评估 (黄金集) 配置
+    EVAL_GOLDEN_TRUTH_DIR: str = "/home/share/data/annotations/douff"
+    EVAL_GOLDEN_DATA_DIR: str = "/home/share/data/downsampled"
+    EVAL_DEFAULT_DATASET_NAME: str = "golden"
+    EVAL_DEFAULT_OUTPUT_DIR: str = ""
     
     # ========== 模块路径配置 ==========
     # 使用本地整合模块（Monorepo 模式）
@@ -74,16 +79,25 @@ class Settings(BaseSettings):
         return self.LOCAL_CHECK_OUTLIER_PATH
     
     # ========== Python 解释器配置 ==========
+    # 环境模式: unified (默认) | legacy (使用独立环境)
+    ENV_MODE: str = os.getenv("ENV_MODE", "unified").lower()
+    
     # 统一环境 Python 解释器（优先使用环境变量或当前解释器）
     PYTHON_UNIFIED: str = os.getenv("PYTHON_UNIFIED", sys.executable)
     
-    # 各模块独立环境（兼容模式，USE_LOCAL_MODULES=False 时可能需要）
+    # 动态计算默认路径 (内部辅助变量)
+    _is_unified = os.getenv("ENV_MODE", "unified").lower() == "unified"
+    _default_training = sys.executable if _is_unified else "/opt/miniconda3/envs/chatts_tune/bin/python"
+    _default_annotator = sys.executable if _is_unified else "/opt/miniconda3/envs/test-env/bin/python"
+    _default_processing = sys.executable if _is_unified else "/opt/conda_envs/douff/ts_iter_loop/bin/python"
+    
+    # 各模块环境配置
     PYTHON_ILABEL: str = "/opt/miniconda3/envs/chatts_test/bin/python"
-    PYTHON_TRAINING: str = os.getenv("PYTHON_TRAINING", "/opt/miniconda3/envs/chatts_tune/bin/python")
+    PYTHON_TRAINING: str = os.getenv("PYTHON_TRAINING", _default_training)
     PYTHON_TRAINING_CHATTS: str = os.getenv("PYTHON_TRAINING_CHATTS", PYTHON_TRAINING)
     PYTHON_TRAINING_QWEN: str = os.getenv("PYTHON_TRAINING_QWEN", PYTHON_TRAINING)
-    PYTHON_ANNOTATOR: str = "/opt/miniconda3/envs/test-env/bin/python"
-    PYTHON_DATA_PROCESSING: str = "/opt/conda_envs/douff/ts_iter_loop/bin/python"
+    PYTHON_ANNOTATOR: str = os.getenv("PYTHON_ANNOTATOR", _default_annotator)
+    PYTHON_DATA_PROCESSING: str = os.getenv("PYTHON_DATA_PROCESSING", _default_processing)
     
     # 标注工具配置 (复用 JWT)
     ANNOTATOR_API_URL: str = "http://localhost:5000"

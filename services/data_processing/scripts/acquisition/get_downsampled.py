@@ -237,6 +237,11 @@ def process_single_request(args):
             # 降采样
             df_downsampled = downsample_data(data_series, ratio=args.target_points)
             df_downsampled['date'] = pd.date_range(start=pd.Timestamp.now().floor('s'), periods=len(df_downsampled), freq='1s')
+            
+            # 将 value 列重命名为点位名，便于检查与一致性
+            value_col_name = value_col if value_col else "value"
+            if "value" in df_downsampled.columns and value_col_name != "value":
+                df_downsampled = df_downsampled.rename(columns={"value": value_col_name})
 
             # 文件名处理：包含时间范围元数据
             base_name = sanitize(col)
@@ -269,7 +274,8 @@ def process_single_request(args):
             if args.image_dir:
                 os.makedirs(args.image_dir, exist_ok=True)
                 
-                plot_series = pd.Series(df_downsampled['value'].values, index=range(len(df_downsampled)))
+                plot_col = value_col_name if value_col_name in df_downsampled.columns else "value"
+                plot_series = pd.Series(df_downsampled[plot_col].values, index=range(len(df_downsampled)))
                 img_path = os.path.join(args.image_dir, f'{file_name}.jpg')
                 img_success = create_and_save_plot(plot_series, img_path)
                 

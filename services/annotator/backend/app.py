@@ -619,6 +619,17 @@ def get_files(current_user):
         registry_files = list_files(REGISTRY_DB, user_path, method_filter or None)
 
         inference_index = None
+        # 始终尝试获取推理索引，以便显示分数信息
+        inference_index_for_scores, _ = _fetch_inference_index_map(
+            user_path,
+            method_filter or infer_method_from_path(user_path),
+            None,  # min_score
+            None,  # max_score
+            score_by=score_by,
+            strategy=None,
+            limit=None,
+        )
+        
         if use_score_filter:
             inference_index, err = _fetch_inference_index_map(
                 user_path,
@@ -695,17 +706,20 @@ def get_files(current_user):
                 'annotation_count': annotation_count
             }
 
-            if inference_index is not None:
-                idx_info = inference_index.get(f, {})
-                file_info.update({
-                    'score_avg': idx_info.get('score_avg'),
-                    'score_max': idx_info.get('score_max'),
-                    'segment_count': idx_info.get('segment_count'),
-                    'inference_id': idx_info.get('id'),
-                    'method': idx_info.get('method'),
-                    'metrics_path': idx_info.get('metrics_path'),
-                    'segments_path': idx_info.get('segments_path'),
-                })
+            # 附加分数信息（优先使用过滤后的 inference_index，否则使用默认的 inference_index_for_scores）
+            idx_source = inference_index if inference_index is not None else inference_index_for_scores
+            if idx_source is not None:
+                idx_info = idx_source.get(f, {})
+                if idx_info:
+                    file_info.update({
+                        'score_avg': idx_info.get('score_avg'),
+                        'score_max': idx_info.get('score_max'),
+                        'segment_count': idx_info.get('segment_count'),
+                        'inference_id': idx_info.get('id'),
+                        'method': idx_info.get('method'),
+                        'metrics_path': idx_info.get('metrics_path'),
+                        'segments_path': idx_info.get('segments_path'),
+                    })
 
             files.append(file_info)
 

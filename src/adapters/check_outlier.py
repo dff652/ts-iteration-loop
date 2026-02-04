@@ -306,6 +306,11 @@ class CheckOutlierAdapter:
             # Base Model (如果未指定，run.py 会使用默认值，这里显式传递更安全)
             if args.get("base_model_path"):
                  cmd.extend(["--chatts_model_path", str(args["base_model_path"])])
+        
+        # 新增 Qwen 参数处理
+        if algorithm == "qwen":
+            if args.get("base_model_path"):
+                 cmd.extend(["--qwen_model_path", str(args["base_model_path"])])
             
         for k, v in args.items():
             if v is None or v == "": continue
