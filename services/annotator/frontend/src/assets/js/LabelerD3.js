@@ -9,6 +9,27 @@ d3.selection.prototype.moveToFront = function () {
   });
 };
 
+// Normalize row data for numeric index mode
+function normalizeRow(d) {
+  // Backend now sends numeric index as 'time' and 'idx'
+  // Use numeric index directly for X-axis
+  var indexValue = d.idx !== undefined ? d.idx : d.time;
+
+  // Ensure numeric value
+  if (typeof indexValue === 'string') {
+    indexValue = parseFloat(indexValue) || 0;
+  }
+
+  d.time = indexValue;  // Use index as x position
+  d.actual_time = indexValue;  // Keep for hover display
+  d.val = +d.val || 0;
+  d.series = d.series || 'value';
+  d.label = d.label || '';
+  d.x = indexValue;
+  d.y = d.val;
+  return d;
+}
+
 d3.selection.prototype.moveToBack = function () {
   return this.each(function () {
     var firstChild = this.parentNode.firstChild;
@@ -32,8 +53,9 @@ export function drawLabeler(plottingApp) {
     // Adjusted context margin for larger thumbnail
     plottingApp.context_margin = { top: 380, right: 140, bottom: 20, left: 90 },
     // Get width with minimum fallback
-    plottingApp.maindiv_width = Math.max($("#maindiv").width() || 800, 600),
-    plottingApp.width = plottingApp.maindiv_width - plottingApp.main_margin.left - plottingApp.main_margin.right,
+    // Get width with minimum fallback - Use clientWidth for more accurate box-model
+    plottingApp.maindiv_width = Math.max(document.getElementById("maindiv").clientWidth || $("#maindiv").width() || 800, 600),
+    plottingApp.width = plottingApp.maindiv_width - plottingApp.main_margin.left - plottingApp.main_margin.right - 20, // Extra safety margin to prevent overlap
     plottingApp.main_height = 320,  // Main chart height
     plottingApp.context_height = 80,  // Increased thumbnail height for easier selection
     plottingApp.label_margin = { small: 10, large: 20 };
@@ -162,13 +184,37 @@ export function drawLabeler(plottingApp) {
   plottingApp.axisBounds = {},
     plottingApp.hoverinfo = {};
 
+  function brushedContext() {
+    var s = d3.brushSelection(plottingApp.plot.context_brush.node()) || plottingApp.context_xscale.range();
+    plottingApp.main_xscale.domain(s.map(plottingApp.context_xscale.invert, plottingApp.context_xscale));
+
+    updateMain();
+
+
+    var limits = plottingApp.context_xscale.domain();
+    if (plottingApp.context_brush.extent()[1] >= 1 * plottingApp.context_xscale.domain()[1]) {
+      console.log("far right");
+    }
+  }
+
   // Initialize immediately since this is called after DOM is ready (via Vue nextTick + setTimeout)
   init();
 
   /* initialize plots with default series data */
   function init() {
-    plottingApp.allData = plottingApp.csvData.map(type);
+    console.log('[D3 Init] csvData:', plottingApp.csvData ? plottingApp.csvData.length : 'null');
+    console.log('[D3 Init] selectedSeries:', plottingApp.selectedSeries);
+
+    if (!plottingApp.csvData || plottingApp.csvData.length === 0) {
+      console.error('[D3 Init] No CSV Data available to plot.');
+      $(".loader").css("display", "none");
+      return;
+    }
+
+    plottingApp.allData = plottingApp.csvData.map(normalizeRow);
+    console.log('[D3 Init] allData mapped. Sample:', plottingApp.allData[0]);
     plottingApp.data = plottingApp.allData.filter(d => d.series == plottingApp.selectedSeries);
+    console.log('[D3 Init] Filtered data length:', plottingApp.data.length);
 
     // get default focus
     var defaultExtent = getDefaultExtent();
@@ -208,6 +254,7 @@ export function drawLabeler(plottingApp) {
     // create main and context brushes
     plottingApp.plot.main_brush = plottingApp.main.append("g")
       .attr("class", "main_brush")
+      .attr("clip-path", "url(#clip)")
       .call(plottingApp.main_brush);
 
     plottingApp.plot.context_brush = plottingApp.context.append("g")
@@ -284,6 +331,7 @@ export function drawLabeler(plottingApp) {
       .attr("cx", function (d) { return plottingApp.context_xscale(d.time); })
       .attr("cy", function (d) { return plottingApp.context_yscale(d.val); })
       .attr("pointer-events", "none")
+      .attr("style", function (d) { return getPointStyle(d); })
       .attr("r", 2);
   }
 
@@ -442,7 +490,8 @@ export function drawLabeler(plottingApp) {
       .attr("class", "point")
       .attr("cx", function (d) { return plottingApp.main_xscale(d.time); })
       .attr("cy", function (d) { return selectYScale(d); })
-      .attr("r", 5);
+      .attr("r", 5)
+      .attr("style", function (d) { return getPointStyle(d); });
 
     // add secondary line and update secondary point styling if there is reference
     if (secondary_data) {
@@ -568,6 +617,29 @@ export function drawLabeler(plottingApp) {
       return;
     }
 
+    // Enforce a minimum visual width so single-point selections remain visible
+    if (!plottingApp.isAdjustingSelection) {
+      var minPx = 6;
+      var x0 = extent[0][0];
+      var x1 = extent[1][0];
+      if (Math.abs(x1 - x0) < minPx) {
+        var mid = (x0 + x1) / 2;
+        var half = minPx / 2;
+        var newX0 = Math.max(0, mid - half);
+        var newX1 = Math.min(plottingApp.width, mid + half);
+        var y0 = extent[0][1];
+        var y1 = extent[1][1];
+
+        plottingApp.isAdjustingSelection = true;
+        plottingApp.plot.main_brush.call(
+          plottingApp.main_brush.move,
+          [[newX0, y0], [newX1, y1]]
+        );
+        plottingApp.isAdjustingSelection = false;
+        return;
+      }
+    }
+
     // convert pixels defining brush into actual time, value scales
     var xmin = plottingApp.main_xscale.invert(extent[0][0]),
       xmax = plottingApp.main_xscale.invert(extent[1][0]),
@@ -621,12 +693,15 @@ export function drawLabeler(plottingApp) {
       }
     }
 
-    // Trigger Vue update when brushing ends - call Vue directly instead of hidden button
+    // Trigger Vue update when brushing ends - call Vue directly
     if (plottingApp.selection) {
       console.log('  - Calling Vue directly via window.vueApp');
-      if (window.vueApp && typeof window.vueApp.updateSelectionRange === 'function') {
+      if (window.vueApp && typeof window.vueApp.handleChartSelection === 'function') {
+        window.vueApp.handleChartSelection(plottingApp.selection.start, plottingApp.selection.end);
+        console.log('  - Vue handleChartSelection called successfully');
+      } else if (window.vueApp && typeof window.vueApp.updateSelectionRange === 'function') {
+        // Fallback for backward compatibility
         window.vueApp.updateSelectionRange();
-        console.log('  - Vue method called successfully');
       } else {
         // Fallback to hidden button if Vue not available
         console.log('  - Vue not available, falling back to button click');
@@ -646,8 +721,98 @@ export function drawLabeler(plottingApp) {
     }
 
     updateSelection();
-    plottingApp.plot.main_brush.call(plottingApp.main_brush.move, null);
+
+    // Auto-Clear Logic:
+    // Only clear if it was a user interaction (sourceEvent exits) or if it's not a "Resurrect" call.
+    // However, if we want "Resurrect" to KEEP the brush, we must NOT clear.
+    // If d3.event.sourceEvent is null, it's programmatic.
+    // But `setSelection` calls `brush.move`. That triggers this event.
+    // We need a flag.
+
+    if (plottingApp.isResurrecting) {
+      console.log('  - Resurrecting segment: Keeping brush active for edit.');
+      plottingApp.isResurrecting = false; // Reset flag after one pass
+      // DO NOT CLEAR BRUSH
+    } else {
+      // Normal behavior: Clear brush to be ready for next "Paint" stroke
+      // But wait! If we are "Editing", we want the brush to stay until user clicks away?
+      // No, user agreed: "Drag = Draw New". "Click = Edit".
+      // If I drag, I draw new. It finishes immediately (Auto-Clear).
+      // If I click, I edit. It stays.
+
+      // How to distinguish "Drag" vs "Edit" inside `brushedMain`?
+      // `brushedMain` is called on brush *end*? No, D3 v5 `brush` event is during move, `end` is end.
+      // We likely need to hook into `end` event specifically for logic.
+      // But here `brushedMain` seems to be the listener for `brush`?
+      // Check line 352: `plottingApp.main_brush.on("end", brushedMain);` (Need to verify this later).
+      // Assuming this IS the end handler.
+
+      // If sourceEvent is MouseUp, it's user finishing a drag.
+      // If we are in "Edit Mode" (brush persisting), and user adjusts it.
+      // User drags handle -> MouseUp -> End.
+      // Should we clear then?
+      // No! Edit mode should persist until explicit "Dismiss".
+      // So we need a state `plottingApp.isEditing`.
+
+      // Let's rely on `plottingApp.isResurrecting` to ENTER edit mode.
+      // And `click` on background to EXIT edit mode.
+
+      if (plottingApp.isEditing) {
+        // We are in edit mode. Keep brush.
+        // But we still want to save the changes!
+        // handleChartSelection was called above, so data is saved.
+        console.log('  - In Edit Mode: Brush persists.');
+      } else {
+        // Normal Paint Mode: Clear immediately
+        plottingApp.plot.main_brush.call(plottingApp.main_brush.move, null);
+      }
+    }
+
+    // End of brushedMain
   }
+
+  plottingApp.setSelection = function (startIdx, endIdx) {
+    console.log('setSelection called:', startIdx, endIdx);
+
+    var data = plottingApp.data;
+    if (!data || startIdx < 0 || endIdx >= data.length) return;
+
+    // Snap to data points
+    var dStart = data[startIdx];
+    var dEnd = data[endIdx];
+
+    if (!dStart || !dEnd) return;
+
+    var x0 = plottingApp.main_xscale(dStart.time);
+    var x1 = plottingApp.main_xscale(dEnd.time);
+
+    // Ensure minimum visual width for single points
+    if (Math.abs(x1 - x0) < 2) {
+      x1 = x0 + 4; // Make it at least 4px wide
+      x0 = x0 - 4; // Center it
+    }
+
+    // Use full Y range [0, height] to cover top-to-bottom
+    var y0 = 0;
+    var y1 = plottingApp.main_height;
+
+    var selection = [[x0, y0], [x1, y1]];
+
+    plottingApp.isResurrecting = true;
+    plottingApp.isEditing = true; // Enter Edit Mode
+
+    // Move brush
+    if (plottingApp.plot && plottingApp.plot.main_brush) {
+      plottingApp.plot.main_brush.call(plottingApp.main_brush.move, selection);
+    }
+  };
+
+  // Function to Exit Edit Mode (Clear Brush)
+  plottingApp.clearSelection = function () {
+    plottingApp.isEditing = false;
+    plottingApp.isResurrecting = false;
+    plottingApp.plot.main_brush.call(plottingApp.main_brush.move, null);
+  };
 
   function limitContext() {
     var s = d3.brushSelection(plottingApp.plot.context_brush.node()).map(plottingApp.context_xscale.invert, plottingApp.context_xscale);
@@ -657,18 +822,7 @@ export function drawLabeler(plottingApp) {
     }
   }
 
-  function brushedContext() {
-    var s = d3.brushSelection(plottingApp.plot.context_brush.node()) || plottingApp.context_xscale.range();
-    plottingApp.main_xscale.domain(s.map(plottingApp.context_xscale.invert, plottingApp.context_xscale));
 
-    updateMain();
-
-
-    var limits = plottingApp.context_xscale.domain();
-    if (plottingApp.context_brush.extent()[1] >= 1 * plottingApp.context_xscale.domain()[1]) {
-      console.log("far right");
-    }
-  }
 
   //keyboard functions to change the focus
   function transformContext(shift, scale) {
@@ -789,27 +943,6 @@ export function drawLabeler(plottingApp) {
 
   }
 
-  /* format csv data with data structure - now uses numeric index mode */
-  function type(d) {
-    // Backend now sends numeric index as 'time' and 'idx'
-    // Use numeric index directly for X-axis
-    var indexValue = d.idx !== undefined ? d.idx : d.time;
-
-    // Ensure numeric value
-    if (typeof indexValue === 'string') {
-      indexValue = parseFloat(indexValue) || 0;
-    }
-
-    d.time = indexValue;  // Use index as x position
-    d.actual_time = indexValue;  // Keep for hover display
-    d.val = +d.val || 0;
-    d.series = d.series || 'value';
-    d.label = d.label || '';
-    d.x = indexValue;
-    d.y = d.val;
-    return d;
-  }
-
   /* format index for hoverbox - now shows numeric index */
   function formatHover(indexValue) {
     if (typeof indexValue === 'number') {
@@ -906,6 +1039,9 @@ export function drawLabeler(plottingApp) {
 
   /* calculate default extent based on data length */
   function getDefaultExtent() {
+    if (!plottingApp.data || plottingApp.data.length === 0) {
+      return [0, 100]; // Default extent
+    }
     var start_date = plottingApp.data[0].time,
       d_len = plottingApp.data.length, end_date;
     if (d_len <= 100) {

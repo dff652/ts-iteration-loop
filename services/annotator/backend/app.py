@@ -43,7 +43,8 @@ ALLOWED_DATA_DIRS = [
     os.path.join(settings.DATA_INFERENCE_DIR, "qwen"),
     os.path.join(settings.DATA_INFERENCE_DIR, "timer"),
     os.path.join(settings.DATA_INFERENCE_DIR, "adtk_hbos"),
-    os.path.join(settings.DATA_INFERENCE_DIR, "ensemble"),
+    os.path.join(settings.DATA_INFERENCE_DIR, "dummy_test"),
+    settings.ANNOTATIONS_ROOT,
 ]
 
 _ALLOWED_ROOTS = [Path(p).resolve() for p in ALLOWED_DATA_DIRS]
@@ -649,8 +650,34 @@ def get_files(current_user):
             full_path = os.path.join(user_path, f)
             if not os.path.isfile(full_path):
                 continue
-            if inference_index is not None and f not in inference_index:
-                continue
+            # Determine search keys/candidates for score lookup
+            search_keys = [f]
+            if f.lower().endswith('.json'):
+                base_name = f[:-5]  # remove .json
+                # Pattern 1: simple replace
+                search_keys.append(f"{base_name}.csv")
+                # Pattern 2: remove annotations_ prefix
+                if base_name.startswith("annotations_"):
+                    clean_base = base_name.replace("annotations_", "", 1)
+                    search_keys.append(f"{clean_base}.csv")
+                # Pattern 3: remove 数据集 prefix
+                if base_name.startswith("数据集"):
+                        clean_base_ds = base_name.replace("数据集", "", 1)
+                        search_keys.append(f"{clean_base_ds}.csv")
+
+            # Check filtering (if filter is active, inference_index is not None)
+            if inference_index is not None:
+                # If ANY of the search keys is in the filtered index, keep the file
+                # Otherwise (if none match), skip it
+                match_found = False
+                for key in search_keys:
+                    if key in inference_index:
+                        match_found = True
+                        break
+                if not match_found:
+                    # Special case: maybe the json file itself is in the index? (already checked by loop)
+                    # If no keys match the filtered index, we skip this file
+                    continue
 
             # Check for annotations in user's annotation directory
             user_ann_dir = os.path.join(ANNOTATIONS_DIR, current_user)
@@ -676,7 +703,7 @@ def get_files(current_user):
             for pattern in [pattern5, pattern1, pattern4, pattern3, pattern2]:
                 if os.path.exists(pattern):
                     annotation_file = pattern
-                    print(f"  -> Found annotation: {os.path.basename(pattern)}")
+                    # print(f"  -> Found annotation: {os.path.basename(pattern)}")
                     break
             
             if annotation_file and os.path.exists(annotation_file):
@@ -709,7 +736,13 @@ def get_files(current_user):
             # 附加分数信息（优先使用过滤后的 inference_index，否则使用默认的 inference_index_for_scores）
             idx_source = inference_index if inference_index is not None else inference_index_for_scores
             if idx_source is not None:
-                idx_info = idx_source.get(f, {})
+                idx_info = {}
+                for key in search_keys:
+                    info = idx_source.get(key)
+                    if info:
+                        idx_info = info
+                        break
+
                 if idx_info:
                     file_info.update({
                         'score_avg': idx_info.get('score_avg'),
@@ -738,6 +771,30 @@ def get_files(current_user):
         print(f"Error in get_files: {e}")
         import traceback
         traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/segments', methods=['GET'])
+@login_required
+def get_segments(current_user):
+    """Fetch inference segment scores by absolute path."""
+    try:
+        path = request.args.get('path')
+        if not path:
+            return jsonify({'success': False, 'error': 'Missing path'}), 400
+        if not _is_allowed_path(path):
+            return jsonify({'success': False, 'error': 'Path not allowed'}), 400
+        if not os.path.isfile(path):
+            return jsonify({'success': False, 'error': 'File not found'}), 404
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                payload = json.load(f)
+        except Exception as e:
+            return jsonify({'success': False, 'error': f'Failed to read segments: {e}'}), 500
+
+        segments = payload if isinstance(payload, list) else payload.get('segments', [])
+        return jsonify({'success': True, 'segments': segments})
+    except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 
 

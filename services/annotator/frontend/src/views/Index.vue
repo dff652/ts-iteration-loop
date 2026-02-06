@@ -11,7 +11,11 @@
     </nav>
     
     <!-- Main Layout -->
-    <div class="main-layout" :class="{ 'no-file': !isChartMode }">
+    <div
+      class="main-layout"
+      :class="{ 'no-file': !isChartMode }"
+      :style="{ '--left-sidebar-width': leftSidebarWidth + 'px' }"
+    >
       <!-- Left Sidebar -->
       <aside class="sidebar left-sidebar">
         <!-- 数据管理 - 合并路径和文件 -->
@@ -23,9 +27,6 @@
           </div>
           <!-- 标签页切换 -->
           <div class="file-tabs">
-            <button class="file-tab" :class="{ active: fileTab === 'csv' }" @click="fileTab = 'csv'">📄 原始数据</button>
-            <button class="file-tab" :class="{ active: fileTab === 'queue' }" @click="fileTab = 'queue'">🎯 候选队列</button>
-            <button class="file-tab" :class="{ active: fileTab === 'review' }" @click="fileTab = 'review'">✅ 审核队列</button>
             <button class="file-tab" :class="{ active: fileTab === 'json' }" @click="fileTab = 'json'"> 标注结果</button>
           </div>
           <!-- 路径输入 -->
@@ -34,167 +35,64 @@
             <button class="btn btn-primary btn-xs" @click="openDirBrowser">📂</button>
           </div>
           <p class="current-path" v-if="currentPath">{{ currentPath }}</p>
-          <div class="sort-control" v-if="fileTab === 'csv' && csvFiles.length > 0">
+          <div class="sort-control" v-if="fileTab === 'json' && jsonFiles.length > 0">
             <label>排序:</label>
-            <select v-model="fileSortBy" class="sort-select">
-              <option value="name">名称</option>
-              <option value="annotation">标注数</option>
-              <option value="score">置信度</option>
-            </select>
-          </div>
-          <div class="filter-control" v-if="fileTab === 'csv'">
-            <label>筛选:</label>
-            <select v-model="filterScoreBy" class="sort-select">
-              <option value="score_avg">平均分</option>
-              <option value="score_max">最高分</option>
-            </select>
-            <input type="number" step="0.1" v-model="filterMinScore" placeholder="min" class="input input-xs">
-            <input type="number" step="0.1" v-model="filterMaxScore" placeholder="max" class="input input-xs">
-            <select v-model="filterMethod" class="sort-select">
-              <option value="">方法(全部)</option>
-              <option value="chatts">chatts</option>
-              <option value="qwen">qwen</option>
-              <option value="timer">timer</option>
-              <option value="adtk_hbos">adtk_hbos</option>
-              <option value="ensemble">ensemble</option>
-            </select>
-            <button class="btn btn-xs" @click="applyScoreFilter">应用</button>
-            <button class="btn btn-xs" v-if="filterEnabled" @click="clearScoreFilter">清除</button>
-          </div>
-          <div class="filter-control" v-if="fileTab === 'queue'">
-            <label>候选:</label>
-            <select v-model="candidateStrategy" class="sort-select">
-              <option value="topk">TopK</option>
-              <option value="low_score">低分优先</option>
-              <option value="random">随机</option>
-            </select>
-            <input type="number" min="1" step="1" v-model="candidateLimit" placeholder="K" class="input input-xs">
-            <select v-model="filterScoreBy" class="sort-select">
-              <option value="score_avg">平均分</option>
-              <option value="score_max">最高分</option>
-            </select>
-            <input type="number" step="0.1" v-model="filterMinScore" placeholder="min" class="input input-xs">
-            <input type="number" step="0.1" v-model="filterMaxScore" placeholder="max" class="input input-xs">
-            <select v-model="filterMethod" class="sort-select">
-              <option value="">方法(全部)</option>
-              <option value="chatts">chatts</option>
-              <option value="qwen">qwen</option>
-              <option value="timer">timer</option>
-              <option value="adtk_hbos">adtk_hbos</option>
-              <option value="ensemble">ensemble</option>
-            </select>
-            <button class="btn btn-xs" @click="loadCandidates">加载队列</button>
-          </div>
-          <div class="filter-control" v-if="fileTab === 'review'">
-            <label>审核:</label>
-            <select v-model="reviewSourceType" class="sort-select">
-              <option value="annotation">标注</option>
-              <option value="inference">推理</option>
-            </select>
-            <select v-model="reviewStatusFilter" class="sort-select">
-              <option value="pending">待审核</option>
-              <option value="approved">已通过</option>
-              <option value="rejected">已拒绝</option>
-              <option value="needs_fix">需修正</option>
-              <option value="">全部</option>
-            </select>
-            <select v-model="reviewMethodFilter" class="sort-select">
-              <option value="">方法(全部)</option>
-              <option value="chatts">chatts</option>
-              <option value="qwen">qwen</option>
-              <option value="timer">timer</option>
-              <option value="adtk_hbos">adtk_hbos</option>
-              <option value="ensemble">ensemble</option>
-            </select>
-            <input type="number" min="1" step="1" v-model="reviewLimit" placeholder="limit" class="input input-xs">
-            <button class="btn btn-xs" @click="loadReviewQueue">刷新</button>
-            <span class="review-stats">
-              总{{ reviewStats.total }} | 待{{ reviewStats.pending }} | 过{{ reviewStats.approved }} | 拒{{ reviewStats.rejected }} | 修{{ reviewStats.needs_fix }} | 完成{{ reviewProgress }}%
-            </span>
-          </div>
-          <div class="filter-control" v-if="fileTab === 'review'">
-            <label>抽样:</label>
-            <select v-model="reviewSampleStrategy" class="sort-select">
-              <option value="topk">TopK</option>
-              <option value="low_score">低分优先</option>
-              <option value="random">随机</option>
-            </select>
-            <input type="number" min="1" step="1" v-model="reviewSampleLimit" placeholder="K" class="input input-xs">
-            <select v-model="reviewScoreBy" class="sort-select">
-              <option value="score_avg">平均分</option>
-              <option value="score_max">最高分</option>
-            </select>
-            <input type="number" step="0.1" v-model="reviewMinScore" placeholder="min" class="input input-xs">
-            <input type="number" step="0.1" v-model="reviewMaxScore" placeholder="max" class="input input-xs">
-            <select v-model="reviewMethodFilter" class="sort-select">
-              <option value="">方法(全部)</option>
-              <option value="chatts">chatts</option>
-              <option value="qwen">qwen</option>
-              <option value="timer">timer</option>
-              <option value="adtk_hbos">adtk_hbos</option>
-              <option value="ensemble">ensemble</option>
-            </select>
-            <button class="btn btn-xs btn-primary" @click="sampleReviewQueue">生成队列</button>
-            <button class="btn btn-xs" @click="toggleReviewSelectAll">全选</button>
-            <button class="btn btn-xs" @click="clearReviewSelection">清空</button>
-            <button class="btn btn-xs btn-success" @click="batchUpdateReviewStatus('approved')">批量通过</button>
-            <button class="btn btn-xs btn-danger" @click="batchUpdateReviewStatus('rejected')">批量拒绝</button>
-          </div>
-          <!-- CSV 文件列表 -->
-          <div class="file-list" v-show="fileTab === 'csv'">
-            <div v-for="file in csvFiles" :key="file.name" class="file-item" :class="{ active: file.name === selectedFileName }" @click="selectFile(file)">
-              <span class="file-name">{{ file.name }}</span>
-              <span class="file-meta">
-                <span v-if="getScoreValue(file) !== null" class="file-score" :title="`置信度(${scoreLabel}): ${formatScore(file)}`">
-                  {{ formatScore(file) }}
-                </span>
-                <span v-if="file.method" class="file-method">{{ file.method }}</span>
-                <span v-if="file.has_annotations" class="file-badge" :title="`${file.annotation_count} 个标注`">✓ {{ file.annotation_count }}</span>
-              </span>
-            </div>
-            <p v-if="csvFiles.length === 0 && !loading" class="empty-message">暂无 CSV 文件</p>
+            <button class="btn btn-xs" @click="toggleSortOrder">
+              置信度 {{ fileSortOrder === 'asc' ? '↑' : '↓' }}
+            </button>
           </div>
           <!-- JSON 结果文件列表 -->
           <div class="file-list" v-show="fileTab === 'json'">
             <div v-for="file in jsonFiles" :key="file.name" class="file-item" :class="{ active: file.name === selectedResultFile }" @click="loadResultFile(file)">
               <span class="file-name">{{ file.name }}</span>
-              <span class="file-badge" v-if="file.annotation_count">✓</span>
+              <span class="file-meta">
+                <span v-if="getScoreValue(file) !== null" class="file-score" :title="`点位置信度: ${formatScore(file)}`">
+                  {{ formatScore(file) }}
+                </span>
+                <span class="file-badge" v-if="file.annotation_count">✓</span>
+              </span>
             </div>
             <p v-if="jsonFiles.length === 0" class="empty-message">暂无标注结果</p>
           </div>
-          <!-- 候选队列 -->
-          <div class="file-list" v-show="fileTab === 'queue'">
-            <div v-for="file in candidateFilesSorted" :key="file.name" class="file-item" :class="{ active: file.name === selectedFileName }" @click="selectFile(file)">
-              <span class="file-name">{{ file.name }}</span>
-              <span class="file-meta">
-                <span v-if="getScoreValue(file) !== null" class="file-score" :title="`置信度(${scoreLabel}): ${formatScore(file)}`">
-                  {{ formatScore(file) }}
-                </span>
-                <span v-if="file.method" class="file-method">{{ file.method }}</span>
-                <span v-if="file.has_annotations" class="file-badge" :title="`${file.annotation_count} 个标注`">✓ {{ file.annotation_count }}</span>
+          <div class="panel-subsection" v-if="selectedResultFile">
+            <div class="panel-subsection-header">
+              <span class="panel-subsection-title">索引数据段</span>
+              <span class="panel-subsection-meta" v-if="segmentsLoading">加载中...</span>
+            </div>
+            <div class="segment-filter">
+              <label>阈值 (0-1):</label>
+              <input
+                type="number"
+                min="0"
+                max="1"
+                step="0.01"
+                v-model="segmentScoreThreshold"
+                placeholder="例如 0.7"
+                class="input input-xs"
+              >
+              <select v-model="segmentFilterRule" class="sort-select">
+                <option value="gt">&gt;</option>
+                <option value="gte">&ge;</option>
+                <option value="lt">&lt;</option>
+                <option value="lte">&le;</option>
+              </select>
+              <span class="segment-count">
+                显示 {{ filteredSegments.length }}/{{ inferenceSegments.length }}
               </span>
             </div>
-            <p v-if="candidateFilesSorted.length === 0 && !candidateLoading" class="empty-message">暂无候选</p>
-          </div>
-          <!-- 审核队列 -->
-          <div class="file-list" v-show="fileTab === 'review'">
-            <div v-for="item in reviewItems" :key="item.id" class="file-item" @click="openReviewItem(item)">
-              <span class="review-checkbox" @click.stop>
-                <input type="checkbox" v-model="reviewSelected[item.id]">
-              </span>
-              <span class="file-name">{{ item.filename || item.point_name || item.source_id }}</span>
-              <span class="file-meta">
-                <span v-if="item.score !== null && item.score !== undefined" class="file-score">{{ Number(item.score).toFixed(1) }}</span>
-                <span v-if="item.method" class="file-method">{{ item.method }}</span>
-                <span class="review-status" :class="`status-${item.status}`">{{ item.status }}</span>
-              </span>
-              <span class="review-actions">
-                <button class="btn btn-xs btn-success" @click.stop="updateReviewStatus(item, 'approved')">通过</button>
-                <button class="btn btn-xs btn-danger" @click.stop="updateReviewStatus(item, 'rejected')">拒绝</button>
-                <button class="btn btn-xs" @click.stop="updateReviewStatus(item, 'needs_fix')">修正</button>
-              </span>
+            <div class="segment-list" v-if="inferenceSegments.length">
+              <div
+                v-for="(seg, idx) in filteredSegments"
+                :key="`${seg.start}-${seg.end}-${idx}`"
+                class="segment-item"
+                :class="{ highlight: isSegmentHighlighted(seg) }"
+                @click="navigateToSegment(seg)"
+              >
+                <span class="segment-range">{{ seg.start }} - {{ seg.end }} ({{ seg.count }}点)</span>
+                <span class="segment-score">{{ formatSegmentScore(seg.score) }}</span>
+              </div>
             </div>
-            <p v-if="reviewItems.length === 0 && !reviewLoading" class="empty-message">暂无审核项</p>
+            <p v-if="!segmentsLoading && inferenceSegments.length === 0" class="empty-message">暂无异常区域分数</p>
           </div>
           <input type="file" ref="fileInput" @change="fileCheck" accept=".csv" style="display:none">
           <p v-if="loading" class="loading-message">加载中...</p>
@@ -246,7 +144,13 @@
           </details>
         </div>
       </aside>
-
+      <div
+        class="sidebar-resizer"
+        title="拖动调整侧边栏宽度"
+        @mousedown.prevent="startResize"
+        @dblclick.prevent="resetSidebarWidth"
+      ></div>
+      
       <!-- Main Content -->
       <main class="main-content">
         <!-- Welcome Page -->
@@ -303,6 +207,7 @@
                 </div>
                 <div class="stats-grid">
                   <span class="stat-label">标准差</span><span class="stat-value">{{ formatNumber(selectionStats.std) }}</span>
+                  <span class="stat-label">分数</span><span class="stat-value">{{ formatSegmentScore(selectionStats.score) }}</span>
                 </div>
               </div>
             </div>
@@ -328,13 +233,7 @@
                       title="进入编辑">
                 ✏️ 编辑
               </button>
-              <button v-else 
-                      class="btn btn-sm btn-primary" 
-                      @click="finishWorkspaceEdit"
-                      title="完成编辑并保存">
-                ✓ 完成
-              </button>
-              <button class="btn btn-sm" @click="clearWorkspace" title="清空工作区">🗑️</button>
+              <button class="btn btn-sm" @click="clearWorkspace" title="清空工作区/取消选择">退出</button>
             </template>
           </div>
           
@@ -366,43 +265,40 @@
             
             <!-- 数据段索引 -->
             <div class="form-group">
-              <label>数据段索引 ({{ workspaceData.segments.length }})</label>
+              <label>数据段索引 ({{ workspaceSegmentsView.length }}/{{ workspaceData.segments.length }})</label>
               <div class="segment-index-area">
-                <div v-if="workspaceData.segments.length > 0" class="segments-list">
-                  <div v-for="(seg, idx) in workspaceData.segments" :key="idx" class="segment-item" :style="{ borderLeft: '3px solid ' + workspaceData.label.color }">
+                <div v-if="workspaceSegmentsView.length > 0" class="segments-list">
+                  <div v-for="(seg, idx) in workspaceSegmentsView" :key="seg.__origIndex ?? idx" class="segment-item" :style="{ borderLeft: '3px solid ' + workspaceData.label.color }">
                     <!-- Edit mode: editable inputs -->
                     <template v-if="workspaceState === 'edit'">
                       <input 
-                        v-if="editingSegmentKey === 'ws_' + idx" 
+                        v-if="editingWorkspaceInputKey === 'ws_' + (seg.__origIndex ?? idx)" 
                         type="text" 
                         class="segment-edit-input"
                         :value="seg.start + '-' + seg.end" 
-                        @blur="finishEditWorkspaceSegment(idx, $event.target.value)"
-                        @keyup.enter="finishEditWorkspaceSegment(idx, $event.target.value)"
+                        @blur="finishEditWorkspaceSegment(seg.__origIndex ?? idx, $event.target.value)"
+                        @keyup.enter="finishEditWorkspaceSegment(seg.__origIndex ?? idx, $event.target.value)"
                         autofocus>
-                      <span v-else class="segment-range clickable" :style="{ color: workspaceData.label.color }" @click="startEditWorkspaceSegment(idx)" title="点击编辑范围">
+                      <span v-else class="segment-range clickable" :style="{ color: workspaceData.label.color }" @click="startEditWorkspaceSegment(seg.__origIndex ?? idx)" title="点击编辑范围">
                         {{ seg.start }} - {{ seg.end }}
                       </span>
                       <span class="segment-count">({{ seg.count || seg.end - seg.start + 1 }}点)</span>
-                      <button class="btn-icon-sm" @click.stop="removeWorkspaceSegment(idx)" title="删除">×</button>
+                      <span class="segment-score">{{ formatSegmentScore(seg.score) }}</span>
+                      <button class="btn-icon-sm" @click.stop="removeWorkspaceSegment(seg.__origIndex ?? idx)" title="删除">×</button>
                     </template>
                     <!-- View mode: click to navigate -->
                     <template v-else>
-                      <span class="segment-range clickable" :style="{ color: workspaceData.label.color }" @click="navigateToSegment(seg)" title="点击定位">
+                      <span class="segment-range clickable" :style="{ color: workspaceData.label.color }" @click="navigateToSegment(seg, seg.__origIndex ?? idx)" title="点击定位">
                         {{ seg.start }} - {{ seg.end }}
                       </span>
                       <span class="segment-count">({{ seg.count || seg.end - seg.start + 1 }}点)</span>
+                      <span class="segment-score">{{ formatSegmentScore(seg.score) }}</span>
                     </template>
                   </div>
                 </div>
                 <div v-else class="empty-placeholder">暂无数据段</div>
                 
-                <!-- Add Segment Button (Edit Mode Only) -->
-                <div v-if="workspaceState === 'edit'" class="add-segment-row">
-                  <button class="btn btn-sm btn-outline-primary full-width" @click="addNewWorkspaceSegment">
-                    + 添加数据段
-                  </button>
-                </div>
+                <!-- Add Segment Button removed as per streamline workflow -->
               </div>
             </div>
             
@@ -433,8 +329,10 @@
           <div class="section-header">
             <h3 class="section-title">📋 标注结果 ({{ savedAnnotations.length }})</h3>
             <div style="display: flex; gap: 6px;">
-              <button class="btn btn-sm btn-primary" @click="saveAnnotationsToServer" :disabled="savedAnnotations.length === 0" title="保存到服务器">💾 保存</button>
-              <button class="btn btn-sm" @click="downloadAnnotations" :disabled="savedAnnotations.length === 0" title="导出到本地">📥 导出</button>
+                <button class="btn btn-sm" @click="undoLastAction" :disabled="undoStack.length === 0" title="撤回">↶ 撤回</button>
+                <button class="btn btn-sm" @click="redoLastAction" :disabled="redoStack.length === 0" title="重做">↷ 重做</button>
+                <button class="btn btn-sm btn-primary" @click="saveAnnotationsToServer" :disabled="!hasAnnotationsToSave" title="保存到服务器">💾 保存</button>
+                <button class="btn btn-sm" @click="downloadAnnotations" :disabled="!hasAnnotationsToSave" title="导出到本地">📥 导出</button>
             </div>
           </div>
           <div class="annotation-list">
@@ -626,34 +524,23 @@ export default {
       showDirBrowser: false,
       showAddLabelModal: false,
       showLabelSettings: false,
+      leftSidebarWidth: 280,
+      sidebarMinWidth: 240,
+      sidebarMaxWidth: 520,
+      isResizingSidebar: false,
+      resizeStartX: 0,
+      resizeStartWidth: 280,
       browsePath: '',
       parentPath: '',
       directories: [],
-      fileTab: 'csv',
-      fileSortBy: 'name',  // 'name' or 'annotation'
+      fileTab: 'json',
+      fileSortOrder: 'desc',
       selectedResultFile: '',
-      filterMinScore: '',
-      filterMaxScore: '',
-      filterMethod: '',
-      filterScoreBy: 'score_avg',
-      filterEnabled: false,
-      candidateStrategy: 'topk',
-      candidateLimit: 50,
-      candidateFiles: [],
-      candidateLoading: false,
-      reviewItems: [],
-      reviewLoading: false,
-      reviewSourceType: 'annotation',
-      reviewStatusFilter: 'pending',
-      reviewMethodFilter: '',
-      reviewLimit: 200,
-      reviewSampleStrategy: 'topk',
-      reviewSampleLimit: 50,
-      reviewScoreBy: 'score_avg',
-      reviewMinScore: '',
-      reviewMaxScore: '',
-      reviewStats: { total: 0, pending: 0, approved: 0, rejected: 0, needs_fix: 0 },
-      reviewSelected: {},
+      segmentScoreThreshold: '',
+      segmentFilterRule: 'gt',
+      inferenceSegments: [],
+      segmentsLoading: false,
+      segmentScoreIndex: {},
       
       // Category colors for local changes - each major category gets one color
       categoryColors: {
@@ -687,7 +574,14 @@ export default {
       activeChartLabel: null,
       
       // Inline editing state for segment range
-      editingSegmentKey: null       // Key like 'ws_segIdx' for segment being edited
+      editingSavedSegmentKey: null,       // Key like 'annIdx_segIdx' for saved list inline edit
+      editingWorkspaceInputKey: null,     // Key like 'ws_segIdx' for workspace inline input edit
+      activeWorkspaceSegmentKey: null     // Key like 'ws_segIdx' for brush-based editing
+      ,
+      undoStack: [],
+      redoStack: [],
+      historyLimit: 20,
+      workspaceLabelKey: null
     }
   },
   computed: {
@@ -698,20 +592,6 @@ export default {
     localCategories() {
       // Return direct reference for display (read-only)
       return this.labels.local_change || {};
-    },
-    scoreLabel() {
-      return this.filterScoreBy === 'score_max' ? '最高分' : '平均分';
-    },
-    reviewProgress() {
-      const total = this.reviewStats.total || 0;
-      if (total <= 0) return 0;
-      const done = (this.reviewStats.approved || 0)
-        + (this.reviewStats.rejected || 0)
-        + (this.reviewStats.needs_fix || 0);
-      return Math.round((done / total) * 100);
-    },
-    candidateFilesSorted() {
-      return this.sortFiles(this.candidateFiles || [], 'score');
     },
     // Flatten all local_change labels into a single array for dropdown
     flatAllLabels() {
@@ -742,14 +622,32 @@ export default {
                         (this.currentAnnotation.expertOutput || '').trim();
       return hasSegments || hasContent;
     },
-    // Filter and sort files for CSV tab
-    csvFiles() {
-      const filtered = this.files.filter(f => f.name.toLowerCase().endsWith('.csv'));
-      return this.sortFiles(filtered, this.fileSortBy);
-    },
-    // Filter files for JSON results
+    // Filter and sort files for JSON results
     jsonFiles() {
-      return this.files.filter(f => f.name.toLowerCase().endsWith('.json') || f.has_annotations);
+      const filtered = this.files.filter(f => {
+        const name = (f.name || '').toLowerCase();
+        if (f.has_annotations) return true;
+        if (!name.endsWith('.json')) return false;
+        if (name.endsWith('_metrics.json') || name.endsWith('_segments.json')) return false;
+        return true;
+      });
+      return this.sortFiles(filtered);
+    },
+    segmentThresholdValue() {
+      const raw = parseFloat(this.segmentScoreThreshold);
+      if (Number.isNaN(raw)) return null;
+      return Math.min(1, Math.max(0, raw));
+    },
+    filteredSegments() {
+      if (!this.inferenceSegments || this.inferenceSegments.length === 0) return [];
+      if (this.segmentThresholdValue === null) return this.inferenceSegments;
+      return this.inferenceSegments.filter(seg => this.matchSegmentRule(seg.score));
+    },
+    workspaceSegmentsView() {
+      if (!this.workspaceData || !Array.isArray(this.workspaceData.segments)) return [];
+      const indexed = this.workspaceData.segments.map((seg, idx) => ({ ...seg, __origIndex: idx }));
+      if (this.segmentThresholdValue === null) return indexed;
+      return indexed.filter(seg => this.matchSegmentRule(seg.score));
     },
     // Editable categories for label settings modal - return direct reference
     editableCategories() {
@@ -854,28 +752,82 @@ export default {
       if (!this.activeChartLabel) return '#7E4C64';
       const stat = this.chartLabelStats.find(s => s.text === this.activeChartLabel);
       return stat?.color || '#7E4C64';
+    },
+    hasAnnotationsToSave() {
+      return this.collectAnnotationsForExport().length > 0;
     }
   },
   watch: {
     // selectedLabel watcher removed to prevent chart color reset side effects
     // We handle plottingApp updates manually where needed
-    fileTab(val) {
-      if (val === 'queue') {
-        this.loadCandidates();
-      } else if (val === 'review') {
-        this.loadReviewQueue();
-      }
-    }
   },
   mounted() {
     // Expose Vue instance to window for D3 direct access
     window.vueApp = this;
     console.log('Vue instance exposed to window.vueApp');
+
+    try {
+      const stored = localStorage.getItem('leftSidebarWidth');
+      const parsed = stored ? Number(stored) : NaN;
+      if (Number.isFinite(parsed)) {
+        this.leftSidebarWidth = Math.min(
+          this.sidebarMaxWidth,
+          Math.max(this.sidebarMinWidth, parsed)
+        );
+      }
+    } catch (e) {
+      // ignore
+    }
     
     this.loadLabels();
     this.loadCurrentPath();
+    window.addEventListener('keydown', this.handleUndoRedoKeydown);
+  },
+  beforeDestroy() {
+    window.removeEventListener('mousemove', this.onResizeMove);
+    window.removeEventListener('mouseup', this.stopResize);
+    window.removeEventListener('keydown', this.handleUndoRedoKeydown);
   },
   methods: {
+    startResize(event) {
+      this.isResizingSidebar = true;
+      this.resizeStartX = event.clientX;
+      this.resizeStartWidth = this.leftSidebarWidth;
+      document.body.style.cursor = 'col-resize';
+      document.body.style.userSelect = 'none';
+      window.addEventListener('mousemove', this.onResizeMove);
+      window.addEventListener('mouseup', this.stopResize);
+    },
+    onResizeMove(event) {
+      if (!this.isResizingSidebar) return;
+      const delta = event.clientX - this.resizeStartX;
+      const nextWidth = this.resizeStartWidth + delta;
+      this.leftSidebarWidth = Math.min(
+        this.sidebarMaxWidth,
+        Math.max(this.sidebarMinWidth, nextWidth)
+      );
+    },
+    stopResize() {
+      if (!this.isResizingSidebar) return;
+      this.isResizingSidebar = false;
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      window.removeEventListener('mousemove', this.onResizeMove);
+      window.removeEventListener('mouseup', this.stopResize);
+      try {
+        localStorage.setItem('leftSidebarWidth', String(this.leftSidebarWidth));
+      } catch (e) {
+        // ignore
+      }
+    },
+    resetSidebarWidth() {
+      this.leftSidebarWidth = 280;
+      try {
+        localStorage.setItem('leftSidebarWidth', String(this.leftSidebarWidth));
+      } catch (e) {
+        // ignore
+      }
+    },
     // User logout
     logout() {
       localStorage.removeItem('token');
@@ -976,40 +928,32 @@ export default {
       return ax.length - bx.length;
     },
     
-    // Sort files by different criteria
-    sortFiles(files, sortBy) {
+    // Sort files by point confidence (ascending/descending)
+    sortFiles(files) {
       const sorted = [...files];
-      
-      if (sortBy === 'annotation') {
-        // Sort by annotation count (descending), then by name
-        sorted.sort((a, b) => {
-          const countDiff = (b.annotation_count || 0) - (a.annotation_count || 0);
-          if (countDiff !== 0) return countDiff;
-          return this.naturalSort(a.name.toLowerCase(), b.name.toLowerCase());
-        });
-      } else if (sortBy === 'score') {
-        sorted.sort((a, b) => {
-          const scoreA = this.getScoreValue(a);
-          const scoreB = this.getScoreValue(b);
-          const safeA = scoreA === null ? -Infinity : scoreA;
-          const safeB = scoreB === null ? -Infinity : scoreB;
-          const diff = safeB - safeA;
-          if (diff !== 0) return diff;
-          return this.naturalSort(a.name.toLowerCase(), b.name.toLowerCase());
-        });
-      } else {
-        // Sort by name (natural sort)
-        sorted.sort((a, b) => this.naturalSort(a.name.toLowerCase(), b.name.toLowerCase()));
-      }
-      
+
+      sorted.sort((a, b) => {
+        const scoreA = this.getScoreValue(a);
+        const scoreB = this.getScoreValue(b);
+        const missingA = scoreA === null;
+        const missingB = scoreB === null;
+        const safeA = missingA ? (this.fileSortOrder === 'asc' ? Infinity : -Infinity) : scoreA;
+        const safeB = missingB ? (this.fileSortOrder === 'asc' ? Infinity : -Infinity) : scoreB;
+        const diff = safeA - safeB;
+        if (diff !== 0) {
+          return this.fileSortOrder === 'asc' ? diff : -diff;
+        }
+        return this.naturalSort(a.name.toLowerCase(), b.name.toLowerCase());
+      });
+
       return sorted;
     },
 
     getScoreValue(file) {
       if (!file) return null;
-      const raw = this.filterScoreBy === 'score_max' ? file.score_max : file.score_avg;
-      const fallback = this.filterScoreBy === 'score_max' ? file.score_avg : file.score_max;
-      const value = raw !== undefined && raw !== null ? raw : fallback;
+      const value = file.score_avg !== undefined && file.score_avg !== null
+        ? file.score_avg
+        : file.score_max;
       if (value === undefined || value === null) return null;
       const num = Number(value);
       return Number.isFinite(num) ? num : null;
@@ -1021,23 +965,8 @@ export default {
       return score.toFixed(1);
     },
 
-    applyScoreFilter() {
-      const hasFilter = (
-        this.filterMinScore !== ''
-        || this.filterMaxScore !== ''
-        || this.filterMethod
-      );
-      this.filterEnabled = hasFilter;
-      if (hasFilter) this.fileSortBy = 'score';
-      return this.loadFiles();
-    },
-
-    clearScoreFilter() {
-      this.filterMinScore = '';
-      this.filterMaxScore = '';
-      this.filterMethod = '';
-      this.filterEnabled = false;
-      return this.loadFiles();
+    toggleSortOrder() {
+      this.fileSortOrder = this.fileSortOrder === 'asc' ? 'desc' : 'asc';
     },
 
     async loadCandidates() {
@@ -1261,12 +1190,6 @@ export default {
       try {
         const params = new URLSearchParams();
         params.set('path', this.currentPath);
-        if (this.filterEnabled) {
-          if (this.filterMinScore !== '') params.set('min_score', this.filterMinScore);
-          if (this.filterMaxScore !== '') params.set('max_score', this.filterMaxScore);
-          if (this.filterMethod) params.set('method', this.filterMethod);
-          if (this.filterScoreBy) params.set('score_by', this.filterScoreBy);
-        }
         const url = `${API_BASE}/files?${params.toString()}`;
         
         const res = await fetch(url, {
@@ -1306,13 +1229,7 @@ export default {
         const data = await res.json();
           if (data.success) {
             this.showToast(`索引已重建（${data.count || 0} 个文件）`, 'success');
-            if (this.fileTab === 'queue') {
-              await this.loadCandidates();
-            } else if (this.fileTab === 'review') {
-              await this.loadReviewQueue();
-            } else {
-              await this.loadFiles();
-            }
+            await this.loadFiles();
         } else if (res.status === 401) {
           this.$router.push('/login');
         } else {
@@ -1326,21 +1243,361 @@ export default {
     
     // Alias for backward compatibility
     refreshFiles() {
-      if (this.fileTab === 'queue') {
-        return this.loadCandidates();
-      }
-      if (this.fileTab === 'review') {
-        return this.loadReviewQueue();
-      }
       return this.loadFiles();
+    },
+
+    commitWorkspaceAnnotation() {
+      const source = (this.workspaceData && this.workspaceData.segments)
+        ? this.workspaceData
+        : this.currentAnnotation;
+      if (!source) return false;
+      if (!source.label || !source.segments || source.segments.length === 0) {
+        return false;
+      }
+      this.pushHistory('commit-workspace');
+      const snapshot = JSON.parse(JSON.stringify(source));
+      if (source === this.workspaceData) {
+        this.syncWorkspaceAnnotation(snapshot, true);
+      } else {
+        // Non-workspace commit: append and keep as-is
+        this.savedAnnotations.push(snapshot);
+      }
+      this.applyAnnotationsToChart();
+      this.showToast(`已保存标签: ${snapshot.label.text}`, 'info');
+      return true;
+    },
+
+    resolveCsvNameForResult(file) {
+      if (!file || !file.name) return null;
+      const name = String(file.name);
+      if (name.toLowerCase().endsWith('.csv')) return name;
+      if (name.toLowerCase().endsWith('.json')) {
+        let base = name.slice(0, -5);
+        if (base.startsWith('annotations_')) {
+          base = base.replace('annotations_', '');
+        }
+        if (base.startsWith('数据集')) {
+          base = base.replace('数据集', '');
+        }
+        return `${base}.csv`;
+      }
+      return null;
+    },
+
+    async loadSegmentsForFile(file) {
+      this.inferenceSegments = [];
+      this.segmentScoreIndex = {};
+      if (!file || !file.segments_path) return;
+      this.segmentsLoading = true;
+      try {
+        const url = `${API_BASE}/segments?path=${encodeURIComponent(file.segments_path)}`;
+        const res = await fetch(url, { headers: this.getAuthHeaders() });
+        const data = await res.json();
+        if (data.success) {
+          const segments = Array.isArray(data.segments) ? data.segments : [];
+          this.inferenceSegments = segments
+            .map(seg => ({
+              start: Number(seg.start),
+              end: Number(seg.end),
+              count: Number.isFinite(Number(seg.start)) && Number.isFinite(Number(seg.end))
+                ? (Number(seg.end) - Number(seg.start) + 1)
+                : undefined,
+              score: this.normalizeSegmentScore(seg.score),
+              score_raw: Number(seg.score)
+            }))
+            .filter(seg => Number.isFinite(seg.start) && Number.isFinite(seg.end))
+            .sort((a, b) => (Number(b.score) || 0) - (Number(a.score) || 0));
+          this.inferenceSegments.forEach(seg => {
+            const key = `${seg.start}-${seg.end}`;
+            this.segmentScoreIndex[key] = seg.score;
+          });
+          if (this.workspaceData && Array.isArray(this.workspaceData.segments)) {
+            this.workspaceData.segments.forEach(seg => {
+              if (seg.score === undefined) {
+                seg.score = this.getSegmentScore(seg.start, seg.end);
+              }
+            });
+          }
+        } else {
+          this.showToast('索引数据段加载失败', 'warning');
+        }
+      } catch (e) {
+        console.error('Load segments error:', e);
+        this.showToast('索引数据段加载失败', 'error');
+      } finally {
+        this.segmentsLoading = false;
+      }
+    },
+
+    formatSegmentScore(value) {
+      const num = Number(value);
+      if (!Number.isFinite(num)) return '-';
+      return num.toFixed(2);
+    },
+
+    normalizeSegmentScore(value) {
+      const num = Number(value);
+      if (!Number.isFinite(num)) return null;
+      if (num <= 1 && num >= 0) return num;
+      return num / 100;
+    },
+
+    getSegmentScore(start, end) {
+      const key = `${start}-${end}`;
+      if (this.segmentScoreIndex && this.segmentScoreIndex[key] !== undefined) {
+        return this.segmentScoreIndex[key];
+      }
+      return undefined;
+    },
+
+    matchSegmentRule(scoreValue) {
+      const score = Number(scoreValue);
+      if (!Number.isFinite(score) || this.segmentThresholdValue === null) return true;
+      const threshold = this.segmentThresholdValue;
+      switch (this.segmentFilterRule) {
+        case 'gte':
+          return score >= threshold;
+        case 'lt':
+          return score < threshold;
+        case 'lte':
+          return score <= threshold;
+        case 'gt':
+        default:
+          return score > threshold;
+      }
+    },
+
+    buildSegment(start, end, base = {}) {
+      const seg = {
+        ...base,
+        start: Number(start),
+        end: Number(end)
+      };
+      seg.count = Number.isFinite(seg.start) && Number.isFinite(seg.end)
+        ? (seg.end - seg.start + 1)
+        : (base.count || 0);
+      if (seg.score === undefined) {
+        seg.score = this.getSegmentScore(seg.start, seg.end);
+      }
+      return seg;
+    },
+
+    normalizeSegments(segments) {
+      if (!Array.isArray(segments)) return [];
+      const items = segments
+        .map(seg => ({
+          start: Number(seg.start),
+          end: Number(seg.end),
+          label: seg.label,
+          score: seg.score
+        }))
+        .filter(seg => Number.isFinite(seg.start) && Number.isFinite(seg.end))
+        .sort((a, b) => a.start - b.start);
+
+      const merged = [];
+      for (const seg of items) {
+        if (!merged.length) {
+          merged.push(this.buildSegment(seg.start, seg.end, seg));
+          continue;
+        }
+        const last = merged[merged.length - 1];
+        if (seg.start <= last.end + 1) {
+          last.end = Math.max(last.end, seg.end);
+          last.count = last.end - last.start + 1;
+          last.score = this.getSegmentScore(last.start, last.end);
+        } else {
+          merged.push(this.buildSegment(seg.start, seg.end, seg));
+        }
+      }
+      return merged;
+    },
+
+    subtractSegment(baseSeg, cutSeg) {
+      const base = { start: baseSeg.start, end: baseSeg.end };
+      const cut = { start: cutSeg.start, end: cutSeg.end };
+      if (cut.end < base.start || cut.start > base.end) {
+        return [this.buildSegment(base.start, base.end, baseSeg)];
+      }
+      if (cut.start <= base.start && cut.end >= base.end) {
+        return [];
+      }
+      if (cut.start <= base.start) {
+        const start = cut.end + 1;
+        if (start > base.end) return [];
+        return [this.buildSegment(start, base.end, baseSeg)];
+      }
+      if (cut.end >= base.end) {
+        const end = cut.start - 1;
+        if (end < base.start) return [];
+        return [this.buildSegment(base.start, end, baseSeg)];
+      }
+      const left = this.buildSegment(base.start, cut.start - 1, baseSeg);
+      const right = this.buildSegment(cut.end + 1, base.end, baseSeg);
+      return [left, right].filter(seg => seg.end >= seg.start);
+    },
+
+    subtractSegments(baseSegments, cutSegments) {
+      let result = this.normalizeSegments(baseSegments);
+      const cutters = this.normalizeSegments(cutSegments);
+      cutters.forEach(cut => {
+        const next = [];
+        result.forEach(seg => {
+          next.push(...this.subtractSegment(seg, cut));
+        });
+        result = next;
+      });
+      return result;
+    },
+
+    mergeAnnotationsByLabel(annotations) {
+      const result = [];
+      const indexByKey = new Map();
+      annotations.forEach(ann => {
+        if (!ann || !ann.label) return;
+        const key = ann.label.id || ann.label.text;
+        if (!key) return;
+        const segments = this.normalizeSegments(ann.segments || []);
+        const existingIdx = indexByKey.get(key);
+        if (existingIdx !== undefined) {
+          const existing = result[existingIdx];
+          const mergedSegments = this.normalizeSegments([...(existing.segments || []), ...segments]);
+          const mergedAnn = { ...existing, segments: mergedSegments, label: ann.label };
+          result.splice(existingIdx, 1);
+          result.push(mergedAnn);
+          indexByKey.set(key, result.length - 1);
+        } else {
+          result.push({ ...ann, segments });
+          indexByKey.set(key, result.length - 1);
+        }
+      });
+      return result;
+    },
+
+    resolveConflicts(annotations) {
+      const result = annotations.map(ann => ({
+        ...ann,
+        segments: this.normalizeSegments(ann.segments || [])
+      }));
+      for (let i = 0; i < result.length; i += 1) {
+        let segs = result[i].segments;
+        for (let j = i + 1; j < result.length; j += 1) {
+          segs = this.subtractSegments(segs, result[j].segments);
+        }
+        result[i].segments = segs;
+      }
+      return result.filter(ann => ann.segments && ann.segments.length > 0);
+    },
+
+    normalizeAnnotations(annotations) {
+      const merged = this.mergeAnnotationsByLabel(annotations || []);
+      return this.resolveConflicts(merged);
+    },
+
+    syncWorkspaceAnnotation(snapshot = null, applyOverride = true) {
+      if (!this.workspaceData || !this.workspaceData.label) return;
+      const data = snapshot || JSON.parse(JSON.stringify(this.workspaceData));
+      const labelKey = data.label.id || data.label.text;
+      if (!labelKey) return;
+
+      const cutterSegments = this.normalizeSegments(data.segments || []);
+      const updated = [];
+      let found = false;
+
+      (this.savedAnnotations || []).forEach(ann => {
+        if (!ann || !ann.label) return;
+        const key = ann.label.id || ann.label.text;
+        if (!key) return;
+        if (key === labelKey) {
+          updated.push(data);
+          found = true;
+        } else if (applyOverride) {
+          const segs = this.subtractSegments(ann.segments || [], cutterSegments);
+          if (segs.length > 0) {
+            updated.push({ ...ann, segments: segs });
+          }
+        } else {
+          updated.push(ann);
+        }
+      });
+
+      if (!found) {
+        updated.push(data);
+      }
+
+      this.savedAnnotations = updated;
+      this.workspaceAnnIndex = updated.findIndex(ann => {
+        const key = ann?.label?.id || ann?.label?.text;
+        return key === labelKey;
+      });
+      this.workspaceLabelKey = labelKey;
+    },
+
+    applyWorkspaceLabelChange(fromKey, toKey) {
+      if (!this.workspaceData || !toKey) return;
+      if (fromKey && fromKey === toKey) {
+        this.syncWorkspaceAnnotation(null, true);
+        return;
+      }
+      const movedSegments = this.normalizeSegments(this.workspaceData.segments || []);
+      const updated = [];
+      let foundTo = false;
+
+      (this.savedAnnotations || []).forEach(ann => {
+        if (!ann || !ann.label) return;
+        const key = ann.label.id || ann.label.text;
+        if (!key) return;
+        if (fromKey && key === fromKey) {
+          const segs = this.subtractSegments(ann.segments || [], movedSegments);
+          if (segs.length > 0) {
+            updated.push({ ...ann, segments: segs });
+          }
+          return;
+        }
+        if (key === toKey) {
+          const mergedSegs = this.normalizeSegments([...(ann.segments || []), ...movedSegments]);
+          updated.push({ ...ann, label: this.workspaceData.label, segments: mergedSegs });
+          foundTo = true;
+          return;
+        }
+        const segs = this.subtractSegments(ann.segments || [], movedSegments);
+        if (segs.length > 0) {
+          updated.push({ ...ann, segments: segs });
+        }
+      });
+
+      if (!foundTo) {
+        updated.push({ ...this.workspaceData, segments: movedSegments });
+      }
+
+      this.savedAnnotations = updated;
+      this.workspaceAnnIndex = updated.findIndex(ann => {
+        const key = ann?.label?.id || ann?.label?.text;
+        return key === toKey;
+      });
+      const mergedAnn = this.workspaceAnnIndex >= 0 ? updated[this.workspaceAnnIndex] : null;
+      if (mergedAnn) {
+        this.workspaceData = JSON.parse(JSON.stringify(mergedAnn));
+      }
+    },
+
+    isSegmentHighlighted(seg) {
+      if (this.segmentThresholdValue === null) return true;
+      return this.matchSegmentRule(seg.score);
     },
     
     // Load JSON annotation result file for review/edit
     async loadResultFile(file) {
+      if (!file || !file.name) return;
       this.selectedResultFile = file.name;
       this.showToast('加载标注结果: ' + file.name, 'info');
-      // TODO: Implement actual JSON loading logic
-      // This would load the annotations and overlay them on the chart
+      await this.loadSegmentsForFile(file);
+
+      const csvName = this.resolveCsvNameForResult(file);
+      if (csvName) {
+        await this.selectFile({ name: csvName });
+      } else {
+        this.showToast('未找到对应CSV文件', 'warning');
+      }
     },
     
     // Select a CSV file to load
@@ -1353,6 +1610,12 @@ export default {
       this.savedAnnotations = [];
       this.activeChartLabel = '';
       this.editingAnnotationIndex = null;
+      this.workspaceState = 'empty';
+      this.workspaceAnnIndex = null;
+      this.workspaceData = null;
+      this.selectionStats = null;
+      this.undoStack = [];
+      this.redoStack = [];
       
       // Load data from API
       this.selectedFileName = file.name;
@@ -1462,6 +1725,15 @@ export default {
       
       // Get label color
       const labelColor = this.getLabelColor(categoryId, label.id);
+
+      const isDifferentLabel = this.currentAnnotation.label && this.currentAnnotation.label.id !== label.id;
+      if (isDifferentLabel) {
+        const hasPending = (this.workspaceData && this.workspaceData.segments && this.workspaceData.segments.length > 0)
+          || (this.currentAnnotation && this.currentAnnotation.segments && this.currentAnnotation.segments.length > 0);
+        if (hasPending) {
+          this.commitWorkspaceAnnotation();
+        }
+      }
       
       // Check if clicking same label
       if (this.currentAnnotation.label && this.currentAnnotation.label.id === label.id) {
@@ -1486,6 +1758,22 @@ export default {
         // Use $set for reactivity
         this.$set(this.currentAnnotation, 'label', labelObj);
         this.selectedLocalLabels = [labelObj];  // Keep for backward compatibility
+
+        // Reset workspace for new label if we just saved previous one
+        if (isDifferentLabel) {
+          this.currentAnnotation = {
+            label: labelObj,
+            segments: [],
+            prompt: '',
+            expertOutput: ''
+          };
+        }
+        this.workspaceData = JSON.parse(JSON.stringify(this.currentAnnotation));
+        if (this.workspaceData?.label) {
+          this.workspaceLabelKey = this.workspaceData.label.id || this.workspaceData.label.text || null;
+        }
+        this.workspaceState = 'edit';
+        this.workspaceAnnIndex = null;
         
         // Update D3 chart with this color for brush labeling
         if (plottingApp) {
@@ -1501,6 +1789,30 @@ export default {
           } else {
             plottingApp.labelList[existingIdx].color = labelColor;
           }
+        }
+        
+        // [New Workflow] Check if we already have an annotation for this label
+        const existingAnnIdx = this.savedAnnotations.findIndex(a => a.label && a.label.text === label.text);
+        if (existingAnnIdx !== -1) {
+          console.log('  - Found existing annotation for label, loading it...');
+          this.loadToWorkspace(existingAnnIdx);
+          // Set state to 'edit' immediately to allow direct modification
+          this.workspaceState = 'edit'; 
+          this.showToast(`已加载已有标注: ${label.text}`, 'info');
+        } else {
+          // New annotation context
+          this.currentAnnotation = {
+            label: labelObj,
+            segments: [],
+            prompt: '',
+            expertOutput: ''
+          };
+          this.workspaceData = JSON.parse(JSON.stringify(this.currentAnnotation));
+          if (this.workspaceData?.label) {
+            this.workspaceLabelKey = this.workspaceData.label.id || this.workspaceData.label.text || null;
+          }
+          this.workspaceState = 'edit';
+          this.workspaceAnnIndex = null;
         }
       }
       
@@ -1534,6 +1846,127 @@ export default {
       }
       // Fallback to category color
       return this.getCategoryColor(categoryId);
+    },
+
+    pushHistory(reason = '') {
+      const snapshot = {
+        savedAnnotations: JSON.parse(JSON.stringify(this.savedAnnotations || [])),
+        workspaceData: this.workspaceData ? JSON.parse(JSON.stringify(this.workspaceData)) : null,
+        workspaceAnnIndex: this.workspaceAnnIndex,
+        workspaceState: this.workspaceState,
+        activeWorkspaceSegmentKey: this.activeWorkspaceSegmentKey,
+        editingWorkspaceInputKey: this.editingWorkspaceInputKey,
+        workspaceLabelKey: this.workspaceLabelKey,
+        currentAnnotation: JSON.parse(JSON.stringify(this.currentAnnotation || { label: null, segments: [], prompt: '', expertOutput: '' })),
+        selectedLocalLabels: JSON.parse(JSON.stringify(this.selectedLocalLabels || [])),
+        activeChartLabel: this.activeChartLabel
+      };
+      this.undoStack.push(snapshot);
+      if (this.undoStack.length > this.historyLimit) {
+        this.undoStack.shift();
+      }
+      this.redoStack = [];
+      if (reason) {
+        console.log('[HISTORY] push:', reason);
+      }
+    },
+
+    restoreHistory(snapshot) {
+      if (!snapshot) return;
+      this.savedAnnotations = JSON.parse(JSON.stringify(snapshot.savedAnnotations || []));
+      this.workspaceData = snapshot.workspaceData ? JSON.parse(JSON.stringify(snapshot.workspaceData)) : null;
+      this.workspaceAnnIndex = snapshot.workspaceAnnIndex ?? null;
+      this.workspaceState = snapshot.workspaceState || 'empty';
+      this.activeWorkspaceSegmentKey = snapshot.activeWorkspaceSegmentKey || null;
+      this.editingWorkspaceInputKey = snapshot.editingWorkspaceInputKey || null;
+      this.workspaceLabelKey = snapshot.workspaceLabelKey || null;
+      this.currentAnnotation = JSON.parse(JSON.stringify(snapshot.currentAnnotation || { label: null, segments: [], prompt: '', expertOutput: '' }));
+      this.selectedLocalLabels = JSON.parse(JSON.stringify(snapshot.selectedLocalLabels || []));
+      this.activeChartLabel = snapshot.activeChartLabel || '';
+      this.applyAnnotationsToChart();
+
+      // Restore brush selection if possible
+      if (window.plottingApp && typeof window.plottingApp.setSelection === 'function') {
+        let targetIdx = null;
+        if (this.activeWorkspaceSegmentKey && this.activeWorkspaceSegmentKey.startsWith('ws_')) {
+          const idxNum = parseInt(this.activeWorkspaceSegmentKey.replace('ws_', ''), 10);
+          if (!isNaN(idxNum)) targetIdx = idxNum;
+        }
+        const seg = (this.workspaceData && Array.isArray(this.workspaceData.segments) && targetIdx !== null)
+          ? this.workspaceData.segments[targetIdx]
+          : null;
+        if (seg) {
+          window.plottingApp.setSelection(Number(seg.start), Number(seg.end));
+        } else if (window.plottingApp.clearSelection) {
+          window.plottingApp.clearSelection();
+        }
+      }
+    },
+
+    undoLastAction() {
+      if (!this.undoStack.length) {
+        this.showToast('没有可撤回的操作', 'info');
+        return;
+      }
+      const current = {
+        savedAnnotations: JSON.parse(JSON.stringify(this.savedAnnotations || [])),
+        workspaceData: this.workspaceData ? JSON.parse(JSON.stringify(this.workspaceData)) : null,
+        workspaceAnnIndex: this.workspaceAnnIndex,
+        workspaceState: this.workspaceState,
+        activeWorkspaceSegmentKey: this.activeWorkspaceSegmentKey,
+        editingWorkspaceInputKey: this.editingWorkspaceInputKey,
+        workspaceLabelKey: this.workspaceLabelKey,
+        currentAnnotation: JSON.parse(JSON.stringify(this.currentAnnotation || { label: null, segments: [], prompt: '', expertOutput: '' })),
+        selectedLocalLabels: JSON.parse(JSON.stringify(this.selectedLocalLabels || [])),
+        activeChartLabel: this.activeChartLabel
+      };
+      const snapshot = this.undoStack.pop();
+      this.redoStack.push(current);
+      this.restoreHistory(snapshot);
+      this.showToast('已撤回', 'info');
+      this.saveAnnotationsToServer();
+    },
+
+    redoLastAction() {
+      if (!this.redoStack.length) {
+        this.showToast('没有可重做的操作', 'info');
+        return;
+      }
+      const current = {
+        savedAnnotations: JSON.parse(JSON.stringify(this.savedAnnotations || [])),
+        workspaceData: this.workspaceData ? JSON.parse(JSON.stringify(this.workspaceData)) : null,
+        workspaceAnnIndex: this.workspaceAnnIndex,
+        workspaceState: this.workspaceState,
+        activeWorkspaceSegmentKey: this.activeWorkspaceSegmentKey,
+        editingWorkspaceInputKey: this.editingWorkspaceInputKey,
+        workspaceLabelKey: this.workspaceLabelKey,
+        currentAnnotation: JSON.parse(JSON.stringify(this.currentAnnotation || { label: null, segments: [], prompt: '', expertOutput: '' })),
+        selectedLocalLabels: JSON.parse(JSON.stringify(this.selectedLocalLabels || [])),
+        activeChartLabel: this.activeChartLabel
+      };
+      const snapshot = this.redoStack.pop();
+      this.undoStack.push(current);
+      this.restoreHistory(snapshot);
+      this.showToast('已重做', 'info');
+      this.saveAnnotationsToServer();
+    },
+
+    handleUndoRedoKeydown(event) {
+      const tag = document.activeElement?.tagName?.toUpperCase?.() || '';
+      if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+      const isCtrl = event.ctrlKey || event.metaKey;
+      if (!isCtrl) return;
+      if (event.key === 'z' || event.key === 'Z') {
+        event.preventDefault();
+        if (event.shiftKey) {
+          this.redoLastAction();
+        } else {
+          this.undoLastAction();
+        }
+      } else if (event.key === 'y' || event.key === 'Y') {
+        event.preventDefault();
+        this.redoLastAction();
+      }
     },
     
     addLabel() {
@@ -1739,6 +2172,9 @@ export default {
           expertOutput: this.currentAnnotation.expertOutput || ''
         };
         
+        // Normalize segments (merge overlaps)
+        annotation.segments = this.mergeSegments(annotation.segments);
+        
         // Check for existing and merge/update
         const existingIdx = this.savedAnnotations.findIndex(a => 
           a.label.text === labelObj.text
@@ -1747,7 +2183,7 @@ export default {
         if (existingIdx !== -1) {
           // Merge segments
           const existing = this.savedAnnotations[existingIdx];
-          existing.segments = [...existing.segments, ...segments];
+          existing.segments = this.mergeSegments([...existing.segments, ...segments]);
           existing.prompt = annotation.prompt || existing.prompt;
           existing.expertOutput = annotation.expertOutput || existing.expertOutput;
           this.$set(this.savedAnnotations, existingIdx, existing);
@@ -1814,12 +2250,7 @@ export default {
       this.showToast(`已删除数据段: ${seg.start} - ${seg.end}`, 'info');
     },
     
-    // Navigate chart to show a specific segment
-    navigateToSegment(seg) {
-      if (!seg || seg.start === undefined || seg.end === undefined) return;
-      this.panChartToRange(seg.start, seg.end);
-      this.showToast(`定位到: ${seg.start} - ${seg.end}`, 'info');
-    },
+    // navigateToSegment moved to later section with extended logic
     
     // Navigate to a specific segment in a saved annotation
     navigateToAnnotationSegment(ann, segIdx) {
@@ -1882,11 +2313,11 @@ export default {
     
     // ============ Inline Editing: Segment Range ============
     startEditSegment(annIdx, segIdx) {
-      this.editingSegmentKey = annIdx + '_' + segIdx;
+      this.editingSavedSegmentKey = annIdx + '_' + segIdx;
     },
     
     finishEditSegment(annIdx, segIdx, newValue) {
-      this.editingSegmentKey = null;
+      this.editingSavedSegmentKey = null;
       
       // Parse input like "start-end"
       const match = newValue.trim().match(/^(\d+)\s*[-~]\s*(\d+)$/);
@@ -1918,22 +2349,54 @@ export default {
     // ============ Workspace Editing Methods ============
     // Handle label change in workspace dropdown
     onWorkspaceLabelChange() {
-      const newLabelId = this.currentAnnotation.label.id;
+      if (!this.workspaceData) return;
+      const newLabelId = this.workspaceData.label.id;
       const newLabel = this.flatAllLabels.find(l => l.id === newLabelId);
       if (!newLabel) return;
-      
-      // Update the current annotation's label object
-      this.$set(this.currentAnnotation, 'label', {
-        id: newLabel.id,
-        text: newLabel.text,
-        color: newLabel.color,
-        categoryId: newLabel.categoryId
-      });
-      
-      // Also update each segment's embedded label
-      this.currentAnnotation.segments.forEach(seg => {
-        this.$set(seg, 'label', { ...this.currentAnnotation.label });
-      });
+
+      const isNewAnnotation = this.workspaceAnnIndex === null || this.workspaceAnnIndex === undefined;
+      const currentLabelId = this.currentAnnotation?.label?.id || this.workspaceData.label.id;
+      const isSwitch = isNewAnnotation && currentLabelId !== newLabel.id;
+      if (isSwitch && this.workspaceData.segments && this.workspaceData.segments.length > 0) {
+        this.commitWorkspaceAnnotation();
+        this.currentAnnotation = {
+          label: {
+            id: newLabel.id,
+            text: newLabel.text,
+            color: newLabel.color,
+            categoryId: newLabel.categoryId
+          },
+          segments: [],
+          prompt: '',
+          expertOutput: ''
+        };
+        this.workspaceData = JSON.parse(JSON.stringify(this.currentAnnotation));
+        this.workspaceState = 'edit';
+        this.workspaceAnnIndex = null;
+      } else {
+        // Update the workspace label object
+        this.$set(this.workspaceData, 'label', {
+          id: newLabel.id,
+          text: newLabel.text,
+          color: newLabel.color,
+          categoryId: newLabel.categoryId
+        });
+        
+        // Also update each segment's embedded label
+        this.workspaceData.segments.forEach(seg => {
+          this.$set(seg, 'label', { ...this.workspaceData.label });
+        });
+      }
+
+      // Keep currentAnnotation in sync for new annotations
+      if (isNewAnnotation) {
+        this.currentAnnotation = JSON.parse(JSON.stringify(this.workspaceData));
+      }
+
+      if (plottingApp) {
+        plottingApp.selectedLabel = newLabel.text;
+        plottingApp.labelColor = newLabel.color;
+      }
       
       this.showToast(`标签已更改为: ${newLabel.text}`, 'info');
     },
@@ -1973,13 +2436,16 @@ export default {
     // Start editing a segment range in workspace
     startEditWorkspaceSegment(idx) {
       if (this.workspaceState !== 'edit') return;
-      this.editingSegmentKey = 'ws_' + idx;
+      this.editingWorkspaceInputKey = 'ws_' + idx;
+      this.activeWorkspaceSegmentKey = 'ws_' + idx;
     },
     
     // Finish editing a segment range in workspace
     finishEditWorkspaceSegment(idx, newValue) {
-      this.editingSegmentKey = null;
+      this.editingWorkspaceInputKey = null;
+      this.activeWorkspaceSegmentKey = 'ws_' + idx;
       if (!this.workspaceData) return;
+      this.pushHistory('workspace-segment-edit');
       
       const match = newValue.trim().match(/^(\d+)\s*[-~]\s*(\d+)$/);
       if (!match) {
@@ -2001,13 +2467,26 @@ export default {
       this.$set(seg, 'end', newEnd);
       this.$set(seg, 'count', newEnd - newStart + 1);
       
+      // Refresh chart to show the updated range
+      this.syncWorkspaceAnnotation(null, true);
+      this.applyAnnotationsToChart();
+      
+      // Also update the selection box on chart
+      if (window.plottingApp && typeof window.plottingApp.setSelection === 'function') {
+        window.plottingApp.setSelection(newStart, newEnd);
+      }
+      
       this.showToast(`范围已更新: ${newStart}-${newEnd}`, 'info');
     },
     
     // Remove a segment from workspace
     removeWorkspaceSegment(idx) {
       if (!this.workspaceData) return;
+      this.pushHistory('workspace-segment-remove');
       this.workspaceData.segments.splice(idx, 1);
+      this.syncWorkspaceAnnotation(null, true);
+      this.applyAnnotationsToChart();
+      this.saveAnnotationsToServer();
       this.showToast('已删除数据段', 'info');
     },
     
@@ -2054,7 +2533,7 @@ export default {
       if (isNaN(start) || isNaN(end)) return;
       
       console.log(`Auto-focusing on first anomaly: [${start}, ${end}]`);
-      this.panToSegment(start, end);
+      this.panChartToRange(start, end);
     },
     
     // Navigate to points with a specific label on the chart
@@ -2199,6 +2678,7 @@ export default {
     },
     
     deleteAnnotation(idx) {
+      this.pushHistory('delete-annotation');
       this.savedAnnotations.splice(idx, 1);
       this.showToast('标注已删除', 'info');
       // Auto-save after deletion
@@ -2213,31 +2693,87 @@ export default {
       
       // Deep copy annotation data
       this.workspaceData = JSON.parse(JSON.stringify(ann));
+      if (this.segmentScoreIndex && Array.isArray(this.workspaceData.segments)) {
+        this.workspaceData.segments.forEach(seg => {
+          if (seg.score === undefined) {
+            seg.score = this.getSegmentScore(seg.start, seg.end);
+          }
+        });
+      }
       this.workspaceAnnIndex = annIdx;
+      this.workspaceLabelKey = ann.label?.id || ann.label?.text || null;
       this.workspaceState = 'view';
-      this.editingSegmentKey = null;
+      this.editingSavedSegmentKey = null;
+      this.editingWorkspaceInputKey = null;
+      this.activeWorkspaceSegmentKey = null;
       
       // Navigate to specified segment
       if (ann.segments && ann.segments.length > segIdx) {
         const seg = ann.segments[segIdx];
-        this.panChartToRange(seg.start, seg.end);
+        this.navigateToSegment(seg, segIdx);
       }
+      
+      this.showToast(`已加载: ${ann.label.text}`, 'info');
       
       this.showToast(`已加载: ${ann.label.text}`, 'info');
       
       // Update plottingApp: Clear selectedLabel to ensure all colors are shown
       if (window.plottingApp) {
         window.plottingApp.selectedLabel = ''; 
-        // Force redraw to remove any highlighting
-        this.recolorChartPoints();
+        // Force re-apply to ensure data model matches (especially if cleared previously)
+        this.applyAnnotationsToChart();
       }
     },
     
+    // Auto-enter Edit Mode when navigating
+    navigateToSegment(seg, segIdx = null) {
+      if (!seg) return;
+      if (window.plottingApp && typeof window.plottingApp.setSelection === 'function') {
+          // First, pan the chart to show the segment range
+          this.panChartToRange(Number(seg.start), Number(seg.end));
+          
+          // Trigger "Resurrect" (Click-to-Edit) with slight delay to allow pan to complete
+          setTimeout(() => {
+            window.plottingApp.setSelection(Number(seg.start), Number(seg.end));
+          }, 100);
+          
+          // Also set the active label to match this segment if possible
+          // But `navigateToSegment` is often used when an annotation is already loaded.
+          // If we are in "View" mode, maybe switch to "Edit" mode?
+          if (this.workspaceState === 'view') {
+             this.enterWorkspaceEditMode();
+          }
+          // If this segment belongs to the workspace list, lock editing to it
+          // IMPORTANT: Must set this BEFORE the setTimeout callback fires
+          console.log('[DEBUG navigateToSegment] segIdx:', segIdx, 'typeof:', typeof segIdx);
+          if (segIdx !== null && segIdx !== undefined && this.workspaceData && Array.isArray(this.workspaceData.segments)) {
+            const idxNum = parseInt(segIdx, 10);
+            console.log('[DEBUG navigateToSegment] idxNum:', idxNum, 'segments.length:', this.workspaceData.segments.length);
+            if (!isNaN(idxNum) && this.workspaceData.segments[idxNum]) {
+              this.activeWorkspaceSegmentKey = 'ws_' + idxNum;
+              console.log('[DEBUG navigateToSegment] Set activeWorkspaceSegmentKey to:', this.activeWorkspaceSegmentKey);
+            } else {
+              console.log('[DEBUG navigateToSegment] idxNum invalid or segment not found');
+            }
+          } else {
+            console.log('[DEBUG navigateToSegment] segIdx null/undefined or workspaceData not ready');
+          }
+      } else {
+          // Fallback legacy zoom
+          if (window.plottingApp && window.plottingApp.main_xscale) {
+            // ... (legacy logic if needed, but we rely on setSelection to verify)
+             console.warn('setSelection not available');
+          }
+      }
+    },
     // Enter edit mode in workspace
     enterWorkspaceEditMode() {
       if (this.workspaceState !== 'view') return;
       this.workspaceState = 'edit';
-      this.editingSegmentKey = null;
+      if (this.workspaceData?.label) {
+        this.workspaceLabelKey = this.workspaceData.label.id || this.workspaceData.label.text || null;
+      }
+      this.editingWorkspaceInputKey = null;
     },
     
     // Finish editing and sync changes to savedAnnotations
@@ -2245,23 +2781,132 @@ export default {
       if (this.workspaceState !== 'edit') return;
       
       // Sync workspaceData back to savedAnnotations
-      if (this.workspaceAnnIndex === null) {
-        // Create NEW annotation
-        const newAnn = JSON.parse(JSON.stringify(this.workspaceData));
-        this.savedAnnotations.push(newAnn);
-        this.workspaceAnnIndex = this.savedAnnotations.length - 1;
+      this.syncWorkspaceAnnotation(null, true);
+      if (this.workspaceAnnIndex === null || this.workspaceAnnIndex === undefined) {
         this.showToast('新建标注已保存', 'success');
       } else {
-        // Update EXISTING annotation
-        this.$set(this.savedAnnotations, this.workspaceAnnIndex, JSON.parse(JSON.stringify(this.workspaceData)));
         this.showToast('修改已保存', 'success');
       }
       
       this.workspaceState = 'view';
-      this.editingSegmentKey = null;
+      this.editingWorkspaceInputKey = null;
+      this.activeWorkspaceSegmentKey = null;
       
       // Refresh chart colors and save
       this.applyAnnotationsToChart();
+      this.saveAnnotationsToServer();
+    },
+
+    // Helper: Merge overlapping segments
+    mergeSegments(segments) {
+      if (!segments || segments.length === 0) return [];
+      
+      // Sort by start index
+      const sorted = [...segments].sort((a, b) => a.start - b.start);
+      const merged = [];
+      let current = sorted[0];
+      
+      for (let i = 1; i < sorted.length; i++) {
+        const next = sorted[i];
+        
+        // Check for overlap or adjacency (optional: +1 for strict adjacency merging)
+        // Using strict overlap for now: start <= end of previous
+        if (next.start <= current.end + 1) {
+          // Merge
+          current.end = Math.max(current.end, next.end);
+          current.count = current.end - current.start + 1;
+          // Merge labels/scores if needed? Keep current for now.
+        } else {
+          // No overlap, push current and move next
+          merged.push(current);
+          current = next;
+        }
+      }
+      merged.push(current);
+      return merged;
+    },
+
+    // Handle direct selection from D3 (Replaces updateSelectionRange logic for Adding)
+    handleChartSelection(start, end) {
+      console.log('[DEBUG handleChartSelection] Called with:', start, '-', end);
+      console.log('  - workspaceState:', this.workspaceState);
+      console.log('  - activeWorkspaceSegmentKey:', this.activeWorkspaceSegmentKey);
+      console.log('  - workspaceAnnIndex:', this.workspaceAnnIndex);
+      
+      // Only proceed if we have an active label selected (workspace in edit mode with label)
+      if (this.workspaceState !== 'edit' || !this.workspaceData || !this.workspaceData.label) {
+        this.$set(this, 'selectionStats', {
+            start, end, count: end - start + 1,
+            minVal: null, maxVal: null, mean: null, std: null, score: null
+        });
+        // Just show stats, don't add
+        console.log('[DEBUG handleChartSelection] Not in edit mode or no label, early return');
+        return; 
+      }
+
+      // Track history before mutation
+      this.pushHistory('brush-selection');
+
+      // ==========================================================
+      // CASE 1: EDIT MODE - Update existing segment (supports shrinking)
+      // ==========================================================
+      if (this.activeWorkspaceSegmentKey && this.activeWorkspaceSegmentKey.startsWith('ws_')) {
+        const editIdx = parseInt(this.activeWorkspaceSegmentKey.replace('ws_', ''));
+        console.log('[DEBUG handleChartSelection] CASE 1: Editing existing segment at index:', editIdx);
+        
+        if (!isNaN(editIdx) && this.workspaceData.segments[editIdx]) {
+          // Update existing segment (allows both expand AND shrink)
+          const targetSeg = this.workspaceData.segments[editIdx];
+          this.$set(targetSeg, 'start', start);
+          this.$set(targetSeg, 'end', end);
+          this.$set(targetSeg, 'count', end - start + 1);
+          
+          this.$set(this, 'selectionStats', {
+            start, end, count: end - start + 1,
+            minVal: null, maxVal: null, mean: null, std: null, score: null
+          });
+          
+          // Sync to savedAnnotations and resolve overlaps (last edit wins)
+          this.syncWorkspaceAnnotation(null, true);
+          
+          this.showToast(`已更新区域: ${start}-${end}`, 'info');
+          this.applyAnnotationsToChart();
+          // Don't call saveAnnotationsToServer on every brush move for performance
+          return;
+        }
+      }
+
+      // ==========================================================
+      // CASE 2: CREATE MODE - Add new segment
+      // ==========================================================
+      console.log('[DEBUG handleChartSelection] CASE 2: Creating new segment');
+      
+      // Create new segment
+      const newSeg = {
+        start: start,
+        end: end,
+        count: end - start + 1,
+        label: { ...this.workspaceData.label } // Embed label info
+      };
+
+      // Add to workspace
+      this.workspaceData.segments.push(newSeg);
+      
+      // Smart Merge
+      this.workspaceData.segments = this.mergeSegments(this.workspaceData.segments);
+      
+      // After merge, always select the last segment (newly created or merged into)
+      // This ensures subsequent brush moves can edit this segment
+      this.activeWorkspaceSegmentKey = 'ws_' + (this.workspaceData.segments.length - 1);
+      console.log('[DEBUG handleChartSelection] After merge, activeWorkspaceSegmentKey:', this.activeWorkspaceSegmentKey);
+      
+      // Sync to savedAnnotations and resolve overlaps (last edit wins)
+      this.syncWorkspaceAnnotation(null, true);
+      
+      this.showToast(`已添加区域: ${start}-${end}`, 'success');
+      
+      // Refresh Chart
+      this.applyAnnotationsToChart(); 
       this.saveAnnotationsToServer();
     },
     
@@ -2270,17 +2915,21 @@ export default {
       this.workspaceState = 'empty';
       this.workspaceAnnIndex = null;
       this.workspaceData = null;
-      this.editingSegmentKey = null;
+      this.editingSavedSegmentKey = null;
+      this.editingWorkspaceInputKey = null;
+      this.activeWorkspaceSegmentKey = null;
+      this.workspaceLabelKey = null;
     },
     
     // Handle label change in workspace dropdown (edit mode)
     onWorkspaceLabelChange() {
       if (!this.workspaceData) return;
-      
+      const prevLabelKey = this.workspaceLabelKey || this.workspaceData.label?.id || this.workspaceData.label?.text;
       const newLabelId = this.workspaceData.label.id;
       const newLabel = this.flatAllLabels.find(l => l.id === newLabelId);
       if (!newLabel) return;
       
+      this.pushHistory('workspace-label-change');
       // Update workspaceData label
       this.$set(this.workspaceData, 'label', {
         id: newLabel.id,
@@ -2293,6 +2942,20 @@ export default {
       this.workspaceData.segments.forEach(seg => {
         this.$set(seg, 'label', { ...this.workspaceData.label });
       });
+      
+      const nextLabelKey = this.workspaceData.label.id || this.workspaceData.label.text;
+      if (prevLabelKey && nextLabelKey && prevLabelKey !== nextLabelKey) {
+        this.applyWorkspaceLabelChange(prevLabelKey, nextLabelKey);
+      } else {
+        this.syncWorkspaceAnnotation(null, true);
+      }
+      this.workspaceLabelKey = nextLabelKey || null;
+      if (this.workspaceData?.segments?.length) {
+        this.activeWorkspaceSegmentKey = 'ws_' + (this.workspaceData.segments.length - 1);
+      }
+      this.applyAnnotationsToChart();
+      this.saveAnnotationsToServer();
+      this.showToast('标签类型已更新', 'success');
     },
     
     // Backward compatibility alias
@@ -2369,6 +3032,45 @@ export default {
     },
     
     // Save annotations to server
+    collectAnnotationsForExport() {
+      const list = this.savedAnnotations.map(ann => JSON.parse(JSON.stringify(ann)));
+      if (this.workspaceData && this.workspaceData.segments && this.workspaceData.segments.length > 0) {
+        const snapshot = JSON.parse(JSON.stringify(this.workspaceData));
+        if (this.workspaceAnnIndex !== null && this.workspaceAnnIndex !== undefined) {
+          list[this.workspaceAnnIndex] = snapshot;
+        } else {
+          list.push(snapshot);
+        }
+      }
+      return this.normalizeAnnotations(list);
+    },
+
+    // Get annotations for DISPLAY purposes only (no normalization, allows shrinking)
+    getAnnotationsForDisplay() {
+      const list = this.savedAnnotations.map(ann => JSON.parse(JSON.stringify(ann)));
+      console.log('[DEBUG getAnnotationsForDisplay] savedAnnotations count:', list.length);
+      console.log('[DEBUG getAnnotationsForDisplay] workspaceAnnIndex:', this.workspaceAnnIndex);
+      
+      if (this.workspaceData && this.workspaceData.segments && this.workspaceData.segments.length > 0) {
+        const snapshot = JSON.parse(JSON.stringify(this.workspaceData));
+        console.log('[DEBUG getAnnotationsForDisplay] workspaceData snapshot segments:', snapshot.segments.map(s => `${s.start}-${s.end}`).join(', '));
+        
+        if (this.workspaceAnnIndex !== null && this.workspaceAnnIndex !== undefined) {
+          // IMPORTANT: Remove the original and append workspace version at the END
+          // This ensures the currently editing annotation is processed LAST
+          // and won't be overwritten by other annotations in applyAnnotationsToChart
+          console.log('[DEBUG getAnnotationsForDisplay] Moving list[', this.workspaceAnnIndex, '] to end with workspace snapshot');
+          list.splice(this.workspaceAnnIndex, 1); // Remove from original position
+          list.push(snapshot); // Add to end for highest priority
+        } else {
+          console.log('[DEBUG getAnnotationsForDisplay] workspaceAnnIndex is null, appending as new');
+          list.push(snapshot);
+        }
+      }
+      // Return WITHOUT normalization to preserve exact segment ranges
+      return list;
+    },
+
     async saveAnnotationsToServer() {
       if (!this.selectedFileName) return;
       
@@ -2377,7 +3079,7 @@ export default {
         const exportData = {
           filename: this.selectedFileName,
           overall_attribute: this.selectedOverallLabels,
-          annotations: this.savedAnnotations.map(ann => ({
+          annotations: this.collectAnnotationsForExport().map(ann => ({
             label: {
               id: ann.label.id,
               text: ann.label.text,
@@ -2420,7 +3122,7 @@ export default {
       const exportData = {
         filename: this.selectedFileName,
         overall_attribute: this.selectedOverallLabels,
-        annotations: this.savedAnnotations.map(ann => ({
+        annotations: this.collectAnnotationsForExport().map(ann => ({
           label: {
             id: ann.label.id,
             text: ann.label.text,
@@ -2443,6 +3145,7 @@ export default {
     },
     
     clearAllLabels() {
+      this.pushHistory('clear-all-labels');
       // Clear all point labels from chart data - does NOT clear savedAnnotations!
       if (plottingApp && plottingApp.allData) {
         plottingApp.allData.forEach(d => d.label = '');
@@ -2594,12 +3297,14 @@ export default {
         console.log('applyAnnotationsToChart: plottingApp not ready');
         return;
       }
-      if (this.savedAnnotations.length === 0) {
+      // Use raw annotations WITHOUT normalization to allow shrinking during live edit
+      const annotations = this.getAnnotationsForDisplay();
+      if (annotations.length === 0) {
         console.log('applyAnnotationsToChart: no annotations to apply, clearing chart');
         // Continue execution to clear existing labels
       }
 
-      console.log('Applying annotations to chart visual...', this.savedAnnotations.length, 'annotations found');
+      console.log('Applying annotations to chart visual...', annotations.length, 'annotations found');
       
       // 0. RESET all points labels first to avoid "ghost" points when deleting/modifying
       if (window.plottingApp.allData) {
@@ -2614,7 +3319,7 @@ export default {
       if (!window.plottingApp.labelList) window.plottingApp.labelList = [];
       
       // 1. Update data model and ensure labels are in labelList
-      this.savedAnnotations.forEach(ann => {
+      annotations.forEach(ann => {
         const labelText = ann.label.text;
         if (!labelText) return;
         
@@ -2651,6 +3356,10 @@ export default {
     // Update the visual style of chart points based on their labels
     recolorChartPoints() {
        if (!window.plottingApp) return;
+       
+       console.log('[DEBUG recolorChartPoints] Starting recolor...');
+       console.log('  - allData sample labels:', window.plottingApp.allData?.slice(0, 10).map(d => d.label));
+       
        const updatePointStyle = function(d) {
         if (d.label) {
           const labelInfo = (window.plottingApp.labelList || []).find(l => l.name === d.label);
@@ -2661,10 +3370,35 @@ export default {
       };
       
       if (window.plottingApp.main) {
-        window.plottingApp.main.selectAll('.point').attr('style', updatePointStyle);
+        const mainPoints = window.plottingApp.main.selectAll('.point');
+        console.log('  - main .point count:', mainPoints.size());
+        mainPoints.attr('style', updatePointStyle);
       }
       if (window.plottingApp.context) {
-        window.plottingApp.context.selectAll('.point').attr('style', updatePointStyle);
+        const contextPoints = window.plottingApp.context.selectAll('.point');
+        console.log('  - context .point count:', contextPoints.size());
+        // 上下文视图的点基于采样数据，需要从 allData 查找对应索引的标签
+        const d3 = window.d3;
+        if (d3) {
+          contextPoints.each(function() {
+            const pointData = d3.select(this).datum();
+            if (pointData) {
+              // 从 allData 查找对应时间索引的标签
+              const origData = window.plottingApp.allData?.find(od => od.time === pointData.time);
+              const label = origData?.label || pointData.label;
+              if (label) {
+                const labelInfo = (window.plottingApp.labelList || []).find(l => l.name === label);
+                const color = labelInfo?.color || '#7E4C64';
+                d3.select(this).attr('style', `fill: ${color}; stroke: ${color}; opacity: 0.75;`);
+              } else {
+                d3.select(this).attr('style', 'fill: black; stroke: none; opacity: 1;');
+              }
+            }
+          });
+        } else {
+          // Fallback: 如果 d3 不可用，使用原有方式
+          contextPoints.attr('style', updatePointStyle);
+        }
       }
       this.chartDataVersion++;
     },
@@ -2705,60 +3439,43 @@ export default {
          }
       }
       
+      console.log('[DEBUG handleChartSelection] State check:');
+      console.log('  - workspaceState:', this.workspaceState);
+      console.log('  - activeWorkspaceSegmentKey:', this.activeWorkspaceSegmentKey);
+      console.log('  - workspaceAnnIndex:', this.workspaceAnnIndex);
+      console.log('  - workspaceData.segments.length:', this.workspaceData?.segments?.length);
+      console.log('  - selection range:', start, '-', end);
+      
       // ==========================================================
-      // CASE 1: WORKSPACE EDIT MODE
+      // CASE 1: WORKSPACE EDIT MODE (modify existing segment only)
       // ==========================================================
-      if (this.workspaceState === 'edit' && this.workspaceData) {
-        
-        // TELL D3 TO STOP SEARCHING/LABELING (prevent color change)
-        if (window.plottingApp) {
-          window.plottingApp.preventBrushSearch = true;
-        }
+      if (this.workspaceState === 'edit' && this.workspaceData && this.activeWorkspaceSegmentKey && this.activeWorkspaceSegmentKey.startsWith('ws_')) {
+        console.log('[DEBUG handleChartSelection] Entering CASE 1: Edit existing segment');
+        const editIdx = parseInt(this.activeWorkspaceSegmentKey.replace('ws_', ''));
+        if (!isNaN(editIdx) && this.workspaceData.segments[editIdx]) {
+          // Modify existing segment
+          const targetSeg = this.workspaceData.segments[editIdx];
+          this.$set(targetSeg, 'start', start);
+          this.$set(targetSeg, 'end', end);
+          this.$set(targetSeg, 'count', end - start + 1);
+          this.$set(targetSeg, 'score', this.getSegmentScore(start, end));
 
-        // SMART FILL: If user is currently editing a segment input box,
-        // update THAT segment instead of creating a new one.
-        if (this.editingSegmentKey && this.editingSegmentKey.startsWith('ws_')) {
-          const editIdx = parseInt(this.editingSegmentKey.replace('ws_', ''));
-          if (!isNaN(editIdx) && this.workspaceData.segments[editIdx]) {
-             // Modify existing segment
-             const targetSeg = this.workspaceData.segments[editIdx];
-             this.$set(targetSeg, 'start', start);
-             this.$set(targetSeg, 'end', end);
-             this.$set(targetSeg, 'count', end - start + 1);
-             // Keep its existing label or update? Keep existing.
-             
-             this.showToast(`已更新当前选中段范围: ${start}-${end}`, 'info');
-             
-             // Clear brush
-             try {
-                if (plottingApp.plot && plottingApp.plot.brush) {
-                  plottingApp.plot.brush.call(plottingApp.brush.move, null);
-                }
-             } catch(e) {}
-             return; // EXIT, do not add new segment
-          }
+          this.$set(this, 'selectionStats', {
+            start,
+            end,
+            count: end - start + 1,
+            minVal: isNaN(minVal) ? 0 : minVal,
+            maxVal: isNaN(maxVal) ? 0 : maxVal,
+            mean: isNaN(mean) ? 0 : mean,
+            score: this.getSegmentScore(start, end)
+          });
+          
+          this.showToast(`已更新当前选中段范围: ${start}-${end}`, 'info');
+          this.applyAnnotationsToChart();
+          
+          // Keep brush for further fine-tuning in edit mode
+          return; // EXIT, do not add new segment
         }
-
-        // Otherwise, append new segment
-        const segment = {
-          start,
-          end,
-          count: end - start + 1,
-          label: { ...this.workspaceData.label }
-        };
-        
-        this.workspaceData.segments.push(segment);
-        this.showToast(`已添加到工作区: ${start}-${end}`, 'success');
-        
-        // Clear the brush selection box visually (optional, but good UX)
-        // We typically want to clear it so user can select again
-        try {
-          if (plottingApp.plot && plottingApp.plot.brush) {
-            plottingApp.plot.brush.call(plottingApp.brush.move, null);
-          }
-        } catch(e) { console.error('Error clearing brush', e); }
-        
-        return; // EXIT HERE, do not proceed to create mode logic
       }
       
       // ==========================================================
@@ -2772,7 +3489,8 @@ export default {
         count: isNaN(count) ? 0 : count,
         minVal: isNaN(minVal) ? 0 : minVal,
         maxVal: isNaN(maxVal) ? 0 : maxVal,
-        mean: isNaN(mean) ? 0 : mean
+        mean: isNaN(mean) ? 0 : mean,
+        score: this.getSegmentScore(start, end)
       });
       
       // Determine the label to use
@@ -2795,7 +3513,8 @@ export default {
         minVal: isNaN(minVal) ? 0 : minVal,
         maxVal: isNaN(maxVal) ? 0 : maxVal,
         mean: isNaN(mean) ? 0 : mean,
-        label: { ...labelToUse }
+        label: { ...labelToUse },
+        score: this.getSegmentScore(start, end)
       };
       
       // Add to currentAnnotation
@@ -2823,6 +3542,22 @@ export default {
       if (this.workspaceState === 'empty') {
         this.workspaceState = 'edit';
         this.workspaceAnnIndex = null; // Mark as new
+      }
+      if (this.workspaceData?.label) {
+        this.workspaceLabelKey = this.workspaceData.label.id || this.workspaceData.label.text || null;
+      }
+      this.applyAnnotationsToChart();
+      
+      // AUTO-SELECT the newly created segment for immediate editing.
+      // This fixes the "cannot shrink" issue by ensuring subsequent brush moves update this segment
+      // instead of creating new overlapping ones.
+      if (this.workspaceData && this.workspaceData.segments) {
+         this.activeWorkspaceSegmentKey = 'ws_' + (this.workspaceData.segments.length - 1);
+      }
+      
+      // Keep D3 in Edit Mode
+      if (window.plottingApp) {
+        window.plottingApp.isEditing = true;
       }
     },
     
@@ -3034,14 +3769,22 @@ export default {
 
 <style>
 /* Global D3 Styles */
-svg { font: 10px sans-serif; display: block; margin: auto; overflow: visible; user-select: none; -webkit-user-select: none; }
-#maindiv { width: 100%; text-align: left; user-select: none; -webkit-user-select: none; }
+svg { font: 10px sans-serif; display: block; margin: auto; overflow: hidden; user-select: none; -webkit-user-select: none; }
+#maindiv { width: 100%; text-align: left; overflow: hidden; user-select: none; -webkit-user-select: none; }
 .line { fill: none; stroke: black; stroke-width: 1.5px; clip-path: url(#clip); pointer-events: none; }
 .point { fill: black; stroke: none; clip-path: url(#clip); }
 .axis path, .axis line { fill: none; stroke: #000; shape-rendering: crispEdges; }
 .loader { position: fixed; left: 50%; top: 30%; transform: translateX(-50%); border: 8px solid #f3f3f3; border-top: 8px solid #7E4C64; border-radius: 50%; width: 60px; height: 60px; animation: spin 1s linear infinite; }
 @keyframes spin { 0% { transform: translateX(-50%) rotate(0deg); } 100% { transform: translateX(-50%) rotate(360deg); } }
 kbd { display: inline-block; border: 1px solid #ccc; border-radius: 4px; padding: 0.1em 0.4em; background: #f7f7f7; font-size: 0.75em; }
+
+/* D3 Brush Styling - Global */
+#mainChart .main_brush .selection {
+  stroke: #7E4C64;
+  stroke-width: 2px;
+  stroke-dasharray: 4;
+  fill-opacity: 0.15;
+}
 </style>
 
 <style scoped>
@@ -3079,11 +3822,40 @@ kbd { display: inline-block; border: 1px solid #ccc; border-radius: 4px; padding
 .nav-btn:hover { background: #f0f0f0; }
 
 /* Layout */
-.main-layout { display: grid; grid-template-columns: 280px 1fr 300px; gap: 16px; padding: 16px; min-height: calc(100vh - 60px); }
-.main-layout.no-file { grid-template-columns: 280px 1fr; }
+.main-layout {
+  display: grid;
+  grid-template-columns: var(--left-sidebar-width, 280px) 8px minmax(0, 1fr) 300px;
+  gap: 12px;
+  padding: 16px;
+  min-height: calc(100vh - 60px);
+}
+.main-layout.no-file {
+  grid-template-columns: var(--left-sidebar-width, 280px) 8px minmax(0, 1fr);
+}
 
 /* Sidebar */
 .sidebar { background: white; border-radius: 8px; padding: 10px; overflow-y: auto; max-height: calc(100vh - 80px); box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+.left-sidebar { min-width: 240px; }
+.sidebar-resizer {
+  width: 8px;
+  cursor: col-resize;
+  position: relative;
+  align-self: stretch;
+}
+.sidebar-resizer::before {
+  content: "";
+  position: absolute;
+  left: 3px;
+  top: 8px;
+  bottom: 8px;
+  width: 2px;
+  border-radius: 2px;
+  background: rgba(0, 0, 0, 0.08);
+  transition: background 0.2s;
+}
+.sidebar-resizer:hover::before {
+  background: rgba(0, 0, 0, 0.2);
+}
 
 /* Panel Cards */
 .panel-card { border: 1px solid #e0e0e0; border-radius: 6px; padding: 10px; margin-bottom: 10px; background: #fafafa; }
@@ -3134,6 +3906,22 @@ textarea:disabled { background-color: #f5f5f5; color: #999; cursor: not-allowed;
 }
 .file-item:hover { background: #f8f8f8; border-color: #c0c0c0; }
 .file-item.active { background: #d4edda; border-color: #28a745; font-weight: 500; }
+
+/* Segment Scores */
+.panel-subsection { margin-top: 10px; padding-top: 8px; border-top: 1px dashed #e0e0e0; }
+.panel-subsection-header { display: flex; justify-content: space-between; align-items: center; }
+.panel-subsection-title { font-size: 0.78rem; font-weight: 600; color: #333; }
+.panel-subsection-meta { font-size: 0.7rem; color: #888; }
+.segment-filter { display: flex; align-items: center; gap: 6px; margin-top: 6px; }
+.segment-filter label { font-size: 0.75rem; color: #666; }
+.segment-filter .input { width: 90px; }
+.segment-count { font-size: 0.7rem; color: #666; margin-left: auto; }
+.segment-list { max-height: 220px; overflow-y: auto; margin-top: 8px; }
+.segment-item { display: flex; align-items: center; justify-content: space-between; padding: 6px 8px; border: 1px solid #e0e0e0; border-radius: 6px; margin-bottom: 6px; cursor: pointer; font-size: 0.8rem; }
+.segment-item:hover { background: #f8f8f8; border-color: #cfcfcf; }
+.segment-item.highlight { background: #fff7ed; border-color: #f59e0b; }
+.segment-range { color: #333; }
+.segment-score { font-weight: 600; color: #b45309; }
 
 /* Labels */
 .label-section { margin-bottom: 8px; }

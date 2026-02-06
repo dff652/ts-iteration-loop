@@ -30,12 +30,27 @@ from src.api import data, annotation, training, inference
 from src.webui.training_ui import training_ui
 
 # 创建 FastAPI 应用
+from contextlib import asynccontextmanager
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup logic
+    init_db()
+    print("=" * 60)
+    print(f"🚀 {settings.APP_NAME} 启动成功")
+    print(f"📖 API 文档: http://localhost:{settings.API_PORT}/docs")
+    print(f"🎯 微调界面: http://localhost:{settings.API_PORT}/train-ui")
+    print("=" * 60)
+    yield
+    # Shutdown logic if needed
+
 app = FastAPI(
     title=settings.APP_NAME,
     version=settings.APP_VERSION,
     description="时序异常检测迭代循环系统 API",
     docs_url="/docs",
-    redoc_url="/redoc"
+    redoc_url="/redoc",
+    lifespan=lifespan
 )
 
 # CORS 中间件
@@ -84,16 +99,6 @@ async def root():
 async def redirect_to_train_ui():
     """重定向到微调界面"""
     return RedirectResponse(url="/train-ui")
-
-@app.on_event("startup")
-async def startup_event():
-    """应用启动时初始化数据库"""
-    init_db()
-    print("=" * 60)
-    print(f"🚀 {settings.APP_NAME} 启动成功")
-    print(f"📖 API 文档: http://localhost:{settings.API_PORT}/docs")
-    print(f"🎯 微调界面: http://localhost:{settings.API_PORT}/train-ui")
-    print("=" * 60)
 
 if __name__ == "__main__":
     # 启动 Annotator 后端子进程
