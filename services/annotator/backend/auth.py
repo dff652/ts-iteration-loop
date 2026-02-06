@@ -93,18 +93,29 @@ def get_current_user_from_request():
     return verify_token(auth_header)
 
 
+def _is_truthy(value):
+    if value is None:
+        return False
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _is_auth_bypass_enabled():
+    # Disabled by default. Enable only in local development when needed.
+    return _is_truthy(os.environ.get("ANNOTATOR_AUTH_BYPASS", "false"))
+
+
 def login_required(f):
     """登录验证装饰器"""
     @wraps(f)
     def decorated_function(*args, **kwargs):
-        # BYPASS AUTHENTICATION
-        # username = get_current_user_from_request()
-        # if not username:
-        #     return jsonify({'success': False, 'error': 'Unauthorized'}), 401
-        
-        # Hardcode default user to 'douff' (or whatever main user you want)
-        username = 'douff' 
-        
+        if _is_auth_bypass_enabled():
+            username = os.environ.get("ANNOTATOR_AUTH_BYPASS_USER", "douff")
+            return f(*args, current_user=username, **kwargs)
+
+        username = get_current_user_from_request()
+        if not username:
+            return jsonify({'success': False, 'error': 'Unauthorized'}), 401
+
         # Pass username to route
         return f(*args, current_user=username, **kwargs)
     return decorated_function

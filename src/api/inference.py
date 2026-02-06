@@ -75,7 +75,8 @@ def run_inference_task(task_id: str, model: str, algorithm: str, input_files: Li
         if not task:
             return
             
-        task.status = TaskStatus.PROCESSING
+        # Use schema-defined status to avoid enum mismatch.
+        task.status = TaskStatus.RUNNING
         db.commit()
         
         # 执行推理

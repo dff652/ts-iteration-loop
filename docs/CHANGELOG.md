@@ -2,10 +2,34 @@
 
 ## [Unreleased]
 
+### 新增
+- 🗂️ **数据资产 API 化**:
+    - 新增 `/api/v1/assets` 路由（数据集列表/详情/保存/删除、来源筛选、训练导出）
+    - 数据资产管理 UI 从直连 DB 改为调用正式 API
+- 🧱 **数据库迁移机制**:
+    - 新增轻量迁移执行器 `src/db/migration.py`
+    - 新增迁移脚本 `src/db/migrations/0001_add_core_indexes.sql`
+    - 新增命令行工具 `scripts/db_migrate.py`（`--status/--apply`）
+
+### 修复
+- 🐞 **推理任务状态枚举不一致**:
+    - `TaskStatus.PROCESSING` 调整为合法状态 `TaskStatus.RUNNING`
+- 🔁 **推理导出预标注断点**:
+    - 补齐 `CheckOutlierAdapter.convert_to_annotation_format`，支持多种输入形态
+- 🔐 **Annotator 鉴权恢复**:
+    - 默认启用鉴权，支持 `ANNOTATOR_AUTH_BYPASS=true` 作为开发态显式开关
+
+### 测试
+- ✅ 新增最小回归测试 `tests/test_p0_smoke.py` 与 `tests/conftest.py`
+
 ### 文档
 - 📝 新增“按优先级执行”的整改路线（P0/P1/P2）：
   - `docs/TODO.md` 增加当前执行顺序与阶段目标
   - `docs/DEVELOPMENT.md` 增加 2026-02-06 优先级整改计划与验收标准
+- 🗃️ 新增“DB-First 单一真相源（SSOT）”架构决策文档说明：
+  - 明确在线读写统一走 DB，文件仅作为导入/导出边界产物
+  - 明确标注转换功能保留为 import/export/migrate 适配器，不再用于主流程中转
+  - 新增 `docs/TODO.md` 的 DB-First 分阶段实施拆解
 
 ## [0.3.3] - 2026-02-03
 

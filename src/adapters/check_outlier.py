@@ -5,9 +5,10 @@ check_outlier 项目适配器
 import os
 import sys
 import json
+import uuid
 import subprocess
 from pathlib import Path
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Any
 
 from configs.settings import settings
 
@@ -36,6 +37,155 @@ class CheckOutlierAdapter:
                 return False
         # If not in active_processes, we still marked it as cancelled, so return True
         return True
+
+    def convert_to_annotation_format(self, inference_result: Any) -> str:
+        """
+        将推理结果转换为标注工具可导入的 JSON 文件。
+
+        支持输入:
+        - dict: {"results": [...]} 或已是 {"filename","annotations"} 结构
+        - list: 多条结果
+        - str: JSON 字符串或 JSON 文件路径
+        """
+        payload = inference_result
+        if isinstance(inference_result, str):
+            candidate_path = Path(inference_result.strip())
+            if candidate_path.exists():
+                with open(candidate_path, "r", encoding="utf-8") as f:
+                    payload = json.load(f)
+            else:
+                payload = json.loads(inference_result)
+
+        rows = self._extract_annotation_rows(payload)
+
+        output_dir = Path("/tmp/ts_iteration_loop")
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_path = output_dir / f"inference_annotations_{uuid.uuid4().hex}.json"
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(rows, f, ensure_ascii=False, indent=2)
+        return str(output_path)
+
+    def _extract_annotation_rows(self, payload: Any) -> List[Dict]:
+        if payload is None:
+            return []
+
+        if isinstance(payload, list):
+            rows: List[Dict] = []
+            for item in payload:
+                rows.extend(self._normalize_result_item(item))
+            return rows
+
+        if isinstance(payload, dict):
+            if isinstance(payload.get("results"), list):
+                rows: List[Dict] = []
+                for item in payload["results"]:
+                    rows.extend(self._normalize_result_item(item))
+                return rows
+            return self._normalize_result_item(payload)
+
+        return []
+
+    def _normalize_result_item(self, item: Any) -> List[Dict]:
+        if not isinstance(item, dict):
+            return []
+
+        # Already in annotator import format.
+        filename = item.get("filename") or item.get("file")
+        annotations = item.get("annotations")
+        if filename and isinstance(annotations, list):
+            return [{
+                "filename": filename,
+                "annotations": annotations,
+                "source": item.get("source", "inference")
+            }]
+
+        # Wrapped result from adapter output: {"file": "...", "result": ...}
+        wrapped_result = item.get("result")
+        if wrapped_result is None:
+            return []
+
+        return self._parse_wrapped_result(wrapped_result, fallback_filename=item.get("file"))
+
+    def _parse_wrapped_result(self, wrapped_result: Any, fallback_filename: Optional[str]) -> List[Dict]:
+        if isinstance(wrapped_result, str):
+            try:
+                wrapped_result = json.loads(wrapped_result)
+            except Exception:
+                return []
+
+        if isinstance(wrapped_result, list):
+            rows: List[Dict] = []
+            for entry in wrapped_result:
+                if not isinstance(entry, dict):
+                    continue
+                if entry.get("filename") and isinstance(entry.get("annotations"), list):
+                    rows.append({
+                        "filename": entry["filename"],
+                        "annotations": entry["annotations"],
+                        "source": entry.get("source", "inference")
+                    })
+            return rows
+
+        if isinstance(wrapped_result, dict):
+            # Single record already in target format.
+            if wrapped_result.get("filename") and isinstance(wrapped_result.get("annotations"), list):
+                return [{
+                    "filename": wrapped_result["filename"],
+                    "annotations": wrapped_result["annotations"],
+                    "source": wrapped_result.get("source", "inference")
+                }]
+
+            # Legacy shape from mocked tests.
+            anomalies = wrapped_result.get("detected_anomalies") or wrapped_result.get("anomalies") or []
+            if not fallback_filename or not isinstance(anomalies, list):
+                return []
+
+            converted_annotations = []
+            for idx, anomaly in enumerate(anomalies):
+                if not isinstance(anomaly, dict):
+                    continue
+                segment = self._extract_segment(anomaly)
+                if segment is None:
+                    continue
+                converted_annotations.append({
+                    "label": str(anomaly.get("type") or anomaly.get("label") or f"inference_{idx+1}"),
+                    "color": "#d946ef",
+                    "segments": [segment],
+                    "analysis": anomaly.get("reason") or anomaly.get("analysis") or ""
+                })
+
+            if converted_annotations:
+                return [{
+                    "filename": fallback_filename,
+                    "annotations": converted_annotations,
+                    "source": "inference"
+                }]
+
+        return []
+
+    def _extract_segment(self, anomaly: Dict) -> Optional[Dict]:
+        interval = anomaly.get("interval") or anomaly.get("segment")
+        if isinstance(interval, (list, tuple)) and len(interval) >= 2:
+            try:
+                start = int(interval[0])
+                end = int(interval[1])
+                if end < start:
+                    start, end = end, start
+                return {"start": start, "end": end}
+            except Exception:
+                return None
+
+        if "start" in anomaly and "end" in anomaly:
+            try:
+                start = int(anomaly["start"])
+                end = int(anomaly["end"])
+                if end < start:
+                    start, end = end, start
+                return {"start": start, "end": end}
+            except Exception:
+                return None
+
+        return None
     
     def run_batch_inference(
         self,

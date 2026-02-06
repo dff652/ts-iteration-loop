@@ -11,6 +11,7 @@ import uuid
 import pandas as pd
 import tempfile
 import os
+import httpx
 
 from configs.settings import settings
 from src.adapters.chatts_training import ChatTSTrainingAdapter
@@ -73,6 +74,24 @@ LOG_SCROLL_CSS = """
   overflow: auto;
 }
 """
+
+ASSETS_API_BASE = f"http://127.0.0.1:{settings.API_PORT}/api/v1/assets"
+
+
+def _assets_api_call(method: str, path: str, params: Optional[dict] = None, payload: Optional[dict] = None) -> Dict:
+    url = f"{ASSETS_API_BASE}{path}"
+    try:
+        with httpx.Client(timeout=20.0) as client:
+            resp = client.request(method.upper(), url, params=params, json=payload)
+        data = resp.json() if resp.content else {}
+        if resp.status_code >= 400:
+            detail = data.get("detail") if isinstance(data, dict) else None
+            return {"success": False, "error": detail or f"HTTP {resp.status_code}"}
+        if isinstance(data, dict):
+            return data
+        return {"success": True, "data": data}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
 
 
 def get_unified_file_list() -> List[str]:
@@ -2174,6 +2193,339 @@ def create_training_ui() -> gr.Blocks:
                     ann_mgr_list.change(fn=load_ann_content, inputs=[ann_mgr_dir, ann_mgr_list], outputs=ann_mgr_view)
                     delete_ann_btn.click(fn=delete_ann_file, inputs=[ann_mgr_dir, ann_mgr_list], outputs=[ann_op_status, ann_mgr_list])
 
+                # 1.5 审核队列管理
+                with gr.Tab("审核队列 (Review Queue)"):
+                    gr.Markdown("### ✅ 审核流转管理")
+                    review_rows_state = gr.State({})
+
+                    with gr.Row():
+                        with gr.Column(scale=1):
+                            review_source_type = gr.Dropdown(
+                                label="来源类型",
+                                choices=["inference", "annotation"],
+                                value="inference",
+                                interactive=True,
+                            )
+                            review_strategy = gr.Dropdown(
+                                label="抽样策略",
+                                choices=["topk", "low_score", "random"],
+                                value="topk",
+                                interactive=True,
+                            )
+                            review_score_by = gr.Dropdown(
+                                label="评分字段",
+                                choices=["score_avg", "score_max"],
+                                value="score_avg",
+                                interactive=True,
+                            )
+                            review_method = gr.Dropdown(
+                                label="算法筛选",
+                                choices=[""] + TRAINING_MODEL_FAMILIES + ["timer", "adtk_hbos", "ensemble"],
+                                value="",
+                                interactive=True,
+                            )
+                            review_status_filter = gr.Dropdown(
+                                label="状态筛选",
+                                choices=["", "pending", "approved", "rejected", "needs_fix"],
+                                value="",
+                                interactive=True,
+                            )
+                            review_min_score = gr.Number(label="最小分", value=None, precision=3)
+                            review_max_score = gr.Number(label="最大分", value=None, precision=3)
+                            review_limit = gr.Slider(label="列表数量", minimum=20, maximum=500, step=20, value=200)
+                            review_sample_limit = gr.Slider(label="抽样数量", minimum=10, maximum=500, step=10, value=50)
+                            review_reviewer = gr.Textbox(label="审核人", value=settings.DEFAULT_USER)
+                            with gr.Row():
+                                review_sample_btn = gr.Button("🧪 抽样入队", variant="primary")
+                                review_refresh_btn = gr.Button("🔄 刷新队列")
+                            review_stats_box = gr.Textbox(label="队列统计", interactive=False)
+
+                        with gr.Column(scale=2):
+                            review_queue_items = gr.CheckboxGroup(label="审核项（可多选）", choices=[])
+                            with gr.Row():
+                                review_mark_approved_btn = gr.Button("批量通过", variant="primary")
+                                review_mark_rejected_btn = gr.Button("批量驳回")
+                                review_mark_fix_btn = gr.Button("批量待修正")
+                                review_mark_pending_btn = gr.Button("批量改回待审")
+                            review_action_status = gr.Textbox(label="操作状态", interactive=False)
+                            review_preview_json = gr.JSON(label="选中项详情", height=320)
+
+                    def _normalize_review_method(text: str) -> Optional[str]:
+                        value = (text or "").strip()
+                        return value or None
+
+                    def _load_review_rows(source_type: str, status: str, method: str, limit: int):
+                        try:
+                            from src.db.database import SessionLocal, ReviewQueue, InferenceResult, init_db
+                            init_db()
+                            db = SessionLocal()
+                            try:
+                                q = db.query(ReviewQueue, InferenceResult).outerjoin(
+                                    InferenceResult, ReviewQueue.source_id == InferenceResult.id
+                                )
+                                if source_type:
+                                    q = q.filter(ReviewQueue.source_type == source_type)
+                                if status:
+                                    q = q.filter(ReviewQueue.status == status)
+                                norm_method = _normalize_review_method(method)
+                                if norm_method:
+                                    q = q.filter(ReviewQueue.method == norm_method)
+                                q = q.order_by(ReviewQueue.updated_at.desc())
+                                if limit and int(limit) > 0:
+                                    q = q.limit(int(limit))
+                                rows = q.all()
+                            finally:
+                                db.close()
+                        except Exception as e:
+                            return gr.update(choices=[], value=[]), f"加载失败: {e}", {}, {}
+
+                        items = []
+                        state_map = {}
+                        stats = {"total": 0, "pending": 0, "approved": 0, "rejected": 0, "needs_fix": 0}
+                        for review, inf in rows:
+                            stats["total"] += 1
+                            stats[review.status] = stats.get(review.status, 0) + 1
+                            filename = None
+                            if inf and inf.result_path:
+                                filename = os.path.basename(inf.result_path)
+                            item = {
+                                "id": review.id,
+                                "source_type": review.source_type,
+                                "source_id": review.source_id,
+                                "point_name": review.point_name,
+                                "method": review.method,
+                                "model": review.model,
+                                "score": review.score,
+                                "status": review.status,
+                                "reviewer": review.reviewer,
+                                "filename": filename,
+                                "updated_at": review.updated_at.isoformat() if review.updated_at else None,
+                                "created_at": review.created_at.isoformat() if review.created_at else None,
+                            }
+                            label = f"[{item['status']}] {item['point_name'] or item['source_id']} | {item['method'] or '-'} | {item['score'] if item['score'] is not None else '-'}"
+                            items.append((label, item["id"]))
+                            state_map[item["id"]] = item
+
+                        stats_text = (
+                            f"总 {stats.get('total', 0)} | 待审 {stats.get('pending', 0)} | "
+                            f"通过 {stats.get('approved', 0)} | 驳回 {stats.get('rejected', 0)} | 待修正 {stats.get('needs_fix', 0)}"
+                        )
+                        preview = next(iter(state_map.values()), {})
+                        return gr.update(choices=items, value=[]), stats_text, state_map, preview
+
+                    def _sample_review_rows(source_type, strategy, score_by, method, min_score, max_score, limit):
+                        try:
+                            from sqlalchemy import func as _sa_func
+                            from src.db.database import SessionLocal, ReviewQueue, InferenceResult, init_db
+                            init_db()
+                            db = SessionLocal()
+                            created = 0
+                            skipped = 0
+                            source_type = (source_type or "inference").strip()
+                            strategy = (strategy or "topk").strip()
+                            norm_method = _normalize_review_method(method)
+                            limit = int(limit or 50)
+                            try:
+                                if source_type == "annotation":
+                                    ann_dir = Path(settings.ANNOTATIONS_ROOT) / settings.DEFAULT_USER
+                                    entries = []
+                                    if ann_dir.exists():
+                                        for p in ann_dir.glob("*.json"):
+                                            try:
+                                                payload = json.loads(p.read_text(encoding="utf-8"))
+                                                source_id = payload.get("filename") or p.stem
+                                            except Exception:
+                                                source_id = p.stem
+                                            entries.append((source_id, p.stat().st_mtime))
+                                    if strategy == "random":
+                                        import random
+                                        random.shuffle(entries)
+                                    elif strategy == "low_score":
+                                        entries.sort(key=lambda x: x[1])
+                                    else:
+                                        entries.sort(key=lambda x: x[1], reverse=True)
+                                    if limit > 0:
+                                        entries = entries[:limit]
+                                    for source_id, _ in entries:
+                                        exists = db.query(ReviewQueue).filter(
+                                            ReviewQueue.source_type == "annotation",
+                                            ReviewQueue.source_id == source_id,
+                                        ).first()
+                                        if exists:
+                                            skipped += 1
+                                            continue
+                                        db.add(ReviewQueue(
+                                            id=str(uuid.uuid4()),
+                                            source_type="annotation",
+                                            source_id=source_id,
+                                            method=norm_method,
+                                            model=None,
+                                            point_name=source_id,
+                                            score=None,
+                                            strategy=strategy,
+                                            status="pending",
+                                            reviewer=None,
+                                        ))
+                                        created += 1
+                                else:
+                                    score_col = InferenceResult.score_avg if (score_by or "score_avg") == "score_avg" else InferenceResult.score_max
+                                    q = db.query(InferenceResult)
+                                    if norm_method:
+                                        q = q.filter(InferenceResult.method == norm_method)
+                                    if min_score is not None:
+                                        q = q.filter(score_col >= float(min_score))
+                                    if max_score is not None:
+                                        q = q.filter(score_col <= float(max_score))
+                                    if strategy == "low_score":
+                                        q = q.order_by(score_col.asc(), InferenceResult.created_at.desc())
+                                    elif strategy == "random":
+                                        q = q.order_by(_sa_func.random())
+                                    else:
+                                        q = q.order_by(score_col.desc(), InferenceResult.created_at.desc())
+                                    if limit > 0:
+                                        q = q.limit(limit)
+                                    for row in q.all():
+                                        exists = db.query(ReviewQueue).filter(
+                                            ReviewQueue.source_type == "inference",
+                                            ReviewQueue.source_id == row.id,
+                                        ).first()
+                                        if exists:
+                                            skipped += 1
+                                            continue
+                                        score_val = row.score_avg if (score_by or "score_avg") == "score_avg" else row.score_max
+                                        db.add(ReviewQueue(
+                                            id=str(uuid.uuid4()),
+                                            source_type="inference",
+                                            source_id=row.id,
+                                            method=row.method,
+                                            model=row.model,
+                                            point_name=row.point_name,
+                                            score=score_val,
+                                            strategy=strategy,
+                                            status="pending",
+                                            reviewer=None,
+                                        ))
+                                        created += 1
+                                db.commit()
+                            except Exception:
+                                db.rollback()
+                                raise
+                            finally:
+                                db.close()
+                            return f"✅ 抽样完成：新增 {created} 条，跳过 {skipped} 条"
+                        except Exception as e:
+                            return f"❌ 抽样失败: {e}"
+
+                    def _batch_update_review_status(selected_ids, status, reviewer):
+                        ids = list(selected_ids or [])
+                        if not ids:
+                            return "❌ 请先选择审核项"
+                        if status not in {"pending", "approved", "rejected", "needs_fix"}:
+                            return "❌ 非法状态"
+                        try:
+                            from datetime import datetime
+                            from src.db.database import SessionLocal, ReviewQueue, init_db
+                            init_db()
+                            db = SessionLocal()
+                            try:
+                                updated = db.query(ReviewQueue).filter(ReviewQueue.id.in_(ids)).update(
+                                    {
+                                        ReviewQueue.status: status,
+                                        ReviewQueue.reviewer: (reviewer or "").strip() or None,
+                                        ReviewQueue.updated_at: datetime.utcnow(),
+                                    },
+                                    synchronize_session=False,
+                                )
+                                db.commit()
+                            except Exception:
+                                db.rollback()
+                                raise
+                            finally:
+                                db.close()
+                            return f"✅ 已更新 {updated} 条为 {status}"
+                        except Exception as e:
+                            return f"❌ 更新失败: {e}"
+
+                    def _preview_review_items(selected_ids, state_map):
+                        if not selected_ids:
+                            return {}
+                        result = []
+                        mapping = state_map or {}
+                        for rid in selected_ids:
+                            if rid in mapping:
+                                result.append(mapping[rid])
+                        return result[0] if len(result) == 1 else result
+
+                    review_refresh_btn.click(
+                        fn=_load_review_rows,
+                        inputs=[review_source_type, review_status_filter, review_method, review_limit],
+                        outputs=[review_queue_items, review_stats_box, review_rows_state, review_preview_json],
+                    )
+
+                    review_sample_btn.click(
+                        fn=_sample_review_rows,
+                        inputs=[
+                            review_source_type,
+                            review_strategy,
+                            review_score_by,
+                            review_method,
+                            review_min_score,
+                            review_max_score,
+                            review_sample_limit,
+                        ],
+                        outputs=review_action_status,
+                    ).then(
+                        fn=_load_review_rows,
+                        inputs=[review_source_type, review_status_filter, review_method, review_limit],
+                        outputs=[review_queue_items, review_stats_box, review_rows_state, review_preview_json],
+                    )
+
+                    review_mark_approved_btn.click(
+                        fn=lambda ids, reviewer: _batch_update_review_status(ids, "approved", reviewer),
+                        inputs=[review_queue_items, review_reviewer],
+                        outputs=review_action_status,
+                    ).then(
+                        fn=_load_review_rows,
+                        inputs=[review_source_type, review_status_filter, review_method, review_limit],
+                        outputs=[review_queue_items, review_stats_box, review_rows_state, review_preview_json],
+                    )
+
+                    review_mark_rejected_btn.click(
+                        fn=lambda ids, reviewer: _batch_update_review_status(ids, "rejected", reviewer),
+                        inputs=[review_queue_items, review_reviewer],
+                        outputs=review_action_status,
+                    ).then(
+                        fn=_load_review_rows,
+                        inputs=[review_source_type, review_status_filter, review_method, review_limit],
+                        outputs=[review_queue_items, review_stats_box, review_rows_state, review_preview_json],
+                    )
+
+                    review_mark_fix_btn.click(
+                        fn=lambda ids, reviewer: _batch_update_review_status(ids, "needs_fix", reviewer),
+                        inputs=[review_queue_items, review_reviewer],
+                        outputs=review_action_status,
+                    ).then(
+                        fn=_load_review_rows,
+                        inputs=[review_source_type, review_status_filter, review_method, review_limit],
+                        outputs=[review_queue_items, review_stats_box, review_rows_state, review_preview_json],
+                    )
+
+                    review_mark_pending_btn.click(
+                        fn=lambda ids, reviewer: _batch_update_review_status(ids, "pending", reviewer),
+                        inputs=[review_queue_items, review_reviewer],
+                        outputs=review_action_status,
+                    ).then(
+                        fn=_load_review_rows,
+                        inputs=[review_source_type, review_status_filter, review_method, review_limit],
+                        outputs=[review_queue_items, review_stats_box, review_rows_state, review_preview_json],
+                    )
+
+                    review_queue_items.change(
+                        fn=_preview_review_items,
+                        inputs=[review_queue_items, review_rows_state],
+                        outputs=review_preview_json,
+                    )
+
                 # 2. 训练数据管理
                 with gr.Tab("训练数据 (Training Data)"):
                     gr.Markdown("### 🎯 微调数据管理 (Converted JSONL)")
@@ -2386,79 +2738,40 @@ def create_training_ui() -> gr.Blocks:
                     # --- Helper Functions for Construction ---
 
                     def _get_dataset_items_count(ds_id: str):
-                         try:
-                            from src.db.database import SessionLocal, DatasetAsset, init_db
-                            init_db()
-                            db = SessionLocal()
-                            asset = db.query(DatasetAsset).filter(DatasetAsset.id == ds_id).first()
-                            return asset.point_count if asset else 0
-                         except:
+                        if not ds_id:
                             return 0
-                         finally:
-                            try:
-                                db.close()
-                            except: pass
+                        resp = _assets_api_call("GET", f"/datasets/{ds_id}")
+                        if not resp.get("success"):
+                            return 0
+                        asset = (resp.get("data") or {}).get("asset") or {}
+                        return int(asset.get("point_count") or 0)
+
+                    def _normalize_source_type(source_type: str) -> str:
+                        text = (source_type or "").lower()
+                        if "inference" in text:
+                            return "inference"
+                        return "annotations"
 
                     def refresh_source_list_logic(source_type, method, min_s, max_s, keyword):
-                        """Fetch source items based on filters"""
-                        items = []
-                        
-                        # 1. Annotations Source
-                        if "Answer" in source_type or "Annotations" in source_type:
-                            ann_dir = Path(settings.ANNOTATIONS_ROOT) / settings.DEFAULT_USER
-                            if ann_dir.exists():
-                                for f in ann_dir.glob("*.json"):
-                                    try:
-                                        p_name = f.stem.replace(".csv", "").replace("annotations_", "").replace("数据集", "")
-                                        # Simple keyword filter
-                                        if keyword and keyword.lower() not in p_name.lower():
-                                            continue
-                                        items.append(p_name)
-                                    except: continue
-                            items = sorted(list(set(items)))
-                            # Format: (Label, Value)
-                            # Ideally we could fetch scores here if DB allows, for MVP just list names
-                            choices = [(name, name) for name in items]
-                            return gr.CheckboxGroup(choices=choices, value=[]), f"Found: {len(choices)}"
+                        """Fetch source items via assets API."""
+                        params = {
+                            "source_type": _normalize_source_type(source_type),
+                            "method": method or None,
+                            "keyword": keyword or None,
+                            "limit": 200,
+                        }
+                        if min_s is not None:
+                            params["min_score"] = float(min_s)
+                        if max_s is not None:
+                            params["max_score"] = float(max_s)
 
-                        # 2. Inference Source (Future / DB integration)
-                        # Reusing _fetch_inference_index_map logic from app.py effectively needs direct DB access here
-                        # For MVP Redesign, we implement basic DB query logic similar to app.py
-                        try:
-                            from src.db.database import SessionLocal, InferenceResult, init_db
-                            init_db()
-                            db = SessionLocal()
-                            query = db.query(InferenceResult)
-                            
-                            if method:
-                                query = query.filter(InferenceResult.method == method)
-                            
-                            # Score filtering
-                            if min_s is not None and min_s > 0:
-                                query = query.filter(InferenceResult.score_avg >= min_s)
-                            if max_s is not None and max_s < 1.0:
-                                query = query.filter(InferenceResult.score_avg <= max_s)
-                                
-                            rows = query.order_by(InferenceResult.score_avg.desc()).limit(200).all() # Limit for performance
-                            
-                            seen = set()
-                            choices = []
-                            for r in rows:
-                                if not r.point_name: continue
-                                if keyword and keyword.lower() not in r.point_name.lower():
-                                    continue
-                                if r.point_name in seen: continue
-                                seen.add(r.point_name)
-                                
-                                label = f"{r.point_name} | Score: {r.score_avg:.2f} ({r.method})"
-                                choices.append((label, r.point_name))
-                                
-                            return gr.CheckboxGroup(choices=choices, value=[]), f"Found: {len(choices)} (Top 200)"
-                        except Exception as e:
-                            return gr.CheckboxGroup(choices=[], value=[]), f"Error: {e}"
-                        finally:
-                           try: db.close() 
-                           except: pass
+                        resp = _assets_api_call("GET", "/sources", params=params)
+                        if not resp.get("success"):
+                            return gr.CheckboxGroup(choices=[], value=[]), f"Error: {resp.get('error')}"
+
+                        choices_data = ((resp.get("data") or {}).get("choices") or [])
+                        choices = [(str(c.get("label", "")), str(c.get("value", ""))) for c in choices_data]
+                        return gr.CheckboxGroup(choices=choices, value=[]), f"Found: {len(choices)}"
 
                     def transfer_add_logic(src_selected, current_target_items):
                         if not src_selected:
@@ -2485,17 +2798,14 @@ def create_training_ui() -> gr.Blocks:
                         return new_list, gr.CheckboxGroup(choices=new_list, value=[]), [], f"Removed {removed_count} items"
 
                     def _list_dataset_assets_simple():
-                        try:
-                            from src.db.database import SessionLocal, DatasetAsset, init_db
-                            init_db()
-                            db = SessionLocal()
-                            rows = db.query(DatasetAsset).order_by(DatasetAsset.created_at.desc()).all()
-                            choices = [(f"{r.name} ({r.dataset_type}, {r.point_count} pts)", r.id) for r in rows]
-                            return choices
-                        except: return []
-                        finally: 
-                            try: db.close() 
-                            except: pass
+                        resp = _assets_api_call("GET", "/datasets")
+                        if not resp.get("success"):
+                            return []
+                        rows = (resp.get("data") or {}).get("assets") or []
+                        return [
+                            (f"{r.get('name')} ({r.get('dataset_type')}, {r.get('point_count', 0)} pts)", r.get("id"))
+                            for r in rows if r.get("id")
+                        ]
 
                     def refresh_target_ds_list_logic():
                         choices = _list_dataset_assets_simple()
@@ -2504,109 +2814,50 @@ def create_training_ui() -> gr.Blocks:
                     def load_target_ds_logic(ds_id):
                         if not ds_id:
                             return [], [], "", "train", "", "No dataset selected" # Reset
-                        
-                        try:
-                            from src.db.database import SessionLocal, DatasetAsset, DatasetItem, init_db
-                            init_db()
-                            db = SessionLocal()
-                            asset = db.query(DatasetAsset).filter(DatasetAsset.id == ds_id).first()
-                            if not asset:
-                                return [], [], "", "train", "", "Dataset not found"
-                            
-                            items = db.query(DatasetItem.point_name).filter(DatasetItem.dataset_id == ds_id).all()
-                            point_list = sorted([p[0] for p in items])
-                            
-                            meta_note = ""
-                            if asset.meta:
-                                try:
-                                    meta_note = json.loads(asset.meta).get("note", "")
-                                except: pass
-                            
-                            return (
-                                point_list,                       # State
-                                gr.CheckboxGroup(choices=point_list, value=[]), # Checkbox
-                                asset.name,                       # Name
-                                asset.dataset_type,               # Type
-                                meta_note,                        # Note
-                                f"Loaded {len(point_list)} items" # Msg
-                            )
-                        except Exception as e:
-                            return [], [], "", "train", "", f"Error: {e}"
-                        finally:
-                            try: db.close()
-                            except: pass
+
+                        resp = _assets_api_call("GET", f"/datasets/{ds_id}")
+                        if not resp.get("success"):
+                            return [], [], "", "train", "", f"Error: {resp.get('error')}"
+
+                        data = resp.get("data") or {}
+                        asset = data.get("asset") or {}
+                        point_list = sorted(data.get("items") or [])
+                        return (
+                            point_list,
+                            gr.CheckboxGroup(choices=point_list, value=[]),
+                            asset.get("name", ""),
+                            asset.get("dataset_type", "train"),
+                            asset.get("note", ""),
+                            f"Loaded {len(point_list)} items",
+                        )
 
                     def save_target_ds_logic(target_items, name, ds_type, note, overwrite, freeze):
                         if not name: return "❌ 必须输入数据集名称"
                         if not target_items: return "❌ 列表为空，无法保存"
-                        
-                        # Reuse existing save logic logic but adapted
-                        # ... (Simplified version of save_dataset from before)
-                        try:
-                            from src.db.database import SessionLocal, DatasetAsset, DatasetItem, init_db
-                            init_db()
-                            db = SessionLocal()
-                            
-                            # Check overlap if creating 'train' vs 'golden'
-                            other_type = "golden" if ds_type == "train" else "train"
-                            # ... (Assuming overlap check logic is desired)
-                            
-                            asset = db.query(DatasetAsset).filter(DatasetAsset.name == name).first()
-                            if asset and not overwrite:
-                                return "❌ 数据集已存在 (需勾选允许覆盖)"
-                            if asset and asset.status == "frozen":
-                                return "❌ 目标数据集已冻结"
-                            
-                            status = "frozen" if (ds_type == "golden" or freeze) else "draft"
-                            
-                            if not asset:
-                                asset = DatasetAsset(
-                                    id=str(uuid.uuid4()),
-                                    name=name,
-                                    dataset_type=ds_type,
-                                    status=status,
-                                    point_count=len(target_items),
-                                    meta=json.dumps({"note": note}, ensure_ascii=False)
-                                )
-                                db.add(asset)
-                            else:
-                                asset.dataset_type = ds_type
-                                asset.status = status
-                                asset.point_count = len(target_items)
-                                asset.meta = json.dumps({"note": note}, ensure_ascii=False)
-                                # Clear old items
-                                db.query(DatasetItem).filter(DatasetItem.dataset_id == asset.id).delete()
-                            
-                            # Add items
-                            for p in target_items:
-                                db.add(DatasetItem(dataset_id=asset.id, point_name=p))
-                            
-                            db.commit()
-                            return f"✅ 已保存: {name} ({len(target_items)} pts)"
-                        except Exception as e:
-                            return f"❌ Error: {e}"
-                        finally:
-                            try: db.close() 
-                            except: pass
+
+                        resp = _assets_api_call(
+                            "POST",
+                            "/datasets/save",
+                            payload={
+                                "name": name,
+                                "dataset_type": ds_type,
+                                "items": list(target_items),
+                                "note": note or "",
+                                "overwrite": bool(overwrite),
+                                "freeze": bool(freeze),
+                            },
+                        )
+                        if not resp.get("success"):
+                            return f"❌ {resp.get('error')}"
+                        return f"✅ {resp.get('message')}"
 
                     def delete_target_ds_logic(ds_id, confirm):
                         if not ds_id: return "❌ 未选择数据集"
                         if not confirm: return "❌ 请先勾选确认删除"
-                        try:
-                            from src.db.database import SessionLocal, DatasetAsset, DatasetItem, init_db
-                            init_db()
-                            db = SessionLocal()
-                            asset = db.query(DatasetAsset).filter(DatasetAsset.id == ds_id).first()
-                            if not asset: return "❌ 不存在"
-                            db.query(DatasetItem).filter(DatasetItem.dataset_id == ds_id).delete()
-                            db.delete(asset)
-                            db.commit()
-                            return "✅ 已删除"
-                        except Exception as e:
-                            return f"❌ Error: {e}"
-                        finally:
-                            try: db.close() 
-                            except: pass
+                        resp = _assets_api_call("DELETE", f"/datasets/{ds_id}")
+                        if not resp.get("success"):
+                            return f"❌ {resp.get('error')}"
+                        return "✅ 已删除"
 
                     # --- Bindings (Construction) ---
                     src_refresh_btn.click(
@@ -2692,91 +2943,22 @@ def create_training_ui() -> gr.Blocks:
                          return gr.Dropdown(choices=choices)
 
                     def export_training_dataset(dataset_id: str, model_family: str, output_name: str, approved_only: bool):
-                        db = None
                         if not dataset_id:
                             return "❌ 未选择数据集"
-                        try:
-                            from src.db.database import SessionLocal, DatasetAsset, DatasetItem, ReviewQueue, init_db
-                            import tempfile
-                            init_db()
-                            db = SessionLocal()
-                            asset = db.query(DatasetAsset).filter(DatasetAsset.id == dataset_id).first()
-                            if not asset:
-                                return "❌ 数据集不存在"
-                            if asset.dataset_type != "train":
-                                return "❌ 仅允许导出 train 数据集"
-
-                            points = db.query(DatasetItem.point_name).filter(DatasetItem.dataset_id == dataset_id).all()
-                            point_set = {str(p[0]) for p in points}
-                            if not point_set:
-                                return "❌ 数据集为空"
-
-                            approved_set = None
-                            if approved_only:
-                                rows = db.query(ReviewQueue.source_id).filter(
-                                    ReviewQueue.source_type == 'annotation',
-                                    ReviewQueue.status == 'approved'
-                                ).all()
-                                approved_set = {str(r[0]).replace('.csv', '').replace('.json', '') for r in rows}
-
-                            ann_dir = Path(settings.ANNOTATIONS_ROOT) / settings.DEFAULT_USER
-                            if not ann_dir.exists():
-                                return "❌ 标注目录不存在"
-
-                            with tempfile.TemporaryDirectory() as tmpdir:
-                                tmp_path = Path(tmpdir)
-                                selected = 0
-                                for json_file in ann_dir.glob("*.json"):
-                                    try:
-                                        payload = json.loads(json_file.read_text(encoding="utf-8"))
-                                    except Exception:
-                                        continue
-
-                                    filename = payload.get('filename') or json_file.stem
-                                    normalized = str(filename).replace('.csv', '').replace('.json', '')
-                                    if normalized not in point_set:
-                                        continue
-                                    if approved_set is not None and normalized not in approved_set:
-                                        continue
-
-                                    out_name = json_file.name if json_file.name.endswith('.json') else f"{json_file.stem}.json"
-                                    (tmp_path / out_name).write_text(
-                                        json.dumps(payload, ensure_ascii=False, indent=2),
-                                        encoding="utf-8"
-                                    )
-                                    selected += 1
-
-                                if selected == 0:
-                                    return "❌ 未匹配到可导出的标注"
-
-                                output_base = output_name.strip() if output_name else asset.name
-                                out_dir = (settings.DATA_TRAINING_QWEN_DIR
-                                           if model_family == "qwen"
-                                           else settings.DATA_TRAINING_CHATTS_DIR)
-                                out_path = Path(out_dir) / f"{output_base}.jsonl"
-
-                                result = data_adapter.convert_annotations(
-                                    input_dir=str(tmp_path),
-                                    output_path=str(out_path),
-                                    image_dir=settings.DATA_IMAGES_DIR,
-                                    model_family=model_family,
-                                    csv_src_dir=settings.DATA_DOWNSAMPLED_DIR,
-                                )
-
-                            if not result.get("success"):
-                                return f"❌ 导出失败: {result.get('error') or result.get('stderr')}"
-
-                            # refresh dataset_info.json
-                            get_training_adapter(model_family).get_dataset_list()
-                            return f"✅ 导出完成: {result.get('output_path')}"
-                        except Exception as e:
-                            return f"❌ 导出失败: {e}"
-                        finally:
-                            try:
-                                if db:
-                                    db.close()
-                            except Exception:
-                                pass
+                        resp = _assets_api_call(
+                            "POST",
+                            "/export/training",
+                            payload={
+                                "dataset_id": dataset_id,
+                                "model_family": model_family,
+                                "output_name": (output_name or "").strip() or None,
+                                "approved_only": bool(approved_only),
+                            },
+                        )
+                        if not resp.get("success"):
+                            return f"❌ 导出失败: {resp.get('error')}"
+                        output_path = ((resp.get("data") or {}).get("output_path")) or ""
+                        return f"✅ 导出完成: {output_path}"
 
                     export_refresh_btn.click(fn=refresh_export_ds_list, outputs=export_dataset_dropdown)
                     

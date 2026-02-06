@@ -22,9 +22,10 @@ import gradio as gr
 
 from configs.settings import settings
 from src.db.database import init_db
+from src.db.migration import apply_pending_migrations
 
 # 导入 API 路由
-from src.api import data, annotation, training, inference
+from src.api import data, annotation, training, inference, assets
 
 # 导入 Gradio 界面
 from src.webui.training_ui import training_ui
@@ -36,10 +37,13 @@ from contextlib import asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup logic
     init_db()
+    applied = apply_pending_migrations()
     print("=" * 60)
     print(f"🚀 {settings.APP_NAME} 启动成功")
     print(f"📖 API 文档: http://localhost:{settings.API_PORT}/docs")
     print(f"🎯 微调界面: http://localhost:{settings.API_PORT}/train-ui")
+    if applied:
+        print(f"🗄️ 已应用迁移: {', '.join(applied)}")
     print("=" * 60)
     yield
     # Shutdown logic if needed
@@ -67,6 +71,7 @@ app.include_router(data.router, prefix="/api/v1/data", tags=["数据服务"])
 app.include_router(annotation.router, prefix="/api/v1/annotation", tags=["标注服务"])
 app.include_router(training.router, prefix="/api/v1/training", tags=["微调服务"])
 app.include_router(inference.router, prefix="/api/v1/inference", tags=["推理服务"])
+app.include_router(assets.router, prefix="/api/v1/assets", tags=["数据资产"])
 
 # 导入并注册迭代版本管理路由
 from src.api import iteration
@@ -91,7 +96,8 @@ async def root():
             "data": "/api/v1/data",
             "annotation": "/api/v1/annotation",
             "training": "/api/v1/training",
-            "inference": "/api/v1/inference"
+            "inference": "/api/v1/inference",
+            "assets": "/api/v1/assets",
         }
     }
 

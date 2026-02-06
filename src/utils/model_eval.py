@@ -425,10 +425,11 @@ def evaluate_model_on_golden(
     for point in point_names:
         true_intervals = _load_ground_truth_intervals(point, truth_path, truth_index)
         detected_intervals = detect_results.get(point)
+        point_input_csv = _resolve_input_csv(point, data_path)
         csv_data = None
-        if input_csv and input_csv.exists():
+        if point_input_csv and point_input_csv.exists():
             try:
-                csv_data = pd.read_csv(input_csv)
+                csv_data = pd.read_csv(point_input_csv)
             except Exception:
                 csv_data = None
         if csv_data is None or csv_data.empty:
