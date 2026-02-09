@@ -192,3 +192,51 @@ def test_files_endpoint_filters_candidates_by_score(annotator_env):
 
     keep = next(f for f in payload["files"] if f["name"] == "keep.csv")
     assert abs(float(keep["score_avg"]) - 0.88) < 1e-6
+
+
+def test_annotations_db_first_save_get_and_file_marker(annotator_env):
+    client = annotator_env["client"]
+    session_local = annotator_env["session_local"]
+    user_data_dir: Path = annotator_env["user_data_dir"]
+
+    (user_data_dir / "anno.csv").write_text("v\n1\n2\n", encoding="utf-8")
+
+    save_resp = client.post(
+        "/api/annotations/anno.csv",
+        json={
+            "annotations": [
+                {
+                    "id": "infer_1",
+                    "source": "inference",
+                    "label": {"id": "chatts_detected", "text": "ChatTS"},
+                    "segments": [{"start": 1, "end": 3, "count": 3}],
+                }
+            ],
+            "overall_attributes": {"device": "A"},
+        },
+    )
+    payload = save_resp.get_json()
+    assert save_resp.status_code == 200
+    assert payload["success"] is True
+    assert payload["source_kind"] == "auto"
+
+    get_resp = client.get("/api/annotations/anno.csv")
+    get_payload = get_resp.get_json()
+    assert get_resp.status_code == 200
+    assert get_payload["success"] is True
+    assert len(get_payload["annotations"]) == 1
+
+    files_resp = client.get("/api/files")
+    files_payload = files_resp.get_json()
+    assert files_resp.status_code == 200
+    assert files_payload["success"] is True
+    anno_row = next(item for item in files_payload["files"] if item["name"] == "anno.csv")
+    assert anno_row["has_annotations"] is True
+    assert int(anno_row["annotation_count"]) == 1
+    assert anno_row["annotation_source_kind"] == "auto"
+
+    with session_local() as db:
+        stored = db.query(db_mod.AnnotationRecord).filter(db_mod.AnnotationRecord.source_id == "anno").first()
+        assert stored is not None
+        assert stored.source_kind == "auto"
+        assert int(stored.segment_count or 0) == 1

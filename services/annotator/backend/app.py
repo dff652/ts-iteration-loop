@@ -76,6 +76,13 @@ _PROJECT_ROOT = os.path.abspath(os.path.join(BASE_DIR, '..', '..', '..'))
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
+from src.utils.annotation_store import (
+    get_annotation_record,
+    normalize_point_name,
+    record_to_payload,
+    upsert_annotation,
+)
+
 
 def parse_standard_filename(filename: str) -> dict:
     """
@@ -240,6 +247,42 @@ def _parse_float_arg(value: Optional[str]) -> Optional[float]:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _load_annotation_summary_map(user_id: str) -> Dict[str, Dict[str, Any]]:
+    try:
+        from src.db.database import AnnotationRecord, SessionLocal, init_db
+    except Exception:
+        return {}
+
+    init_db()
+    db = SessionLocal()
+    try:
+        rows = (
+            db.query(
+                AnnotationRecord.source_id,
+                AnnotationRecord.annotation_count,
+                AnnotationRecord.segment_count,
+                AnnotationRecord.source_kind,
+                AnnotationRecord.is_human_edited,
+            )
+            .filter(AnnotationRecord.user_id == user_id)
+            .all()
+        )
+        mapping: Dict[str, Dict[str, Any]] = {}
+        for source_id, ann_count, seg_count, source_kind, is_human_edited in rows:
+            key = normalize_point_name(source_id or "")
+            if not key:
+                continue
+            mapping[key] = {
+                "annotation_count": int(ann_count or 0),
+                "segment_count": int(seg_count or 0),
+                "source_kind": source_kind or "human",
+                "is_human_edited": bool(is_human_edited),
+            }
+        return mapping
+    finally:
+        db.close()
 
 
 def _fetch_inference_index_map(
@@ -645,6 +688,7 @@ def get_files(current_user):
                 return jsonify({'success': False, 'error': f'Inference index unavailable: {err}'}), 500
         
         files = []
+        annotation_summary_map = _load_annotation_summary_map(current_user)
         for entry in registry_files:
             f = entry["name"]
             full_path = os.path.join(user_path, f)
@@ -679,59 +723,26 @@ def get_files(current_user):
                     # If no keys match the filtered index, we skip this file
                     continue
 
-            # Check for annotations in user's annotation directory
-            user_ann_dir = os.path.join(ANNOTATIONS_DIR, current_user)
-            
-            # Try multiple annotation file name patterns (ordered by frequency)
-            annotation_file = None
             annotation_count = 0
             has_annotations = False
-            
-            # Pattern 5: Direct replacement .csv -> .json (most common for current files)
-            # This matches files like: 数据集zhlh_100_XXX.PV.json for CSV files like: 数据集zhlh_100_XXX.PV.csv
-            pattern5 = os.path.join(user_ann_dir, f.replace('.csv', '.json'))
-            # Pattern 1: filename.csv.json (standard auto-save format)
-            pattern1 = os.path.join(user_ann_dir, f"{f}.json")
-            # Pattern 4: 数据集filename.json (for CSV files without 数据集 prefix)
-            # This matches files like: 数据集zhlh_100_XXX.json for CSV files like: zhlh_100_XXX.csv
-            pattern4 = os.path.join(user_ann_dir, f"数据集{f.replace('.csv', '')}.json")
-            # Pattern 3: annotations_filename.json (old export without 数据集)
-            pattern3 = os.path.join(user_ann_dir, f"annotations_{f.replace('.csv', '')}.json")
-            # Pattern 2: annotations_数据集filename.json (old export format)
-            pattern2 = os.path.join(user_ann_dir, f"annotations_数据集{f.replace('.csv', '')}.json")
-            
-            for pattern in [pattern5, pattern1, pattern4, pattern3, pattern2]:
-                if os.path.exists(pattern):
-                    annotation_file = pattern
-                    # print(f"  -> Found annotation: {os.path.basename(pattern)}")
-                    break
-            
-            if annotation_file and os.path.exists(annotation_file):
-                try:
-                    with open(annotation_file, 'r', encoding='utf-8') as af:
-                        ann_data = json.load(af)
-                        # Support both formats
-                        annotations = ann_data.get('annotations', [])
-                        
-                        # Has annotations if there are any annotations (including no-label)
-                        if annotations:
-                            has_annotations = True
-                        
-                        # Only count annotations with segments (exclude no-label annotations)
-                        annotations_with_segments = [
-                            ann for ann in annotations 
-                            if ann.get('segments') and len(ann.get('segments', [])) > 0
-                        ]
-                        annotation_count = len(annotations_with_segments)
-                except Exception as e:
-                    print(f"  -> Error reading annotation: {e}")
-                    pass
-            
+            source_kind = None
+            for key in search_keys:
+                summary = annotation_summary_map.get(normalize_point_name(key))
+                if not summary:
+                    continue
+                annotation_count = int(summary.get("annotation_count") or 0)
+                seg_count = int(summary.get("segment_count") or 0)
+                has_annotations = annotation_count > 0 or seg_count > 0
+                source_kind = summary.get("source_kind")
+                break
+
             file_info = {
                 'name': f,
                 'has_annotations': has_annotations,
                 'annotation_count': annotation_count
             }
+            if source_kind:
+                file_info["annotation_source_kind"] = source_kind
 
             # 附加分数信息（优先使用过滤后的 inference_index，否则使用默认的 inference_index_for_scores）
             idx_source = inference_index if inference_index is not None else inference_index_for_scores
@@ -812,45 +823,33 @@ def review_sample(current_user):
         min_score = _parse_float_arg(data.get('min_score'))
         max_score = _parse_float_arg(data.get('max_score'))
 
-        from src.db.database import SessionLocal, ReviewQueue, InferenceResult, init_db
+        from src.db.database import AnnotationRecord, SessionLocal, ReviewQueue, InferenceResult, init_db
         init_db()
 
         rows = []
         err = None
         if source_type == 'annotation':
-            ann_dir = os.path.join(ANNOTATIONS_DIR, current_user)
-            if not os.path.isdir(ann_dir):
-                return jsonify({'success': True, 'created': 0, 'skipped': 0, 'total': 0})
-            entries = []
-            for name in os.listdir(ann_dir):
-                if not name.endswith('.json'):
-                    continue
-                full_path = os.path.join(ann_dir, name)
-                try:
-                    stat = os.stat(full_path)
-                except OSError:
-                    continue
-                filename = None
-                try:
-                    with open(full_path, 'r', encoding='utf-8') as f:
-                        data = json.load(f)
-                        filename = data.get('filename')
-                except Exception:
-                    filename = None
-                if not filename:
-                    filename = name.replace('.json', '')
-                entries.append((filename, stat.st_mtime))
+            db_for_ann = SessionLocal()
+            try:
+                entries = (
+                    db_for_ann.query(AnnotationRecord.source_id, AnnotationRecord.updated_at)
+                    .filter(AnnotationRecord.user_id == current_user)
+                    .all()
+                )
+                normalized_entries = [(str(source_id), updated_at.timestamp() if updated_at else 0) for source_id, updated_at in entries]
+            finally:
+                db_for_ann.close()
 
             if strategy == 'random':
-                np.random.shuffle(entries)
+                np.random.shuffle(normalized_entries)
             elif strategy in {'low_score', 'low'}:
-                entries.sort(key=lambda x: x[1])
+                normalized_entries.sort(key=lambda x: x[1])
             else:
-                entries.sort(key=lambda x: x[1], reverse=True)
+                normalized_entries.sort(key=lambda x: x[1], reverse=True)
 
             if limit and limit > 0:
-                entries = entries[:limit]
-            rows = entries
+                normalized_entries = normalized_entries[:limit]
+            rows = normalized_entries
         else:
             rows, err = _sample_inference_rows(
                 method=method,
@@ -1349,136 +1348,107 @@ def get_annotations(filename, current_user):
     """Get annotations for a file (user-specific)"""
     try:
         print(f"=== [DEBUG] get_annotations for {filename} (user: {current_user}) ===")
-        with open('/tmp/debug_anno.log', 'a') as debug_f:
-             debug_f.write(f"\n[DEBUG] Request for file: {filename}\n")
-        
-        # User-specific annotation directory
-        user_ann_dir = os.path.join(ANNOTATIONS_DIR, current_user)
-        os.makedirs(user_ann_dir, exist_ok=True)
-        
-        # Try multiple patterns to find the annotation file
-        annotation_file = None
-        annotation_data = None
-        
-        base_name = _normalize_annotation_name(filename)
 
-        # Pattern 1: Standard format (filename.json)
-        pattern1 = os.path.join(user_ann_dir, f"{base_name}.json")
-        if os.path.exists(pattern1):
-            annotation_file = pattern1
-        elif base_name != filename:
-            pattern1_alt = os.path.join(user_ann_dir, f"{filename}.json")
-            if os.path.exists(pattern1_alt):
-                annotation_file = pattern1_alt
-        
-        # Pattern 2 & 3: Search all JSON files and match by filename field
-        if not annotation_file:
-            for json_file in os.listdir(user_ann_dir):
-                if not json_file.endswith('.json'):
-                    continue
-                json_path = os.path.join(user_ann_dir, json_file)
-                try:
-                    with open(json_path, 'r', encoding='utf-8') as f:
-                        data = json.load(f)
-                        # Check if this JSON's filename matches
-                        if data.get('filename') == filename:
-                            annotation_file = json_path
-                            annotation_data = data
-                            break
-                except:
-                    continue
-        
-        if not annotation_file:
-            # Check for global_mask in CSV and auto-generate annotations
-            auto_annotations = []
+        try:
+            from src.db.database import SessionLocal, init_db
+
+            init_db()
+            db = SessionLocal()
             try:
-                from auth import load_users
-                users = load_users()
-                user_path = users.get(current_user, {}).get('data_path', DATA_DIR)
-                csv_path = os.path.join(user_path, filename)
-                
-                if os.path.exists(csv_path):
-                     try:
-                         # Read only necessary columns to speed up
-                         df_head = pd.read_csv(csv_path, nrows=1)
-                         if 'global_mask' in df_head.columns:
-                             df = pd.read_csv(csv_path, usecols=['global_mask'])
-                             # Find continuous regions of 1s
-                             mask = df['global_mask'].fillna(0).astype(int)
-                             
-                             # Logic to find start/end indices of 1s sequences
-                             # 0 1 1 1 0 -> diff: 1 0 0 -1
-                             # Pad with 0 to handle edge cases
-                             padded = np.concatenate(([0], mask.values, [0]))
-                             diff = np.diff(padded)
-                             starts = np.where(diff == 1)[0]
-                             ends = np.where(diff == -1)[0] - 1
-                             
-                             # Merge all segments into a single annotation
-                             # Check algorithm type from filename
-                             if 'qwen' in filename.lower():
-                                 label_obj = {
-                                     "id": "qwen_detected",
-                                     "text": "Qwen",
-                                     "color": "#6366f1",
-                                     "categoryId": "algorithm_results"
+                record = get_annotation_record(db, current_user, filename)
+                if record is not None:
+                    payload = record_to_payload(record, fallback_filename=filename)
+                    return jsonify({
+                        'success': True,
+                        'filename': payload.get('filename') or filename,
+                        'annotations': payload.get('annotations', []),
+                        'overall_attribute': payload.get('overall_attribute', {}),
+                        'source_kind': payload.get('source_kind'),
+                        'is_human_edited': bool(payload.get('is_human_edited')),
+                    })
+            finally:
+                db.close()
+        except Exception as e:
+            print(f"Warning: failed to read annotation from DB: {e}")
+
+        # No stored annotation, fallback to auto-generated preview from CSV global_mask.
+        auto_annotations = []
+        try:
+            from auth import load_users
+            users = load_users()
+            user_path = users.get(current_user, {}).get('data_path', DATA_DIR)
+            csv_path = os.path.join(user_path, filename)
+            
+            if os.path.exists(csv_path):
+                 try:
+                     # Read only necessary columns to speed up
+                     df_head = pd.read_csv(csv_path, nrows=1)
+                     if 'global_mask' in df_head.columns:
+                         df = pd.read_csv(csv_path, usecols=['global_mask'])
+                         # Find continuous regions of 1s
+                         mask = df['global_mask'].fillna(0).astype(int)
+                         
+                         # Logic to find start/end indices of 1s sequences
+                         # 0 1 1 1 0 -> diff: 1 0 0 -1
+                         # Pad with 0 to handle edge cases
+                         padded = np.concatenate(([0], mask.values, [0]))
+                         diff = np.diff(padded)
+                         starts = np.where(diff == 1)[0]
+                         ends = np.where(diff == -1)[0] - 1
+                         
+                         # Merge all segments into a single annotation
+                         # Check algorithm type from filename
+                         if 'qwen' in filename.lower():
+                             label_obj = {
+                                 "id": "qwen_detected",
+                                 "text": "Qwen",
+                                 "color": "#6366f1",
+                                 "categoryId": "algorithm_results"
+                             }
+                             algo_desc = "Qwen Auto-Detection"
+                             algo_id_suffix = "qwen"
+                         else:
+                             label_obj = {
+                                 "id": "chatts_detected",
+                                 "text": "ChatTS",
+                                 "color": "#ec4899",
+                                 "categoryId": "algorithm_results"
+                             }
+                             algo_desc = "ChatTS Auto-Detection"
+                             algo_id_suffix = "chatts"
+                         all_segments = []
+                         for i, (start, end) in enumerate(zip(starts, ends)):
+                             all_segments.append({
+                                 "start": int(start),
+                                 "end": int(end),
+                                 "count": int(end) - int(start) + 1,
+                                 "label": label_obj
+                             })
+                         
+                         if all_segments:
+                             auto_annotations.append({
+                                 "id": f"auto_{int(time.time())}_{algo_id_suffix}",
+                                 "label": label_obj,
+                                 "segments": all_segments,
+                                 "local_change": {
+                                      "trend": "其他",
+                                      "confidence": "high",
+                                      "desc": algo_desc
                                  }
-                                 algo_desc = "Qwen Auto-Detection"
-                                 algo_id_suffix = "qwen"
-                             else:
-                                 label_obj = {
-                                     "id": "chatts_detected",
-                                     "text": "ChatTS",
-                                     "color": "#ec4899",
-                                     "categoryId": "algorithm_results"
-                                 }
-                                 algo_desc = "ChatTS Auto-Detection"
-                                 algo_id_suffix = "chatts"
-                             all_segments = []
-                             for i, (start, end) in enumerate(zip(starts, ends)):
-                                 all_segments.append({
-                                     "start": int(start),
-                                     "end": int(end),
-                                     "count": int(end) - int(start) + 1,
-                                     "label": label_obj
-                                 })
-                             
-                             if all_segments:
-                                 auto_annotations.append({
-                                     "id": f"auto_{int(time.time())}_{algo_id_suffix}",
-                                     "label": label_obj,
-                                     "segments": all_segments,
-                                     "local_change": {
-                                          "trend": "其他",
-                                          "confidence": "high",
-                                          "desc": algo_desc
-                                     }
-                                 })
-                             print(f"[DEBUG] Auto-generated 1 annotation with {len(all_segments)} segments from global_mask")
-                             if all_segments:
-                                print(f"[DEBUG] First segment sample: {all_segments[0]}")
-                     except Exception as e:
-                         print(f"Error reading CSV for mask: {e}")
-            except Exception as e:
-                print(f"Error in auto-annotation: {e}")
+                             })
+                         print(f"[DEBUG] Auto-generated 1 annotation with {len(all_segments)} segments from global_mask")
+                         if all_segments:
+                            print(f"[DEBUG] First segment sample: {all_segments[0]}")
+                 except Exception as e:
+                     print(f"Error reading CSV for mask: {e}")
+        except Exception as e:
+            print(f"Error in auto-annotation: {e}")
 
 
-            return jsonify({
-                'success': True,
-                'filename': filename,
-                'annotations': auto_annotations
-            })
-        
-        # Load data if not already loaded
-        if not annotation_data:
-            with open(annotation_file, 'r', encoding='utf-8') as f:
-                annotation_data = json.load(f)
-        
         return jsonify({
             'success': True,
             'filename': filename,
-            'annotations': annotation_data.get('annotations', []),
-            'overall_attribute': annotation_data.get('overall_attribute', {})
+            'annotations': auto_annotations
         })
     except Exception as e:
         import traceback
@@ -1489,12 +1459,12 @@ def get_annotations(filename, current_user):
 @app.route('/api/annotations/<filename>', methods=['POST'])
 @login_required
 def save_annotations(filename, current_user):
-    """Save annotations for a file (user-specific directory)"""
+    """Save annotations via DB-first path."""
     try:
         from flask import request
-        from auth import load_users
+        from src.db.database import SessionLocal, init_db
         
-        data = request.get_json()
+        data = request.get_json() or {}
         
         # Support both old and new formats
         # New format: {filename, overall_attribute, annotations, export_time}
@@ -1510,20 +1480,25 @@ def save_annotations(filename, current_user):
                 'annotations': data.get('annotations', []),
                 'export_time': datetime.now().isoformat()
             }
-        
-        # Save to user's annotation directory
-        user_ann_dir = os.path.join(ANNOTATIONS_DIR, current_user)
-        os.makedirs(user_ann_dir, exist_ok=True)
-        
-        base_name = _normalize_annotation_name(filename)
-        annotation_file = os.path.join(user_ann_dir, f"{base_name}.json")
-        
-        with open(annotation_file, 'w', encoding='utf-8') as f:
-            json.dump(save_data, f, ensure_ascii=False, indent=2)
-        
+
+        init_db()
+        db = SessionLocal()
+        try:
+            record = upsert_annotation(db, current_user, filename, save_data)
+            db.commit()
+            result_payload = {
+                'annotation_id': record.id,
+                'source_kind': record.source_kind,
+                'annotation_count': int(record.annotation_count or 0),
+                'segment_count': int(record.segment_count or 0),
+            }
+        finally:
+            db.close()
+
         return jsonify({
             'success': True,
-            'message': f'Annotations saved for {filename}'
+            'message': f'Annotations saved for {filename}',
+            **result_payload,
         })
     except Exception as e:
         import traceback
@@ -1532,59 +1507,66 @@ def save_annotations(filename, current_user):
 
 
 @app.route('/api/annotations/<filename>', methods=['DELETE'])
-def delete_annotation(filename):
-    """Delete a specific annotation"""
+@login_required
+def delete_annotation(filename, current_user):
+    """Delete one annotation item by id via DB-first path."""
     try:
-        data = request.get_json()
+        from src.db.database import SessionLocal, init_db
+
+        data = request.get_json() or {}
         annotation_id = data.get('annotation_id')
         
         if not annotation_id:
             return jsonify({'success': False, 'error': 'Annotation ID is required'}), 400
-        
-        base_name = _normalize_annotation_name(filename)
-        annotation_file = os.path.join(ANNOTATIONS_DIR, f"{base_name}.json")
-        if not os.path.exists(annotation_file) and base_name != filename:
-            annotation_file = os.path.join(ANNOTATIONS_DIR, f"{filename}.json")
-        
-        if not os.path.exists(annotation_file):
-            return jsonify({'success': False, 'error': 'Annotation file not found'}), 404
-        
-        with open(annotation_file, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-        
-        annotations = data.get('annotations', [])
-        annotations = [a for a in annotations if a.get('id') != annotation_id]
-        
-        data['annotations'] = annotations
-        data['last_updated'] = datetime.now().isoformat()
-        
-        with open(annotation_file, 'w', encoding='utf-8') as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-        
+
+        init_db()
+        db = SessionLocal()
+        try:
+            record = get_annotation_record(db, current_user, filename)
+            if record is None:
+                return jsonify({'success': False, 'error': 'Annotation not found'}), 404
+            payload = record_to_payload(record, fallback_filename=filename)
+            annotations = payload.get('annotations', [])
+            payload['annotations'] = [a for a in annotations if (a or {}).get('id') != annotation_id]
+            payload['last_updated'] = datetime.now().isoformat()
+            upsert_annotation(db, current_user, filename, payload)
+            db.commit()
+        finally:
+            db.close()
+
         return jsonify({'success': True, 'message': 'Annotation deleted successfully'})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
 @app.route('/api/download-annotations/<filename>', methods=['GET'])
-def download_annotations(filename):
-    """Download annotations in target JSON format"""
+@login_required
+def download_annotations(filename, current_user):
+    """Download annotations in target JSON format (DB-first)."""
     try:
-        base_name = _normalize_annotation_name(filename)
-        annotation_file = os.path.join(ANNOTATIONS_DIR, f"{base_name}.json")
-        if not os.path.exists(annotation_file) and base_name != filename:
-            annotation_file = os.path.join(ANNOTATIONS_DIR, f"{filename}.json")
-        
-        if not os.path.exists(annotation_file):
+        from src.db.database import SessionLocal, init_db
+
+        init_db()
+        db = SessionLocal()
+        try:
+            record = get_annotation_record(db, current_user, filename)
+            if record is None:
+                return jsonify({
+                    'annotations': [],
+                    'export_time': datetime.now().isoformat(),
+                    'filename': filename
+                })
+            data = record_to_payload(record, fallback_filename=filename)
+        finally:
+            db.close()
+
+        if not data:
             return jsonify({
                 'annotations': [],
                 'export_time': datetime.now().isoformat(),
                 'filename': filename
             })
-        
-        with open(annotation_file, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-        
+
         # Format for export
         export_annotations = []
         for ann in data.get('annotations', []):
@@ -1606,39 +1588,32 @@ def download_annotations(filename):
 @app.route('/api/annotations/all', methods=['GET'])
 @login_required
 def get_all_annotations(current_user):
-    """Get all annotations for current user (for training data export)"""
+    """Get all annotations for current user (DB-first)."""
     try:
-        user_ann_dir = os.path.join(ANNOTATIONS_DIR, current_user)
-        
-        if not os.path.exists(user_ann_dir):
-            return jsonify({
-                'success': True,
-                'annotations': [],
-                'count': 0
-            })
-        
+        from src.db.database import AnnotationRecord, SessionLocal, init_db
+
+        init_db()
+        db = SessionLocal()
         all_annotations = []
-        
-        for json_file in os.listdir(user_ann_dir):
-            if not json_file.endswith('.json'):
-                continue
-            
-            json_path = os.path.join(user_ann_dir, json_file)
-            try:
-                with open(json_path, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                    
-                    # 确保包含必要字段
-                    annotation_entry = {
-                        'filename': data.get('filename', json_file.replace('.json', '')),
-                        'annotations': data.get('annotations', []),
-                        'overall_attribute': data.get('overall_attribute', {}),
-                        'export_time': data.get('export_time', '')
-                    }
-                    all_annotations.append(annotation_entry)
-            except Exception as e:
-                print(f"Error reading {json_file}: {e}")
-                continue
+        try:
+            rows = (
+                db.query(AnnotationRecord)
+                .filter(AnnotationRecord.user_id == current_user)
+                .order_by(AnnotationRecord.updated_at.desc())
+                .all()
+            )
+            for row in rows:
+                payload = record_to_payload(row)
+                annotation_entry = {
+                    'filename': payload.get('filename', row.filename or row.source_id),
+                    'annotations': payload.get('annotations', []),
+                    'overall_attribute': payload.get('overall_attribute', {}),
+                    'export_time': payload.get('export_time', ''),
+                    'source_kind': payload.get('source_kind', row.source_kind),
+                }
+                all_annotations.append(annotation_entry)
+        finally:
+            db.close()
         
         return jsonify({
             'success': True,

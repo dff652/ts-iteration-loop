@@ -139,14 +139,11 @@ async def export_training_data(output_path: str = None, approved_only: bool = Tr
         import tempfile
         from pathlib import Path
         from src.adapters.data_processing import DataProcessingAdapter
-        from src.db.database import SessionLocal, ReviewQueue
+        from src.db.database import SessionLocal, AnnotationRecord, ReviewQueue
+        from src.utils.annotation_store import normalize_point_name, record_to_payload
         
         adapter = DataProcessingAdapter()
         
-        ann_dir = Path(settings.ANNOTATIONS_ROOT) / settings.DEFAULT_USER
-        if not ann_dir.exists():
-            raise HTTPException(status_code=404, detail="标注目录不存在")
-
         approved_set = None
         if approved_only:
             db = SessionLocal()
@@ -155,7 +152,7 @@ async def export_training_data(output_path: str = None, approved_only: bool = Tr
                     ReviewQueue.source_type == 'annotation',
                     ReviewQueue.status == 'approved'
                 ).all()
-                approved_set = {str(row[0]).replace('.csv', '').replace('.json', '') for row in rows}
+                approved_set = {normalize_point_name(str(row[0])) for row in rows}
             finally:
                 db.close()
 
@@ -163,22 +160,25 @@ async def export_training_data(output_path: str = None, approved_only: bool = Tr
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
             selected = 0
-            for json_file in ann_dir.glob("*.json"):
-                try:
-                    with open(json_file, 'r', encoding='utf-8') as f:
-                        data = json.load(f)
-                except Exception:
-                    continue
-
-                filename = data.get('filename') or json_file.stem
-                normalized = str(filename).replace('.csv', '').replace('.json', '')
-                if approved_set is not None and normalized not in approved_set:
-                    continue
-
-                out_name = json_file.name if json_file.name.endswith('.json') else f"{json_file.stem}.json"
-                with open(tmp_path / out_name, 'w', encoding='utf-8') as wf:
-                    json.dump(data, wf, ensure_ascii=False, indent=2)
-                selected += 1
+            db = SessionLocal()
+            try:
+                rows = (
+                    db.query(AnnotationRecord)
+                    .filter(AnnotationRecord.user_id == settings.DEFAULT_USER)
+                    .order_by(AnnotationRecord.updated_at.desc())
+                    .all()
+                )
+                for row in rows:
+                    normalized = normalize_point_name(row.source_id or row.filename)
+                    if approved_set is not None and normalized not in approved_set:
+                        continue
+                    data = record_to_payload(row)
+                    out_name = f"{normalized}.json"
+                    with open(tmp_path / out_name, 'w', encoding='utf-8') as wf:
+                        json.dump(data, wf, ensure_ascii=False, indent=2)
+                    selected += 1
+            finally:
+                db.close()
 
             if selected == 0:
                 return ApiResponse(

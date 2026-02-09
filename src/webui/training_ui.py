@@ -20,7 +20,7 @@ from src.adapters.check_outlier import CheckOutlierAdapter
 from src.utils.iotdb_config import load_iotdb_config
 from src.utils.file_filters import is_inference_or_generated_csv, match_result_method
 from src.utils.model_eval import evaluate_model_on_golden
-from src.utils.plot_utils import generate_ts_thumbnail
+from src.utils.plot_utils import generate_ts_thumbnail, create_ts_image
 
 
 TRAINING_MODEL_FAMILIES = ["chatts", "qwen"]
@@ -1711,12 +1711,31 @@ def create_training_ui() -> gr.Blocks:
                     gr.Markdown("### 📊 状态概览")
                     # 动态获取标注文件数
                     def get_annotation_stats():
-                        # 使用 Settings
-                        ann_dir = Path(settings.ANNOTATIONS_ROOT) / "douff"
-                        if not ann_dir.exists():
-                            return "暂无标注目录"
-                        count = len(list(ann_dir.glob("*.json")))
-                        return f"已标注文件数: {count}"
+                        fs_count = 0
+                        try:
+                            ann_dir = Path(settings.ANNOTATIONS_ROOT) / settings.DEFAULT_USER
+                            if ann_dir.exists():
+                                fs_count = len(list(ann_dir.glob("*.json")))
+                        except Exception:
+                            fs_count = 0
+
+                        db_count = 0
+                        try:
+                            from src.db.database import SessionLocal, AnnotationRecord
+
+                            db = SessionLocal()
+                            try:
+                                db_count = (
+                                    db.query(AnnotationRecord)
+                                    .filter(AnnotationRecord.user_id == settings.DEFAULT_USER)
+                                    .count()
+                                )
+                            finally:
+                                db.close()
+                        except Exception:
+                            db_count = 0
+
+                        return f"DB 标注记录: {db_count} | 文件标注: {fs_count}"
 
                     annotation_stats = gr.Textbox(
                         value=get_annotation_stats(),
@@ -1787,8 +1806,94 @@ def create_training_ui() -> gr.Blocks:
                             filename = path.stem
                         return _normalize_ann_name(filename) in approved_set
 
-                    # 获取标注文件列表
+                    def _list_annotation_payloads_from_db(filter_keyword=None, approved_only_flag=False):
+                        try:
+                            from src.db.database import SessionLocal, AnnotationRecord, ReviewQueue
+                            from src.utils.annotation_store import record_to_payload
+                        except Exception:
+                            return []
+
+                        db = SessionLocal()
+                        try:
+                            rows = (
+                                db.query(AnnotationRecord)
+                                .filter(AnnotationRecord.user_id == settings.DEFAULT_USER)
+                                .order_by(AnnotationRecord.updated_at.desc())
+                                .all()
+                            )
+                            review_rows = (
+                                db.query(ReviewQueue.source_id, ReviewQueue.status, ReviewQueue.updated_at)
+                                .filter(ReviewQueue.source_type == "annotation")
+                                .order_by(ReviewQueue.updated_at.desc())
+                                .all()
+                            )
+                        finally:
+                            db.close()
+
+                        review_status_map = {}
+                        for source_id, status, _updated_at in review_rows:
+                            key = _normalize_ann_name(source_id)
+                            if not key or key in review_status_map:
+                                continue
+                            review_status_map[key] = (status or "").strip().lower() or "unreviewed"
+
+                        status_label_map = {
+                            "approved": "通过",
+                            "pending": "待审",
+                            "rejected": "驳回",
+                            "needs_fix": "待修正",
+                            "unreviewed": "未入队",
+                        }
+
+                        approved_set = _get_approved_set() if approved_only_flag else None
+                        family = (filter_keyword or "").strip().lower()
+
+                        payloads = []
+                        seen = set()
+                        for row in rows:
+                            norm = _normalize_ann_name(row.source_id or row.filename)
+                            if not norm:
+                                continue
+                            if approved_set is not None and norm not in approved_set:
+                                continue
+
+                            name_text = str(row.filename or row.source_id or "").lower()
+                            method = str(row.method or "").strip().lower()
+                            if family == "qwen":
+                                if method and method != "qwen" and "qwen" not in name_text:
+                                    continue
+                            elif family == "chatts":
+                                if method == "qwen" or "qwen" in name_text:
+                                    continue
+
+                            payload = record_to_payload(row, fallback_filename=row.filename or f"{norm}.csv")
+                            display_name = str(payload.get("filename") or row.filename or f"{norm}.csv")
+                            key = _normalize_ann_name(display_name)
+                            if key in seen:
+                                continue
+                            seen.add(key)
+                            source_kind = (row.source_kind or "human").strip().lower()
+                            kind_tag = "AUTO" if source_kind == "auto" else "HUMAN"
+                            review_status = review_status_map.get(key, "unreviewed")
+                            status_text = status_label_map.get(review_status, review_status)
+                            label = f"{key} | [{kind_tag}] | {status_text}"
+                            payloads.append(
+                                {
+                                    "label": label,
+                                    "value": key,
+                                    "filename": display_name,
+                                    "payload": payload,
+                                }
+                            )
+
+                        return payloads
+
+                    # 获取标注文件列表（优先 DB-First，兼容文件目录）
                     def get_file_choices(ann_dir, filter_keyword=None, approved_only_flag=False):
+                        db_payloads = _list_annotation_payloads_from_db(filter_keyword, approved_only_flag)
+                        if db_payloads:
+                            return [(row["label"], row["value"]) for row in db_payloads]
+
                         path_obj = Path(ann_dir)
                         if not path_obj.exists():
                             return []
@@ -1810,15 +1915,34 @@ def create_training_ui() -> gr.Blocks:
                                 # ChatTS 模式：排除 qwen 文件 (显示 chatts 和 legacy)
                                 files = [f for f in files if "qwen" not in f.name.lower()]
                                 
-                            return [f.name for f in files]
+                            return [(f.name, f.name) for f in files]
                         except Exception:
                             return []
+
+                    def _resolve_selected_payload(selected_file: str, family: str, approved_only_flag: bool):
+                        if not selected_file:
+                            return None
+                        rows = _list_annotation_payloads_from_db(family, approved_only_flag)
+                        selected_norm = _normalize_ann_name(selected_file)
+                        for row in rows:
+                            value = row.get("value")
+                            display_name = row.get("filename")
+                            payload = row.get("payload")
+                            if value == selected_file or display_name == selected_file:
+                                return payload
+                            if _normalize_ann_name(value) == selected_norm or _normalize_ann_name(display_name) == selected_norm:
+                                return payload
+                        return None
 
                     # 初始加载
                     default_ann_dir = str(Path(settings.ANNOTATIONS_ROOT) / settings.DEFAULT_USER)
                     # 默认 filter="chatts" 对应 conv_model_family default value
                     initial_choices = get_file_choices(default_ann_dir, "chatts", True)
-                    initial_val = initial_choices[0] if initial_choices else None
+                    initial_approved_only = True
+                    if not initial_choices:
+                        initial_choices = get_file_choices(default_ann_dir, "chatts", False)
+                        initial_approved_only = False
+                    initial_val = initial_choices[0][1] if initial_choices else None
 
                     ann_file_dropdown = gr.Dropdown(
                         label="选择要预览/转换的文件",
@@ -1828,11 +1952,11 @@ def create_training_ui() -> gr.Blocks:
                         interactive=True,
                         allow_custom_value=False
                     )
-                    approved_only = gr.Checkbox(label="仅导出审核通过", value=True, interactive=False)
+                    approved_only = gr.Checkbox(label="仅导出审核通过", value=initial_approved_only, interactive=True)
 
                     def refresh_files(ann_dir, family, approved_only_flag):
                         choices = get_file_choices(ann_dir, family, approved_only_flag)
-                        val = choices[0] if choices else None
+                        val = choices[0][1] if choices else None
                         return gr.update(choices=choices, value=val)
                         
                     refresh_files_btn = gr.Button("🔄 刷新列表 (Refresh)", size="sm")
@@ -1852,179 +1976,202 @@ def create_training_ui() -> gr.Blocks:
                     after_json_label = gr.Markdown("#### 🎯 转换后 (ChatTS Training Data)")
                     after_json = gr.JSON(label="Converted Data", height=400)
                 
-            def preview_source_file(selected_file, input_dir_val, image_dir_val, model_family="qwen"):
-                """选择文件时立即预览，并执行真实转换（使用临时文件）"""
-                if not selected_file or not input_dir_val:
+            def preview_source_file(selected_file, input_dir_val, image_dir_val, model_family="qwen", approved_only_flag=True):
+                """选择文件时立即预览，并执行真实转换（优先 DB-First）。"""
+                if not selected_file:
                     return None, None
-                 
-                # 1. 读取源文件
-                src_p = Path(input_dir_val) / selected_file
-                source_content = None
-                
-                try:
-                    if src_p.exists():
-                        with open(src_p, 'r', encoding='utf-8') as f:
-                            source_content = json.load(f)
-                except Exception as e:
-                    source_content = {"error": str(e)}
-                
-                # 2. 执行转换预览 (真实调用适配器)
+
+                source_content = _resolve_selected_payload(selected_file, model_family, approved_only_flag)
+
+                # Fallback: legacy 文件模式
+                if source_content is None and input_dir_val:
+                    src_p = Path(input_dir_val) / selected_file
+                    try:
+                        if src_p.exists():
+                            with open(src_p, "r", encoding="utf-8") as f:
+                                source_content = json.load(f)
+                    except Exception as e:
+                        source_content = {"error": str(e)}
+
+                if source_content is None:
+                    return {"error": "未找到标注内容（DB 和文件目录均无）"}, None
+
                 converted_content = None
                 try:
-                    # 使用临时文件作为输出
-                    with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp:
-                        tmp_path = tmp.name
-                    
-                    # 默认 image_dir 如果为空
                     img_d = image_dir_val if image_dir_val else settings.DATA_DOWNSAMPLED_DIR
-                    
-                    res = data_adapter.convert_annotations(
-                        input_dir=input_dir_val,
-                        output_path=tmp_path,
-                        image_dir=img_d,
-                        filename=selected_file,
-                        model_family=model_family,
-                        csv_src_dir=str(RESULTS_BASE_PATH / "qwen") if model_family == "qwen" else settings.DATA_DOWNSAMPLED_DIR
-                    )
-                    
-                    if res["success"]:
-                        try:
-                            with open(tmp_path, 'r', encoding='utf-8') as f:
-                                converted_content = json.load(f)
-                        except Exception as read_err:
-                            converted_content = {"error": f"Read converted file failed: {read_err}"}
-                    else:
-                        converted_content = {
-                            "error": "Conversion failed", 
-                            "stderr": res.get("stderr", ""),
-                            "stdout": res.get("stdout", "")
-                        }
-                    
-                    # 清理临时文件
-                    try:
-                        Path(tmp_path).unlink(missing_ok=True)
-                    except:
-                        pass
+                    csv_src = str(RESULTS_BASE_PATH / "qwen") if model_family == "qwen" else settings.DATA_DOWNSAMPLED_DIR
+                    norm = _normalize_ann_name(source_content.get("filename") or selected_file)
+                    temp_json_name = f"{norm}.json"
 
+                    with tempfile.TemporaryDirectory() as tmp_input:
+                        tmp_input_path = Path(tmp_input)
+                        with open(tmp_input_path / temp_json_name, "w", encoding="utf-8") as wf:
+                            json.dump(source_content, wf, ensure_ascii=False, indent=2)
+
+                        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp:
+                            tmp_out = tmp.name
+
+                        res = data_adapter.convert_annotations(
+                            input_dir=str(tmp_input_path),
+                            output_path=tmp_out,
+                            image_dir=img_d,
+                            filename=temp_json_name,
+                            model_family=model_family,
+                            csv_src_dir=csv_src,
+                        )
+
+                        if res.get("success"):
+                            try:
+                                with open(tmp_out, "r", encoding="utf-8") as f:
+                                    converted_content = json.load(f)
+                            except Exception as read_err:
+                                converted_content = {"error": f"Read converted file failed: {read_err}"}
+                        else:
+                            converted_content = {
+                                "error": "Conversion failed",
+                                "stderr": res.get("stderr", ""),
+                                "stdout": res.get("stdout", ""),
+                            }
+                        Path(tmp_out).unlink(missing_ok=True)
                 except Exception as e:
                     converted_content = {"error": f"Preview failed: {str(e)}"}
-                
+
                 return source_content, converted_content
 
             def convert_core(selected_file, input_dir, image_dir, output_path, model_family, approved_only_flag, mode="single"):
-                """核心转换逻辑"""
-                # 创建输出目录
+                """核心转换逻辑（优先 DB-First）。"""
                 try:
                     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
                 except Exception as e:
                     return f"❌ 创建输出目录失败: {str(e)}", {}, {}
-                
-                target_filename = selected_file if mode == "single" else None
 
-                def _run_convert(work_dir, preview_dir, preview_file):
-                    # 执行转换
+                csv_src = str(RESULTS_BASE_PATH / "qwen") if model_family == "qwen" else settings.DATA_DOWNSAMPLED_DIR
+                img_d = image_dir or settings.DATA_DOWNSAMPLED_DIR
+
+                def _run_convert(work_dir, target_filename, preview_payload, preview_file):
                     result = data_adapter.convert_annotations(
                         work_dir,
                         output_path,
-                        image_dir=image_dir,
+                        image_dir=img_d,
                         filename=target_filename,
                         model_family=model_family,
-                        csv_src_dir=str(RESULTS_BASE_PATH / "qwen") if model_family == "qwen" else settings.DATA_DOWNSAMPLED_DIR
+                        csv_src_dir=csv_src,
                     )
 
-                    status_msg = ""
-                    source_sample = {}
+                    if not result.get("success"):
+                        return f"❌ 转换失败: {result.get('error')}\n日志:\n{result.get('stderr', '')}", preview_payload or {}, {}
+
+                    log_output = result.get("stdout", "")
+                    prefix = "单文件" if mode == "single" else "批量"
+                    final_output_path = result.get("output_path") or output_path
+                    status_msg = f"✅ {prefix}转换成功! \n输出: {final_output_path}\n\n执行日志:\n{log_output}"
+
                     target_sample = {}
+                    try:
+                        with open(final_output_path, "r", encoding="utf-8") as f:
+                            converted_data = json.load(f)
+                        if converted_data and isinstance(converted_data, list):
+                            core_name = _normalize_ann_name(preview_file) if preview_file else ""
+                            if core_name:
+                                for item in converted_data:
+                                    if core_name in str(item.get("image", "")):
+                                        target_sample = item
+                                        break
+                            if not target_sample:
+                                target_sample = converted_data[0]
+                    except Exception as e:
+                        target_sample = {"error": f"Read output failed: {str(e)}"}
 
-                    if result.get("success"):
-                        log_output = result.get("stdout", "")
-                        prefix = "单文件" if mode == "single" else "批量"
-                        final_output_path = result.get("output_path") or output_path
-                        status_msg = f"✅ {prefix}转换成功! \n输出: {final_output_path}\n\n执行日志:\n{log_output}"
+                    return status_msg, preview_payload or {}, target_sample
 
-                        # 尝试读取源文件进行预览
-                        try:
-                            if preview_file:
-                                src_p = Path(preview_dir) / preview_file
-                                if src_p.exists():
-                                    with open(src_p, 'r', encoding='utf-8') as f:
-                                        source_sample = json.load(f)
-                        except Exception as e:
-                            source_sample = {"error": f"Read source failed: {str(e)}"}
-
-                        # 读取转换后的结果
-                        try:
-                            with open(final_output_path, 'r', encoding='utf-8') as f:
-                                converted_data = json.load(f)
-                                if converted_data and isinstance(converted_data, list):
-                                    if preview_file:
-                                        # 尝试匹配 image 路径
-                                        core_name = preview_file.replace("annotations_数据集", "").replace(".json", "")
-                                        core_name = core_name.replace(".csv", "")
-                                        matched = False
-                                        for item in converted_data:
-                                            if core_name in item.get("image", ""):
-                                                target_sample = item
-                                                matched = True
-                                                break
-                                        if not matched:
-                                            target_sample = converted_data[-1] if mode == "single" else converted_data[0]
-                                            status_msg = f"(注意：预览未精确匹配，显示{'最后一条' if mode=='single' else '第一条'})\n" + status_msg
-                                    else:
-                                        target_sample = converted_data[0]
-                        except Exception as e:
-                            target_sample = {"error": f"Read output failed: {str(e)}"}
+                # DB-First 路径
+                db_payloads = _list_annotation_payloads_from_db(model_family, approved_only_flag)
+                if db_payloads:
+                    if mode == "single":
+                        if not selected_file:
+                            return "❌ 未选择文件", {}, {}
+                        selected_norm = _normalize_ann_name(selected_file)
+                        chosen = [
+                            row
+                            for row in db_payloads
+                            if row.get("value") == selected_file
+                            or row.get("filename") == selected_file
+                            or _normalize_ann_name(row.get("value")) == selected_norm
+                            or _normalize_ann_name(row.get("filename")) == selected_norm
+                        ]
+                        if not chosen:
+                            return "❌ 选中文件不存在于当前筛选结果", {}, {}
                     else:
-                        status_msg = f"❌ 转换失败: {result.get('error')}\n日志:\n{result.get('stderr', '')}"
+                        chosen = db_payloads
 
-                    return status_msg, source_sample, target_sample
+                    with tempfile.TemporaryDirectory() as tmpdir:
+                        tmp_path = Path(tmpdir)
+                        preview_payload = None
+                        preview_file = None
+                        target_filename = None
 
-                if not approved_only_flag:
-                    preview_file = selected_file
-                    if not preview_file and Path(input_dir).exists():
-                        all_jsons = list(Path(input_dir).glob("*.json"))
-                        if all_jsons:
-                            preview_file = all_jsons[0].name
-                    return _run_convert(input_dir, input_dir, preview_file)
+                        for idx, row in enumerate(chosen):
+                            payload = row.get("payload") or {}
+                            name = row.get("filename") or row.get("value") or ""
+                            core = _normalize_ann_name(payload.get("filename") or name)
+                            json_name = f"{core}.json"
+                            with open(tmp_path / json_name, "w", encoding="utf-8") as wf:
+                                json.dump(payload, wf, ensure_ascii=False, indent=2)
+                            if idx == 0:
+                                preview_payload = payload
+                                preview_file = json_name
+                                if mode == "single":
+                                    target_filename = json_name
 
-                approved_set = _get_approved_set()
-                if not approved_set:
-                    return "❌ 未找到已审核通过的标注", {}, {}
+                        return _run_convert(str(tmp_path), target_filename, preview_payload, preview_file)
 
-                src_dir = Path(input_dir)
+                # Legacy 文件路径（兜底）
+                src_dir = Path(input_dir or "")
                 if not src_dir.exists():
-                    return "❌ 标注目录不存在", {}, {}
+                    return "❌ 未找到可转换标注（DB 和文件目录均为空）", {}, {}
 
-                candidate_files = []
+                candidate_files = list(src_dir.glob("*.json"))
+                candidate_files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
                 if mode == "single":
                     if not selected_file:
                         return "❌ 未选择文件", {}, {}
-                    src_file = src_dir / selected_file
-                    if not src_file.exists():
+                    selected = src_dir / selected_file
+                    if not selected.exists():
                         return "❌ 标注文件不存在", {}, {}
-                    if not _is_approved_json(src_file, approved_set):
-                        return "❌ 该文件未审核通过", {}, {}
-                    candidate_files = [src_file]
-                else:
-                    for p in src_dir.glob("*.json"):
-                        if _is_approved_json(p, approved_set):
-                            candidate_files.append(p)
-                    if not candidate_files:
-                        return "❌ 未找到已审核通过的标注", {}, {}
+                    candidate_files = [selected]
 
-                preview_file = candidate_files[0].name if candidate_files else None
+                if approved_only_flag:
+                    approved_set = _get_approved_set()
+                    if not approved_set:
+                        return "❌ 未找到已审核通过的标注", {}, {}
+                    candidate_files = [p for p in candidate_files if _is_approved_json(p, approved_set)]
+
+                if not candidate_files:
+                    return "❌ 没有匹配的标注文件", {}, {}
 
                 with tempfile.TemporaryDirectory() as tmpdir:
                     tmp_path = Path(tmpdir)
-                    for src_file in candidate_files:
+                    preview_payload = {}
+                    preview_file = None
+                    target_filename = None
+                    for idx, src_file in enumerate(candidate_files):
                         try:
                             with open(src_file, "r", encoding="utf-8") as f:
                                 data = json.load(f)
-                            with open(tmp_path / src_file.name, "w", encoding="utf-8") as wf:
+                            dst_name = src_file.name
+                            with open(tmp_path / dst_name, "w", encoding="utf-8") as wf:
                                 json.dump(data, wf, ensure_ascii=False, indent=2)
+                            if idx == 0:
+                                preview_payload = data
+                                preview_file = dst_name
+                                if mode == "single":
+                                    target_filename = dst_name
                         except Exception:
                             continue
-                    return _run_convert(str(tmp_path), input_dir, preview_file)
+
+                    if not preview_file:
+                        return "❌ 标注文件读取失败", {}, {}
+                    return _run_convert(str(tmp_path), target_filename, preview_payload, preview_file)
 
             # 绑定事件
             # 绑定事件
@@ -2058,7 +2205,7 @@ def create_training_ui() -> gr.Blocks:
                 
                 # Filter file choices
                 new_choices = get_file_choices(ann_dir, family, approved_only_flag)
-                new_val = new_choices[0] if new_choices else None
+                new_val = new_choices[0][1] if new_choices else None
                 
                 return (
                     new_conf, 
@@ -2077,39 +2224,57 @@ def create_training_ui() -> gr.Blocks:
                 fn=refresh_files,
                 inputs=[conf_input_dir, conv_model_family, approved_only],
                 outputs=ann_file_dropdown
+            ).then(
+                fn=preview_source_file,
+                inputs=[ann_file_dropdown, conf_input_dir, conf_image_dir, conv_model_family, approved_only],
+                outputs=[before_json, after_json]
+            )
+
+            conf_input_dir.change(
+                fn=refresh_files,
+                inputs=[conf_input_dir, conv_model_family, approved_only],
+                outputs=ann_file_dropdown
+            ).then(
+                fn=preview_source_file,
+                inputs=[ann_file_dropdown, conf_input_dir, conf_image_dir, conv_model_family, approved_only],
+                outputs=[before_json, after_json]
             )
             
             approved_only.change(
                 fn=refresh_files,
                 inputs=[conf_input_dir, conv_model_family, approved_only],
                 outputs=ann_file_dropdown
+            ).then(
+                fn=preview_source_file,
+                inputs=[ann_file_dropdown, conf_input_dir, conf_image_dir, conv_model_family, approved_only],
+                outputs=[before_json, after_json]
             )
             
             # 选择文件立即预览
             ann_file_dropdown.change(
                 fn=preview_source_file,
-                inputs=[ann_file_dropdown, conf_input_dir, conf_image_dir, conv_model_family],
+                inputs=[ann_file_dropdown, conf_input_dir, conf_image_dir, conv_model_family, approved_only],
                 outputs=[before_json, after_json]
             )
             
             # 模型格式切换触发预览更新
             conv_model_family.change(
                 fn=preview_source_file,
-                inputs=[ann_file_dropdown, conf_input_dir, conf_image_dir, conv_model_family],
+                inputs=[ann_file_dropdown, conf_input_dir, conf_image_dir, conv_model_family, approved_only],
                 outputs=[before_json, after_json]
             )
             
             # 初始化预览 (Default to chatts as per Radio default)
             if initial_val:
-                init_src, init_ex = preview_source_file(initial_val, default_ann_dir, settings.DATA_DOWNSAMPLED_DIR, "chatts")
+                init_src, init_ex = preview_source_file(initial_val, default_ann_dir, settings.DATA_DOWNSAMPLED_DIR, "chatts", True)
                 before_json.value = init_src
                 after_json.value = init_ex
 
         # ==================== 数据资产管理 Tab (New) ====================
-        with gr.Tab("📦 数据资产管理"):
+        with gr.Tab("📦 数据资产管理", render=False) as data_assets_tab:
             with gr.Tabs():
                 # 1. 标注数据管理
-                with gr.Tab("标注数据 (Annotations)"):
+                with gr.Tab("标注数据 (Annotations)", render=False) as annotations_manage_tab:
                     gr.Markdown("### 📝 标注文件管理")
                     with gr.Row():
                         with gr.Column(scale=1):
@@ -2194,28 +2359,26 @@ def create_training_ui() -> gr.Blocks:
                     delete_ann_btn.click(fn=delete_ann_file, inputs=[ann_mgr_dir, ann_mgr_list], outputs=[ann_op_status, ann_mgr_list])
 
                 # 1.5 审核队列管理
-                with gr.Tab("审核队列 (Review Queue)"):
-                    gr.Markdown("### ✅ 审核流转管理")
+                with gr.Tab("审核队列 (Review Queue)", render=False) as review_queue_tab:
+                    gr.Markdown("### ✅ 训练样本审核流转管理")
                     review_rows_state = gr.State({})
 
                     with gr.Row():
                         with gr.Column(scale=1):
-                            review_source_type = gr.Dropdown(
-                                label="来源类型",
-                                choices=["inference", "annotation"],
-                                value="inference",
+                            review_training_family = gr.Dropdown(
+                                label="训练数据模型",
+                                choices=["all"] + TRAINING_MODEL_FAMILIES,
+                                value="all",
                                 interactive=True,
                             )
-                            review_strategy = gr.Dropdown(
-                                label="抽样策略",
-                                choices=["topk", "low_score", "random"],
-                                value="topk",
-                                interactive=True,
-                            )
-                            review_score_by = gr.Dropdown(
-                                label="评分字段",
-                                choices=["score_avg", "score_max"],
-                                value="score_avg",
+                            review_annotation_kind_filter = gr.Dropdown(
+                                label="标注来源筛选",
+                                choices=[
+                                    ("All (全部)", "all"),
+                                    ("Auto (未人工改)", "auto"),
+                                    ("Human (人工改)", "human"),
+                                ],
+                                value="all",
                                 interactive=True,
                             )
                             review_method = gr.Dropdown(
@@ -2226,308 +2389,774 @@ def create_training_ui() -> gr.Blocks:
                             )
                             review_status_filter = gr.Dropdown(
                                 label="状态筛选",
-                                choices=["", "pending", "approved", "rejected", "needs_fix"],
+                                choices=[
+                                    ("全部", ""),
+                                    ("重新审核", "pending"),
+                                    ("已通过", "approved"),
+                                    ("需标注修订", "needs_fix"),
+                                ],
                                 value="",
                                 interactive=True,
                             )
-                            review_min_score = gr.Number(label="最小分", value=None, precision=3)
-                            review_max_score = gr.Number(label="最大分", value=None, precision=3)
+                            review_keyword = gr.Textbox(label="关键字筛选", placeholder="输入点位名称...")
                             review_limit = gr.Slider(label="列表数量", minimum=20, maximum=500, step=20, value=200)
-                            review_sample_limit = gr.Slider(label="抽样数量", minimum=10, maximum=500, step=10, value=50)
                             review_reviewer = gr.Textbox(label="审核人", value=settings.DEFAULT_USER)
-                            with gr.Row():
-                                review_sample_btn = gr.Button("🧪 抽样入队", variant="primary")
-                                review_refresh_btn = gr.Button("🔄 刷新队列")
-                            review_stats_box = gr.Textbox(label="队列统计", interactive=False)
+                            review_refresh_btn = gr.Button("🔄 刷新队列")
 
                         with gr.Column(scale=2):
+                            with gr.Row():
+                                review_stats_box = gr.Textbox(label="队列统计", interactive=False)
+                                review_action_status = gr.Textbox(label="操作状态", interactive=False)
                             review_queue_items = gr.CheckboxGroup(label="审核项（可多选）", choices=[])
                             with gr.Row():
-                                review_mark_approved_btn = gr.Button("批量通过", variant="primary")
-                                review_mark_rejected_btn = gr.Button("批量驳回")
-                                review_mark_fix_btn = gr.Button("批量待修正")
-                                review_mark_pending_btn = gr.Button("批量改回待审")
-                            review_action_status = gr.Textbox(label="操作状态", interactive=False)
-                            review_preview_json = gr.JSON(label="选中项详情", height=320)
+                                review_mark_approved_btn = gr.Button("通过", variant="primary")
+                                review_mark_fix_btn = gr.Button("需标注修订")
+                                review_mark_pending_btn = gr.Button("重新审核")
+
+                    with gr.Row():
+                        with gr.Column(scale=2):
+                            review_preview_meta = gr.Markdown("未选择审核项")
+                            review_preview_plot = gr.Image(label="统一曲线预览（异常区间高亮）", height=360)
+                        with gr.Column(scale=1):
+                            review_preview_segments = gr.Dataframe(
+                                label="异常段预览",
+                                headers=["ann_id", "label", "start", "end", "count", "score"],
+                                interactive=False,
+                                row_count=(10, "dynamic"),
+                            )
+                        with gr.Column(scale=2):
+                            with gr.Tabs():
+                                with gr.Tab("训练样本"):
+                                    review_preview_training = gr.JSON(label="训练样本预览", height=260)
+                                with gr.Tab("标注溯源"):
+                                    review_preview_json = gr.JSON(label="选中项详情", height=260)
 
                     def _normalize_review_method(text: str) -> Optional[str]:
                         value = (text or "").strip()
                         return value or None
 
-                    def _load_review_rows(source_type: str, status: str, method: str, limit: int):
+                    def _normalize_review_name(name: str) -> str:
+                        text = str(name or "").strip()
+                        text = Path(text).name
+                        lower = text.lower()
+                        for ext in (".csv", ".json"):
+                            if lower.endswith(ext):
+                                text = text[: -len(ext)]
+                                lower = text.lower()
+                        if text.startswith("annotations_"):
+                            text = text.replace("annotations_", "", 1)
+                        return text.replace("数据集", "").strip()
+
+                    def _empty_review_preview():
+                        empty_df = pd.DataFrame(columns=["ann_id", "label", "start", "end", "count", "score"])
+                        return {}, None, "未选择审核项", empty_df, {}
+
+                    def _extract_point_id_from_text(text: str) -> Optional[str]:
+                        import re
+
+                        raw = str(text or "").strip()
+                        if not raw:
+                            return None
+                        base = Path(raw).name
+                        matches = re.findall(r"([A-Za-z][A-Za-z0-9_]*\.[A-Za-z0-9]+)", base)
+                        candidates = []
+                        for m in matches:
+                            lower = m.lower()
+                            if lower.endswith((".csv", ".json", ".jpg", ".jpeg", ".png", ".webp")):
+                                continue
+                            candidates.append(m)
+                        if candidates:
+                            candidates.sort(key=lambda s: (s.count("_"), len(s)), reverse=True)
+                            return _normalize_review_name(candidates[0])
+                        return _normalize_review_name(base)
+
+                    def _extract_intervals_from_text(output_text: str) -> List[Dict]:
+                        import re
+
+                        text = str(output_text or "")
+                        rows = []
+                        for idx, m in enumerate(re.finditer(r'"interval"\s*:\s*\[\s*(\d+)\s*,\s*(\d+)\s*\]', text), 1):
+                            start = int(m.group(1))
+                            end = int(m.group(2))
+                            if end < start:
+                                start, end = end, start
+                            rows.append(
+                                {
+                                    "ann_id": f"train_{idx}",
+                                    "label": "training_output",
+                                    "start": start,
+                                    "end": end,
+                                    "count": max(end - start + 1, 1),
+                                    "score": None,
+                                }
+                            )
+                        return rows
+
+                    def _iter_training_records_for_review(file_path: Path):
+                        suffix = file_path.suffix.lower()
+                        if suffix == ".jsonl":
+                            with file_path.open("r", encoding="utf-8") as f:
+                                for line in f:
+                                    line = line.strip()
+                                    if not line:
+                                        continue
+                                    try:
+                                        item = json.loads(line)
+                                    except Exception:
+                                        continue
+                                    if isinstance(item, dict):
+                                        yield item
+                            return
+
+                        if suffix != ".json":
+                            return
+
                         try:
-                            from src.db.database import SessionLocal, ReviewQueue, InferenceResult, init_db
+                            data = json.loads(file_path.read_text(encoding="utf-8"))
+                        except Exception:
+                            return
+
+                        if isinstance(data, list):
+                            for item in data:
+                                if isinstance(item, dict):
+                                    yield item
+                            return
+
+                        if isinstance(data, dict):
+                            if isinstance(data.get("data"), list):
+                                for item in data["data"]:
+                                    if isinstance(item, dict):
+                                        yield item
+                                return
+                            yield data
+
+                    def _build_training_preview_item(record: Dict, model_family: str, source_file: str, index: int) -> Optional[Dict]:
+                        point_name = None
+                        image_path = ""
+                        user_text = ""
+                        assistant_text = ""
+
+                        if model_family == "qwen":
+                            image_path = str(record.get("image") or "").strip()
+                            point_name = _extract_point_id_from_text(image_path)
+                            conversations = record.get("conversations") or []
+                            if isinstance(conversations, list):
+                                for c in conversations:
+                                    if not isinstance(c, dict):
+                                        continue
+                                    if c.get("from") == "user":
+                                        user_text = str(c.get("value") or "")
+                                    elif c.get("from") == "assistant":
+                                        assistant_text = str(c.get("value") or "")
+                        else:
+                            point_name = _extract_point_id_from_text(record.get("id") or record.get("source_id") or record.get("point_name") or "")
+                            user_text = str(record.get("input") or "")
+                            assistant_text = str(record.get("output") or "")
+                            image_path = str(record.get("image") or "").strip()
+
+                        if not point_name:
+                            return None
+
+                        intervals = _extract_intervals_from_text(assistant_text)
+                        return {
+                            "id": point_name,
+                            "source_type": "training",
+                            "source_id": point_name,
+                            "point_name": point_name,
+                            "model_family": model_family,
+                            "source_file": source_file,
+                            "record_index": index,
+                            "training_input": user_text,
+                            "training_output": assistant_text,
+                            "training_record": record,
+                            "training_intervals": intervals,
+                            "training_image_path": image_path,
+                        }
+
+                    def _find_training_preview_image(item: Dict) -> Optional[Path]:
+                        image_path = str(item.get("training_image_path") or "").strip()
+                        if image_path:
+                            p = Path(image_path)
+                            if p.exists():
+                                return p
+
+                        point_name = _normalize_review_name(item.get("point_name") or item.get("source_id") or "")
+                        if not point_name:
+                            return None
+
+                        candidates = [f"{point_name}.jpg", f"{point_name}.png", f"{point_name}.jpeg"]
+                        image_dir = Path(settings.DATA_IMAGES_DIR)
+                        if image_dir.exists():
+                            for name in candidates:
+                                p = image_dir / name
+                                if p.exists():
+                                    return p
+                            for child in image_dir.glob("*.jpg"):
+                                if point_name in child.name:
+                                    return child
+                        return None
+
+                    def _render_review_image_overlay(image_path: Path, segments: List[Dict], title: str):
+                        if not image_path.exists():
+                            return None, "未找到训练图片"
+                        try:
+                            import matplotlib.pyplot as plt
+
+                            img = plt.imread(str(image_path))
+                            fig, ax = plt.subplots(figsize=(10, 4.2))
+                            ax.imshow(img)
+                            ax.axis("off")
+                            ax.set_title(title)
+
+                            lines = []
+                            for seg in segments[:12]:
+                                lines.append(f"[{int(seg.get('start') or 0)}, {int(seg.get('end') or 0)}]")
+                            if not lines:
+                                lines = ["无区间(请检查训练输出)"]
+                            text = "最终标签索引:\n" + "\n".join(lines)
+                            ax.text(
+                                0.01,
+                                0.02,
+                                text,
+                                transform=ax.transAxes,
+                                fontsize=10,
+                                color="white",
+                                bbox={"facecolor": "black", "alpha": 0.6, "pad": 6},
+                                va="bottom",
+                            )
+
+                            temp_dir = Path("temp_images")
+                            temp_dir.mkdir(exist_ok=True)
+                            out_path = temp_dir / f"review_img_{uuid.uuid4().hex[:8]}.jpg"
+                            fig.tight_layout()
+                            fig.savefig(str(out_path), dpi=120)
+                            plt.close(fig)
+                            return str(out_path), f"已叠加 {len(lines)} 条索引区间"
+                        except Exception as e:
+                            return None, f"图片渲染失败: {e}"
+
+                    def _resolve_review_csv_path(item: Dict) -> Optional[Path]:
+                        result_path = str(item.get("result_path") or "").strip()
+                        if result_path:
+                            p = Path(result_path)
+                            if p.exists() and p.suffix.lower() == ".csv":
+                                return p
+
+                        point_name = _normalize_review_name(item.get("point_name") or item.get("source_id") or "")
+                        filename = str(item.get("filename") or "").strip()
+                        candidates = []
+                        if filename:
+                            candidates.append(filename)
+                        if point_name:
+                            candidates.append(f"{point_name}.csv")
+
+                        seen = set()
+                        unique_candidates = []
+                        for name in candidates:
+                            key = name.lower()
+                            if key in seen:
+                                continue
+                            seen.add(key)
+                            unique_candidates.append(name)
+
+                        downsampled_dir = Path(settings.DATA_DOWNSAMPLED_DIR)
+                        inference_dir = Path(settings.DATA_INFERENCE_DIR)
+                        for name in unique_candidates:
+                            p = downsampled_dir / name
+                            if p.exists():
+                                return p
+                            p = inference_dir / name
+                            if p.exists():
+                                return p
+                            if inference_dir.exists():
+                                for child in inference_dir.iterdir():
+                                    if not child.is_dir():
+                                        continue
+                                    cp = child / name
+                                    if cp.exists():
+                                        return cp
+                        return None
+
+                    def _load_annotation_segments(source_id: str):
+                        from src.db.database import SessionLocal, AnnotationRecord, init_db
+                        from src.utils.annotation_store import record_to_payload
+
+                        normalized = _normalize_review_name(source_id)
+                        if not normalized:
+                            return None, [], "human", 0, 0
+
+                        init_db()
+                        db = SessionLocal()
+                        try:
+                            row = (
+                                db.query(AnnotationRecord)
+                                .filter(
+                                    AnnotationRecord.user_id == settings.DEFAULT_USER,
+                                    AnnotationRecord.source_id == normalized,
+                                )
+                                .order_by(AnnotationRecord.updated_at.desc())
+                                .first()
+                            )
+                        finally:
+                            db.close()
+
+                        if row is None:
+                            return None, [], "human", 0, 0
+
+                        payload = record_to_payload(row)
+                        annotations = payload.get("annotations") or []
+                        segments = []
+                        for ann in annotations:
+                            if not isinstance(ann, dict):
+                                continue
+                            ann_id = ann.get("id")
+                            label_obj = ann.get("label")
+                            if isinstance(label_obj, dict):
+                                label = label_obj.get("text") or label_obj.get("id") or ""
+                            else:
+                                label = str(label_obj or "")
+                            for seg in (ann.get("segments") or []):
+                                if not isinstance(seg, dict):
+                                    continue
+                                segments.append(
+                                    {
+                                        "ann_id": ann_id or "",
+                                        "label": label,
+                                        "start": int(seg.get("start") or 0),
+                                        "end": int(seg.get("end") or 0),
+                                        "count": int(seg.get("count") or 0),
+                                        "score": seg.get("score"),
+                                    }
+                                )
+
+                        return payload, segments, (row.source_kind or "human"), int(row.annotation_count or 0), int(row.segment_count or 0)
+
+                    def _render_review_plot(csv_path: Optional[Path], segments: List[Dict], title: str):
+                        if csv_path is None or not csv_path.exists():
+                            return None, "未找到对应 CSV 文件"
+
+                        try:
+                            df = pd.read_csv(csv_path, nrows=5000)
+                        except Exception as e:
+                            return None, f"读取 CSV 失败: {e}"
+
+                        if df.empty:
+                            return None, "CSV 为空"
+
+                        numeric_cols = df.select_dtypes(include=["number"]).columns.tolist()
+                        if not numeric_cols:
+                            return None, "CSV 无数值列，无法绘制曲线"
+
+                        y_col = "value" if "value" in df.columns else numeric_cols[0]
+                        y = pd.to_numeric(df[y_col], errors="coerce").ffill().bfill().fillna(0.0)
+
+                        try:
+                            highlight_regions = []
+                            max_idx = len(y)
+                            for seg in segments[:200]:
+                                start = max(int(seg.get("start") or 0), 0)
+                                end = int(seg.get("end") or start)
+                                if start >= max_idx:
+                                    continue
+                                # create_ts_image uses [start, end) semantics; force at least 1 point width.
+                                end = max(start + 1, end)
+                                end = min(end, max_idx)
+                                if start < end:
+                                    highlight_regions.append((start, end))
+
+                            img = create_ts_image(
+                                data=y,
+                                y_range=None,
+                                start_index=0,
+                                highlight_regions=highlight_regions,
+                                show_grid=True,
+                            )
+
+                            temp_dir = Path("temp_images")
+                            temp_dir.mkdir(exist_ok=True)
+                            out_path = temp_dir / f"review_{uuid.uuid4().hex[:8]}.jpg"
+                            img.save(str(out_path), format="JPEG", quality=95)
+                            return str(out_path), f"统一曲线与异常区间绘制成功（列: {y_col}，点数: {len(df)}，异常段: {len(highlight_regions)}）"
+                        except Exception as e:
+                            return None, f"绘图失败: {e}"
+
+                    def _build_review_preview(item: Optional[Dict]):
+                        if not item:
+                            return _empty_review_preview()
+
+                        preview_item = dict(item)
+                        source_type = "training"
+                        source_kind = preview_item.get("source_kind") or "human"
+                        annotation_count = int(preview_item.get("annotation_count") or 0)
+                        segment_count = int(preview_item.get("segment_count") or 0)
+                        train_segments = list(preview_item.get("training_intervals") or [])
+                        payload, ann_segments, detected_kind, ann_count, seg_count = _load_annotation_segments(
+                            str(preview_item.get("source_id") or preview_item.get("point_name") or "")
+                        )
+                        if payload:
+                            preview_item["annotation_payload"] = payload
+                        source_kind = detected_kind or source_kind
+                        annotation_count = ann_count
+                        segment_count = seg_count
+                        segments = train_segments or ann_segments
+
+                        preview_item["source_kind"] = source_kind
+                        preview_item["annotation_count"] = annotation_count
+                        preview_item["segment_count"] = segment_count
+
+                        title_name = preview_item.get("point_name") or preview_item.get("source_id") or "-"
+                        csv_path = _resolve_review_csv_path(preview_item)
+                        plot_path, plot_msg = _render_review_plot(csv_path, segments, f"训练样本审核: {title_name}")
+                        if not plot_path:
+                            image_path = _find_training_preview_image(preview_item)
+                            if image_path:
+                                plot_path, plot_msg = _render_review_image_overlay(image_path, segments, f"训练样本审核(图片回退): {title_name}")
+
+                        seg_df = pd.DataFrame(segments, columns=["ann_id", "label", "start", "end", "count", "score"])
+                        training_preview = {
+                            "model_family": preview_item.get("model_family"),
+                            "source_file": preview_item.get("source_file"),
+                            "record_index": preview_item.get("record_index"),
+                            "point_name": preview_item.get("point_name"),
+                            "input": str(preview_item.get("training_input") or "")[:1200],
+                            "output": str(preview_item.get("training_output") or "")[:1200],
+                            "interval_count": len(train_segments),
+                        }
+
+                        meta = (
+                            f"**点位**: {title_name}  \n"
+                            f"**来源类型**: {source_type}  \n"
+                            f"**训练模型**: {preview_item.get('model_family') or '-'}  \n"
+                            f"**训练文件**: {preview_item.get('source_file') or '-'}#{preview_item.get('record_index')}  \n"
+                            f"**标注来源**: {source_kind}  \n"
+                            f"**标注数/段数**: {annotation_count}/{segment_count}  \n"
+                            f"**关联分数**: {(preview_item.get('score') if preview_item.get('score') is not None else '-')} ({preview_item.get('method') or '-'})  \n"
+                            f"**可视化状态**: {plot_msg}"
+                        )
+
+                        return preview_item, plot_path, meta, seg_df, training_preview
+
+                    def _load_review_rows(training_family: str, status: str, method: str, keyword: str, limit: int, annotation_kind: str):
+                        status_label_map = {
+                            "pending": "重新审核",
+                            "approved": "已通过",
+                            "needs_fix": "需标注修订",
+                        }
+                        try:
+                            from src.db.database import SessionLocal, ReviewQueue, InferenceResult, AnnotationRecord, init_db
                             init_db()
                             db = SessionLocal()
                             try:
-                                q = db.query(ReviewQueue, InferenceResult).outerjoin(
-                                    InferenceResult, ReviewQueue.source_id == InferenceResult.id
-                                )
-                                if source_type:
-                                    q = q.filter(ReviewQueue.source_type == source_type)
-                                if status:
-                                    q = q.filter(ReviewQueue.status == status)
                                 norm_method = _normalize_review_method(method)
-                                if norm_method:
-                                    q = q.filter(ReviewQueue.method == norm_method)
-                                q = q.order_by(ReviewQueue.updated_at.desc())
-                                if limit and int(limit) > 0:
-                                    q = q.limit(int(limit))
-                                rows = q.all()
+                                ann_rows = (
+                                    db.query(
+                                        AnnotationRecord.source_id,
+                                        AnnotationRecord.source_kind,
+                                        AnnotationRecord.annotation_count,
+                                        AnnotationRecord.segment_count,
+                                        )
+                                    .filter(AnnotationRecord.user_id == settings.DEFAULT_USER)
+                                    .all()
+                                )
+                                ann_meta_map: Dict[str, Dict] = {}
+                                for source_id, source_kind, ann_count, seg_count in ann_rows:
+                                    key = _normalize_review_name(source_id)
+                                    if not key:
+                                        continue
+                                    ann_meta_map[key] = {
+                                        "source_kind": (source_kind or "human").strip().lower(),
+                                        "annotation_count": int(ann_count or 0),
+                                        "segment_count": int(seg_count or 0),
+                                    }
+
+                                review_rows = (
+                                    db.query(
+                                        ReviewQueue.source_id,
+                                        ReviewQueue.status,
+                                        ReviewQueue.reviewer,
+                                        ReviewQueue.updated_at,
+                                    )
+                                    .filter(ReviewQueue.source_type == "annotation")
+                                    .order_by(ReviewQueue.updated_at.desc())
+                                    .all()
+                                )
+                                review_status_map: Dict[str, Dict] = {}
+                                for source_id, st, reviewer, updated_at in review_rows:
+                                    key = _normalize_review_name(source_id)
+                                    if not key or key in review_status_map:
+                                        continue
+                                    mapped = "needs_fix" if (st or "").strip().lower() == "rejected" else ((st or "").strip().lower() or "pending")
+                                    review_status_map[key] = {
+                                        "status": mapped,
+                                        "reviewer": reviewer,
+                                        "updated_at": updated_at.isoformat() if updated_at else None,
+                                    }
+
+                                inf_rows = db.query(InferenceResult).order_by(InferenceResult.created_at.desc()).all()
+                                score_map: Dict[str, Dict] = {}
+                                for row in inf_rows:
+                                    key = _normalize_review_name(row.point_name or "")
+                                    if not key or key in score_map:
+                                        continue
+                                    if norm_method and (row.method or "").strip() != norm_method:
+                                        continue
+                                    score_map[key] = {
+                                        "method": row.method,
+                                        "score": float(row.score_avg) if row.score_avg is not None else None,
+                                    }
                             finally:
                                 db.close()
                         except Exception as e:
-                            return gr.update(choices=[], value=[]), f"加载失败: {e}", {}, {}
+                            empty = _empty_review_preview()
+                            return gr.update(choices=[], value=[]), f"加载失败: {e}", {}, *empty
+
+                        roots = []
+                        fam = (training_family or "all").strip().lower()
+                        if fam in {"all", "chatts"}:
+                            roots.append(("chatts", Path(settings.DATA_TRAINING_CHATTS_DIR)))
+                        if fam in {"all", "qwen"}:
+                            roots.append(("qwen", Path(settings.DATA_TRAINING_QWEN_DIR)))
+
+                        entries: List[Dict] = []
+                        seen_points = set()
+                        for family, root in roots:
+                            if not root.exists():
+                                continue
+                            files = sorted(
+                                [
+                                    p for p in root.iterdir()
+                                    if p.is_file()
+                                    and p.suffix.lower() in {".json", ".jsonl"}
+                                    and not p.name.startswith(".")
+                                    and not p.name.startswith("_")
+                                    and not p.name.startswith("dataset_info")
+                                ],
+                                key=lambda p: p.stat().st_mtime,
+                                reverse=True,
+                            )
+                            for fp in files:
+                                for idx, rec in enumerate(_iter_training_records_for_review(fp), 1):
+                                    item = _build_training_preview_item(rec, family, fp.name, idx)
+                                    if not item:
+                                        continue
+                                    point_name = _normalize_review_name(item.get("point_name") or "")
+                                    if not point_name or point_name in seen_points:
+                                        continue
+                                    if norm_method and point_name not in score_map:
+                                        continue
+                                    seen_points.add(point_name)
+                                    entries.append(item)
+
+                        if limit and int(limit) > 0:
+                            entries = entries[: int(limit)]
 
                         items = []
-                        state_map = {}
-                        stats = {"total": 0, "pending": 0, "approved": 0, "rejected": 0, "needs_fix": 0}
-                        for review, inf in rows:
+                        state_map: Dict[str, Dict] = {}
+                        normalized_ann_kind = (annotation_kind or "all").strip().lower()
+                        keyword_text = (keyword or "").strip().lower()
+                        stats = {"total": 0, "pending": 0, "approved": 0, "needs_fix": 0}
+                        status_filter = (status or "").strip().lower()
+                        for item in entries:
+                            key = _normalize_review_name(item.get("point_name") or item.get("source_id") or "")
+                            meta = ann_meta_map.get(key, {})
+                            source_kind = meta.get("source_kind", "human")
+                            if normalized_ann_kind in {"auto", "human"} and source_kind != normalized_ann_kind:
+                                continue
+                            if keyword_text and keyword_text not in key.lower():
+                                continue
+                            review_meta = review_status_map.get(key, {})
+                            item_status = review_meta.get("status", "pending")
+                            if status_filter and item_status != status_filter:
+                                continue
+                            score_meta = score_map.get(key, {})
+                            item.update(
+                                {
+                                    "id": key,
+                                    "status": item_status,
+                                    "source_kind": source_kind,
+                                    "annotation_count": int(meta.get("annotation_count", 0)),
+                                    "segment_count": int(meta.get("segment_count", 0)),
+                                    "method": score_meta.get("method"),
+                                    "score": score_meta.get("score"),
+                                    "reviewer": review_meta.get("reviewer"),
+                                    "updated_at": review_meta.get("updated_at"),
+                                }
+                            )
                             stats["total"] += 1
-                            stats[review.status] = stats.get(review.status, 0) + 1
-                            filename = None
-                            if inf and inf.result_path:
-                                filename = os.path.basename(inf.result_path)
-                            item = {
-                                "id": review.id,
-                                "source_type": review.source_type,
-                                "source_id": review.source_id,
-                                "point_name": review.point_name,
-                                "method": review.method,
-                                "model": review.model,
-                                "score": review.score,
-                                "status": review.status,
-                                "reviewer": review.reviewer,
-                                "filename": filename,
-                                "updated_at": review.updated_at.isoformat() if review.updated_at else None,
-                                "created_at": review.created_at.isoformat() if review.created_at else None,
-                            }
-                            label = f"[{item['status']}] {item['point_name'] or item['source_id']} | {item['method'] or '-'} | {item['score'] if item['score'] is not None else '-'}"
-                            items.append((label, item["id"]))
-                            state_map[item["id"]] = item
+                            stats[item_status] = stats.get(item_status, 0) + 1
+                            kind_tag = "[AUTO]" if source_kind == "auto" else "[HUMAN]"
+                            score_text = f"{float(item['score']):.3f}" if item.get("score") is not None else "-"
+                            status_text = status_label_map.get(item_status, item_status)
+                            label = (
+                                f"[{status_text}] [{str(item.get('model_family') or '').upper()}] {kind_tag} "
+                                f"{item.get('point_name') or item.get('source_id')} | {item.get('method') or '-'} | {score_text}"
+                            )
+                            items.append((label, key))
+                            state_map[key] = item
 
                         stats_text = (
-                            f"总 {stats.get('total', 0)} | 待审 {stats.get('pending', 0)} | "
-                            f"通过 {stats.get('approved', 0)} | 驳回 {stats.get('rejected', 0)} | 待修正 {stats.get('needs_fix', 0)}"
+                            f"总 {stats.get('total', 0)} | 重新审核 {stats.get('pending', 0)} | "
+                            f"已通过 {stats.get('approved', 0)} | 需标注修订 {stats.get('needs_fix', 0)}"
                         )
-                        preview = next(iter(state_map.values()), {})
-                        return gr.update(choices=items, value=[]), stats_text, state_map, preview
+                        first_item = next(iter(state_map.values()), None)
+                        preview = _build_review_preview(first_item)
+                        return gr.update(choices=items, value=[]), stats_text, state_map, *preview
 
-                    def _sample_review_rows(source_type, strategy, score_by, method, min_score, max_score, limit):
-                        try:
-                            from sqlalchemy import func as _sa_func
-                            from src.db.database import SessionLocal, ReviewQueue, InferenceResult, init_db
-                            init_db()
-                            db = SessionLocal()
-                            created = 0
-                            skipped = 0
-                            source_type = (source_type or "inference").strip()
-                            strategy = (strategy or "topk").strip()
-                            norm_method = _normalize_review_method(method)
-                            limit = int(limit or 50)
-                            try:
-                                if source_type == "annotation":
-                                    ann_dir = Path(settings.ANNOTATIONS_ROOT) / settings.DEFAULT_USER
-                                    entries = []
-                                    if ann_dir.exists():
-                                        for p in ann_dir.glob("*.json"):
-                                            try:
-                                                payload = json.loads(p.read_text(encoding="utf-8"))
-                                                source_id = payload.get("filename") or p.stem
-                                            except Exception:
-                                                source_id = p.stem
-                                            entries.append((source_id, p.stat().st_mtime))
-                                    if strategy == "random":
-                                        import random
-                                        random.shuffle(entries)
-                                    elif strategy == "low_score":
-                                        entries.sort(key=lambda x: x[1])
-                                    else:
-                                        entries.sort(key=lambda x: x[1], reverse=True)
-                                    if limit > 0:
-                                        entries = entries[:limit]
-                                    for source_id, _ in entries:
-                                        exists = db.query(ReviewQueue).filter(
-                                            ReviewQueue.source_type == "annotation",
-                                            ReviewQueue.source_id == source_id,
-                                        ).first()
-                                        if exists:
-                                            skipped += 1
-                                            continue
-                                        db.add(ReviewQueue(
-                                            id=str(uuid.uuid4()),
-                                            source_type="annotation",
-                                            source_id=source_id,
-                                            method=norm_method,
-                                            model=None,
-                                            point_name=source_id,
-                                            score=None,
-                                            strategy=strategy,
-                                            status="pending",
-                                            reviewer=None,
-                                        ))
-                                        created += 1
-                                else:
-                                    score_col = InferenceResult.score_avg if (score_by or "score_avg") == "score_avg" else InferenceResult.score_max
-                                    q = db.query(InferenceResult)
-                                    if norm_method:
-                                        q = q.filter(InferenceResult.method == norm_method)
-                                    if min_score is not None:
-                                        q = q.filter(score_col >= float(min_score))
-                                    if max_score is not None:
-                                        q = q.filter(score_col <= float(max_score))
-                                    if strategy == "low_score":
-                                        q = q.order_by(score_col.asc(), InferenceResult.created_at.desc())
-                                    elif strategy == "random":
-                                        q = q.order_by(_sa_func.random())
-                                    else:
-                                        q = q.order_by(score_col.desc(), InferenceResult.created_at.desc())
-                                    if limit > 0:
-                                        q = q.limit(limit)
-                                    for row in q.all():
-                                        exists = db.query(ReviewQueue).filter(
-                                            ReviewQueue.source_type == "inference",
-                                            ReviewQueue.source_id == row.id,
-                                        ).first()
-                                        if exists:
-                                            skipped += 1
-                                            continue
-                                        score_val = row.score_avg if (score_by or "score_avg") == "score_avg" else row.score_max
-                                        db.add(ReviewQueue(
-                                            id=str(uuid.uuid4()),
-                                            source_type="inference",
-                                            source_id=row.id,
-                                            method=row.method,
-                                            model=row.model,
-                                            point_name=row.point_name,
-                                            score=score_val,
-                                            strategy=strategy,
-                                            status="pending",
-                                            reviewer=None,
-                                        ))
-                                        created += 1
-                                db.commit()
-                            except Exception:
-                                db.rollback()
-                                raise
-                            finally:
-                                db.close()
-                            return f"✅ 抽样完成：新增 {created} 条，跳过 {skipped} 条"
-                        except Exception as e:
-                            return f"❌ 抽样失败: {e}"
-
-                    def _batch_update_review_status(selected_ids, status, reviewer):
+                    def _batch_update_review_status(selected_ids, status, reviewer, state_map):
                         ids = list(selected_ids or [])
                         if not ids:
                             return "❌ 请先选择审核项"
-                        if status not in {"pending", "approved", "rejected", "needs_fix"}:
+                        if status not in {"pending", "approved", "needs_fix"}:
                             return "❌ 非法状态"
+                        status_label_map = {
+                            "pending": "重新审核",
+                            "approved": "已通过",
+                            "needs_fix": "需标注修订",
+                        }
                         try:
                             from datetime import datetime
                             from src.db.database import SessionLocal, ReviewQueue, init_db
                             init_db()
                             db = SessionLocal()
                             try:
-                                updated = db.query(ReviewQueue).filter(ReviewQueue.id.in_(ids)).update(
-                                    {
-                                        ReviewQueue.status: status,
-                                        ReviewQueue.reviewer: (reviewer or "").strip() or None,
-                                        ReviewQueue.updated_at: datetime.utcnow(),
-                                    },
-                                    synchronize_session=False,
-                                )
+                                updated = 0
+                                mapping = state_map or {}
+                                reviewer_text = (reviewer or "").strip() or None
+                                for rid in ids:
+                                    item = mapping.get(rid, {})
+                                    point_name = _normalize_review_name(item.get("point_name") or rid)
+                                    if not point_name:
+                                        continue
+                                    row = (
+                                        db.query(ReviewQueue)
+                                        .filter(
+                                            ReviewQueue.source_type == "annotation",
+                                            ReviewQueue.source_id == point_name,
+                                        )
+                                        .order_by(ReviewQueue.updated_at.desc())
+                                        .first()
+                                    )
+                                    if row is None:
+                                        row = ReviewQueue(
+                                            id=str(uuid.uuid4()),
+                                            source_type="annotation",
+                                            source_id=point_name,
+                                            method=item.get("method"),
+                                            model=None,
+                                            point_name=point_name,
+                                            score=item.get("score"),
+                                            strategy="training_review",
+                                            status=status,
+                                            reviewer=reviewer_text,
+                                            updated_at=datetime.utcnow(),
+                                        )
+                                        db.add(row)
+                                    else:
+                                        row.status = status
+                                        row.reviewer = reviewer_text
+                                        row.updated_at = datetime.utcnow()
+                                    updated += 1
                                 db.commit()
                             except Exception:
                                 db.rollback()
                                 raise
                             finally:
                                 db.close()
-                            return f"✅ 已更新 {updated} 条为 {status}"
+                            return f"✅ 已更新 {updated} 条为 {status_label_map.get(status, status)}"
                         except Exception as e:
                             return f"❌ 更新失败: {e}"
 
                     def _preview_review_items(selected_ids, state_map):
                         if not selected_ids:
-                            return {}
-                        result = []
+                            return _empty_review_preview()
                         mapping = state_map or {}
+                        first = None
                         for rid in selected_ids:
                             if rid in mapping:
-                                result.append(mapping[rid])
-                        return result[0] if len(result) == 1 else result
+                                first = mapping[rid]
+                                break
+                        return _build_review_preview(first)
 
                     review_refresh_btn.click(
                         fn=_load_review_rows,
-                        inputs=[review_source_type, review_status_filter, review_method, review_limit],
-                        outputs=[review_queue_items, review_stats_box, review_rows_state, review_preview_json],
-                    )
-
-                    review_sample_btn.click(
-                        fn=_sample_review_rows,
-                        inputs=[
-                            review_source_type,
-                            review_strategy,
-                            review_score_by,
-                            review_method,
-                            review_min_score,
-                            review_max_score,
-                            review_sample_limit,
+                        inputs=[review_training_family, review_status_filter, review_method, review_keyword, review_limit, review_annotation_kind_filter],
+                        outputs=[
+                            review_queue_items,
+                            review_stats_box,
+                            review_rows_state,
+                            review_preview_json,
+                            review_preview_plot,
+                            review_preview_meta,
+                            review_preview_segments,
+                            review_preview_training,
                         ],
-                        outputs=review_action_status,
-                    ).then(
-                        fn=_load_review_rows,
-                        inputs=[review_source_type, review_status_filter, review_method, review_limit],
-                        outputs=[review_queue_items, review_stats_box, review_rows_state, review_preview_json],
                     )
 
                     review_mark_approved_btn.click(
-                        fn=lambda ids, reviewer: _batch_update_review_status(ids, "approved", reviewer),
-                        inputs=[review_queue_items, review_reviewer],
+                        fn=lambda ids, reviewer, state: _batch_update_review_status(ids, "approved", reviewer, state),
+                        inputs=[review_queue_items, review_reviewer, review_rows_state],
                         outputs=review_action_status,
                     ).then(
                         fn=_load_review_rows,
-                        inputs=[review_source_type, review_status_filter, review_method, review_limit],
-                        outputs=[review_queue_items, review_stats_box, review_rows_state, review_preview_json],
-                    )
-
-                    review_mark_rejected_btn.click(
-                        fn=lambda ids, reviewer: _batch_update_review_status(ids, "rejected", reviewer),
-                        inputs=[review_queue_items, review_reviewer],
-                        outputs=review_action_status,
-                    ).then(
-                        fn=_load_review_rows,
-                        inputs=[review_source_type, review_status_filter, review_method, review_limit],
-                        outputs=[review_queue_items, review_stats_box, review_rows_state, review_preview_json],
+                        inputs=[review_training_family, review_status_filter, review_method, review_keyword, review_limit, review_annotation_kind_filter],
+                        outputs=[
+                            review_queue_items,
+                            review_stats_box,
+                            review_rows_state,
+                            review_preview_json,
+                            review_preview_plot,
+                            review_preview_meta,
+                            review_preview_segments,
+                            review_preview_training,
+                        ],
                     )
 
                     review_mark_fix_btn.click(
-                        fn=lambda ids, reviewer: _batch_update_review_status(ids, "needs_fix", reviewer),
-                        inputs=[review_queue_items, review_reviewer],
+                        fn=lambda ids, reviewer, state: _batch_update_review_status(ids, "needs_fix", reviewer, state),
+                        inputs=[review_queue_items, review_reviewer, review_rows_state],
                         outputs=review_action_status,
                     ).then(
                         fn=_load_review_rows,
-                        inputs=[review_source_type, review_status_filter, review_method, review_limit],
-                        outputs=[review_queue_items, review_stats_box, review_rows_state, review_preview_json],
+                        inputs=[review_training_family, review_status_filter, review_method, review_keyword, review_limit, review_annotation_kind_filter],
+                        outputs=[
+                            review_queue_items,
+                            review_stats_box,
+                            review_rows_state,
+                            review_preview_json,
+                            review_preview_plot,
+                            review_preview_meta,
+                            review_preview_segments,
+                            review_preview_training,
+                        ],
                     )
 
                     review_mark_pending_btn.click(
-                        fn=lambda ids, reviewer: _batch_update_review_status(ids, "pending", reviewer),
-                        inputs=[review_queue_items, review_reviewer],
+                        fn=lambda ids, reviewer, state: _batch_update_review_status(ids, "pending", reviewer, state),
+                        inputs=[review_queue_items, review_reviewer, review_rows_state],
                         outputs=review_action_status,
                     ).then(
                         fn=_load_review_rows,
-                        inputs=[review_source_type, review_status_filter, review_method, review_limit],
-                        outputs=[review_queue_items, review_stats_box, review_rows_state, review_preview_json],
+                        inputs=[review_training_family, review_status_filter, review_method, review_keyword, review_limit, review_annotation_kind_filter],
+                        outputs=[
+                            review_queue_items,
+                            review_stats_box,
+                            review_rows_state,
+                            review_preview_json,
+                            review_preview_plot,
+                            review_preview_meta,
+                            review_preview_segments,
+                            review_preview_training,
+                        ],
                     )
 
                     review_queue_items.change(
                         fn=_preview_review_items,
                         inputs=[review_queue_items, review_rows_state],
-                        outputs=review_preview_json,
+                        outputs=[review_preview_json, review_preview_plot, review_preview_meta, review_preview_segments, review_preview_training],
                     )
 
                 # 2. 训练数据管理
-                with gr.Tab("训练数据 (Training Data)"):
+                with gr.Tab("训练数据 (Training Data)", render=False) as training_data_tab:
                     gr.Markdown("### 🎯 微调数据管理 (Converted JSONL)")
                     with gr.Row():
                         with gr.Column(scale=1):
@@ -2633,7 +3262,7 @@ def create_training_ui() -> gr.Blocks:
                     )
 
                 # 2.5 降采样数据预览
-                with gr.Tab("降采样数据 (Downsampled)"):
+                with gr.Tab("降采样数据 (Downsampled)", render=False) as downsampled_data_tab:
                     gr.Markdown("### 📉 降采样数据预览 (CSV + 曲线)")
                     with gr.Row():
                         with gr.Column(scale=1):
@@ -2670,7 +3299,7 @@ def create_training_ui() -> gr.Blocks:
                     )
 
                 # 3. 数据集管理 (Redesigned)
-                with gr.Tab("数据集构建 (Construction)"):
+                with gr.Tab("数据集构建 (Construction)", render=False) as construction_tab:
                     gr.Markdown("### 🛠️ 数据集构建 (Source -> Target)")
                     
                     # State to hold the current list of points in the target dataset
@@ -2683,19 +3312,53 @@ def create_training_ui() -> gr.Blocks:
                             with gr.Row():
                                 src_filter_source = gr.Dropdown(
                                     label="来源类型", 
-                                    choices=["Annotations (已标注)", "Inference (推理结果)"], 
+                                    choices=["Annotations (已标注)", "Training (已转换)"], 
                                     value="Annotations (已标注)"
                                 )
-                                src_filter_method = gr.Dropdown(
-                                    label="关联算法 (用于筛选分数)",
-                                    choices=[""] + TRAINING_MODEL_FAMILIES + ["timer", "adtk_hbos", "ensemble"],
-                                    value=""
+                                src_filter_annotation_kind = gr.Dropdown(
+                                    label="标注来源",
+                                    choices=[
+                                        ("All (全部)", "all"),
+                                        ("Auto (未人工改)", "auto"),
+                                        ("Human (人工改)", "human"),
+                                    ],
+                                    value="all",
                                 )
-                            with gr.Row():
-                                src_filter_min = gr.Number(label="Min Score", value=0.0, step=0.1)
-                                src_filter_max = gr.Number(label="Max Score", value=1.0, step=0.1)
-                            
-                            src_filter_keyword = gr.Textbox(label="关键字筛选", placeholder="输入点位名称...")
+                                src_filter_training_family = gr.Dropdown(
+                                    label="训练数据模型",
+                                    choices=[
+                                        ("All", "all"),
+                                        ("ChatTS", "chatts"),
+                                        ("Qwen", "qwen"),
+                                    ],
+                                    value="all",
+                                    visible=False,
+                                )
+                                src_filter_sort = gr.Dropdown(
+                                    label="排序",
+                                    choices=[
+                                        ("Score ↓", "score_desc"),
+                                        ("Score ↑", "score_asc"),
+                                        ("最新优先", "updated_desc"),
+                                        ("最早优先", "updated_asc"),
+                                        ("名称 A-Z", "name_asc"),
+                                        ("名称 Z-A", "name_desc"),
+                                    ],
+                                    value="score_desc",
+                                )
+                            with gr.Accordion("高级筛选", open=False):
+                                with gr.Row():
+                                    src_filter_method = gr.Dropdown(
+                                        label="关联算法 (用于筛选分数)",
+                                        choices=[""] + TRAINING_MODEL_FAMILIES + ["timer", "adtk_hbos", "ensemble"],
+                                        value=""
+                                    )
+                                    src_filter_approved_only = gr.Checkbox(
+                                        label="仅审核通过",
+                                        value=True,
+                                    )
+                                    src_filter_keyword = gr.Textbox(label="关键字筛选", placeholder="输入点位名称...")
+
                             src_refresh_btn = gr.Button("🔄 刷新源列表 (Search)")
                             
                             # Source List
@@ -2748,23 +3411,38 @@ def create_training_ui() -> gr.Blocks:
 
                     def _normalize_source_type(source_type: str) -> str:
                         text = (source_type or "").lower()
+                        if "training" in text:
+                            return "training"
                         if "inference" in text:
                             return "inference"
                         return "annotations"
 
-                    def refresh_source_list_logic(source_type, method, min_s, max_s, keyword):
+                    def _toggle_source_kind_filter(source_type):
+                        source = _normalize_source_type(source_type)
+                        ann_visible = source == "annotations"
+                        train_visible = source == "training"
+                        method_visible = source == "annotations"
+                        return (
+                            gr.Dropdown(visible=ann_visible, value="all"),
+                            gr.Dropdown(visible=train_visible, value="all"),
+                            gr.Dropdown(visible=method_visible, value=""),
+                        )
+
+                    def refresh_source_list_logic(source_type, source_kind, training_family, sort_by, method, approved_only, keyword):
                         """Fetch source items via assets API."""
+                        normalized_source = _normalize_source_type(source_type)
                         params = {
-                            "source_type": _normalize_source_type(source_type),
+                            "source_type": normalized_source,
+                            "sort_by": sort_by or "score_desc",
                             "method": method or None,
+                            "approved_only": bool(approved_only),
                             "keyword": keyword or None,
                             "limit": 200,
                         }
-                        if min_s is not None:
-                            params["min_score"] = float(min_s)
-                        if max_s is not None:
-                            params["max_score"] = float(max_s)
-
+                        if normalized_source == "annotations" and source_kind in {"auto", "human"}:
+                            params["source_kind"] = source_kind
+                        if normalized_source == "training" and training_family in {"chatts", "qwen"}:
+                            params["model_family"] = training_family
                         resp = _assets_api_call("GET", "/sources", params=params)
                         if not resp.get("success"):
                             return gr.CheckboxGroup(choices=[], value=[]), f"Error: {resp.get('error')}"
@@ -2862,8 +3540,14 @@ def create_training_ui() -> gr.Blocks:
                     # --- Bindings (Construction) ---
                     src_refresh_btn.click(
                         fn=refresh_source_list_logic,
-                        inputs=[src_filter_source, src_filter_method, src_filter_min, src_filter_max, src_filter_keyword],
+                        inputs=[src_filter_source, src_filter_annotation_kind, src_filter_training_family, src_filter_sort, src_filter_method, src_filter_approved_only, src_filter_keyword],
                         outputs=[src_list, src_list_msg]
+                    )
+
+                    src_filter_source.change(
+                        fn=_toggle_source_kind_filter,
+                        inputs=src_filter_source,
+                        outputs=[src_filter_annotation_kind, src_filter_training_family, src_filter_method],
                     )
 
                     btn_add.click(
@@ -2908,7 +3592,7 @@ def create_training_ui() -> gr.Blocks:
                     )
 
 
-                with gr.Tab("数据集导出 (Export)"):
+                with gr.Tab("数据集导出 (Export)", render=False) as export_tab:
                     gr.Markdown("### 📤 训练集导出 (JSONL)")
                     with gr.Row():
                         with gr.Column(scale=2):
@@ -2967,9 +3651,18 @@ def create_training_ui() -> gr.Blocks:
                         inputs=[export_dataset_dropdown, export_family, export_output_name, export_approved_only],
                         outputs=export_status
                     )
+
+                # 数据资产管理子 Tab 顺序按数据流程：
+                # 降采样 -> 标注 -> 审核 -> 构建 -> 导出 -> 训练数据
+                downsampled_data_tab.render()
+                annotations_manage_tab.render()
+                review_queue_tab.render()
+                construction_tab.render()
+                export_tab.render()
+                training_data_tab.render()
         
-        # ==================== 微调训练 Tab (原有) ====================
-        with gr.Tab("🎯 开始训练"):
+        # ==================== 模型训练 Tab (原有) ====================
+        with gr.Tab("🎯 模型训练", render=False) as model_training_tab:
             with gr.Row():
                 with gr.Column(scale=2):
                     # 基础配置
@@ -3441,7 +4134,7 @@ def create_training_ui() -> gr.Blocks:
                 convert_btn.click(convert_action, inputs=config_dropdown, outputs=native_status)
                 launch_native_btn.click(launch_action, outputs=[native_status, native_ui_link])
         
-        with gr.Tab("📊 已训练模型"):
+        with gr.Tab("📊 已训练模型", render=False) as trained_models_tab:
             with gr.Row():
                 with gr.Column(scale=1):
                     gr.Markdown("### 模型列表")
@@ -3546,7 +4239,7 @@ def create_training_ui() -> gr.Blocks:
                 outputs=model_dropdown
             )
             
-        with gr.Tab("⚖️ 模型对比"):
+        with gr.Tab("⚖️ 模型对比", render=False) as model_compare_tab:
             with gr.Row():
                 with gr.Column(scale=1):
                     gr.Markdown("### 选择对比模型")
@@ -3605,7 +4298,7 @@ def create_training_ui() -> gr.Blocks:
                 outputs=compare_models
             )
         
-        with gr.Tab("⚙️ 配置说明"):
+        with gr.Tab("⚙️ 配置说明", render=False) as config_help_tab:
             gr.Markdown("""
 ## 训练配置说明
 
@@ -3638,6 +4331,17 @@ def create_training_ui() -> gr.Blocks:
 `/home/douff/ts/ts-iteration-loop/services/training/scripts/qwen/lora/` 目录。
 """)
     
+        # ==================== 顶层 Tab 顺序重排 ====================
+        # 用户要求顺序:
+        # 数据获取 -> 推理监控 -> 标注工具 -> 模型训练 -> 数据资产管理 -> 模型资产管理
+        model_training_tab.render()
+        data_assets_tab.render()
+        with gr.Tab("🧠 模型资产管理"):
+            with gr.Tabs():
+                trained_models_tab.render()
+                model_compare_tab.render()
+                config_help_tab.render()
+
         # 初始化加载
         demo.load(
             fn=get_dataset_names,
