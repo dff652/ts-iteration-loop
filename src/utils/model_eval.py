@@ -344,6 +344,8 @@ def evaluate_model_on_golden(
     truth_dir: str,
     data_dir: str,
     dataset_name: str = "golden",
+    dataset_id: Optional[str] = None,
+    task_id: Optional[str] = None,
     output_dir: Optional[str] = None,
     device: Optional[str] = None,
     method: Optional[str] = None,
@@ -477,7 +479,10 @@ def evaluate_model_on_golden(
         db = SessionLocal()
         record = ModelEval(
             id=str(uuid.uuid4()),
+            task_id=task_id,
+            model_family=model_family,
             model_path=str(model_dir),
+            dataset_id=dataset_id,
             dataset_name=dataset_name,
             metrics=json.dumps(
                 {

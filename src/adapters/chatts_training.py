@@ -701,6 +701,7 @@ class ChatTSTrainingAdapter:
                     truth_dir=truth_dir,
                     data_dir=data_dir,
                     dataset_name=dataset_name,
+                    task_id=task_id,
                     output_dir=output_dir or None,
                     device=device,
                     method=method,

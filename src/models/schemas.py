@@ -136,6 +136,18 @@ class IterationVersion(BaseModel):
     metrics: Optional[dict] = None
 
 
+class ModelEvalInfo(BaseModel):
+    """模型评估结果"""
+    id: str
+    task_id: Optional[str] = None
+    model_family: str
+    model_path: str
+    dataset_id: Optional[str] = None
+    dataset_name: str
+    metrics: dict
+    created_at: datetime
+
+
 # ==================== 通用 ====================
 
 class TaskResponse(BaseModel):

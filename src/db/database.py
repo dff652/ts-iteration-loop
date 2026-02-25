@@ -210,7 +210,10 @@ class ModelEval(Base):
     __tablename__ = "model_evals"
 
     id = Column(String(36), primary_key=True)
+    task_id = Column(String(36))
+    model_family = Column(String(50), default="chatts")
     model_path = Column(String(500))
+    dataset_id = Column(String(36))
     dataset_name = Column(String(200))
     metrics = Column(Text)  # JSON
     created_at = Column(DateTime, default=utc_now_naive)

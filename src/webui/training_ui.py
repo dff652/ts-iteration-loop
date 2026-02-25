@@ -722,6 +722,40 @@ def get_comparison_plot(model_paths: List[str], model_family: str):
     return str(output_path)
 
 
+def get_comparison_metrics(model_paths: List[str]) -> pd.DataFrame:
+    """获取选定模型在黄金集上的评估指标对比"""
+    if not model_paths:
+        return pd.DataFrame()
+    
+    try:
+        from src.db.database import SessionLocal, ModelEval
+        db = SessionLocal()
+        evals = db.query(ModelEval).filter(ModelEval.model_path.in_(model_paths)).all()
+        rows = []
+        for e in evals:
+            try:
+                metrics = json.loads(e.metrics) if e.metrics else {}
+                summary = metrics.get("summary", {})
+                rows.append({
+                    "模型路径": e.model_path.split("/")[-1],
+                    "评价集": e.dataset_name or "golden",
+                    "F1 Score": summary.get("f1_score", "N/A"),
+                    "Precision": summary.get("precision", "N/A"),
+                    "Recall": summary.get("recall", "N/A"),
+                    "覆盖点位": summary.get("points", 0)
+                })
+            except Exception:
+                pass
+        db.close()
+        
+        if rows:
+            return pd.DataFrame(rows)
+        return pd.DataFrame(columns=["模型路径", "评价集", "F1 Score", "Precision", "Recall", "覆盖点位"])
+    except Exception as e:
+        logger.error(f"Error fetching comparison metrics: {e}")
+        return pd.DataFrame()
+
+
 # ==================== 数据获取辅助函数 ====================
 
 def _dataset_records() -> List[Dict]:
@@ -4591,13 +4625,17 @@ def create_training_ui() -> gr.Blocks:
                 
                 with gr.Column(scale=3):
                     gr.Markdown("### 对比结果")
+                    eval_metrics_table = gr.Dataframe(label="🏅 黄金集评估指标 (F1/Precision/Recall)", interactive=False)
                     comparison_plot = gr.Image(label="Loss Comparison")
             
-            # 事件绑定
             compare_btn.click(
                 fn=get_comparison_plot,
                 inputs=[compare_models, compare_family],
                 outputs=comparison_plot
+            ).then(
+                fn=get_comparison_metrics,
+                inputs=[compare_models],
+                outputs=eval_metrics_table
             )
             refresh_compare_btn.click(
                 fn=lambda mf, mt, ck: gr.CheckboxGroup(choices=get_trained_model_choices(mf, mt, ck)),

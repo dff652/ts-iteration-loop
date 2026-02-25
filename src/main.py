@@ -30,7 +30,7 @@ setup_logging()
 logger = get_logger(__name__)
 
 # 导入 API 路由
-from src.api import data, annotation, training, inference, assets, points
+from src.api import data, annotation, training, inference, assets, points, evaluation
 
 # 导入 Gradio 界面
 from src.webui.training_ui import training_ui
@@ -78,6 +78,7 @@ app.include_router(training.router, prefix="/api/v1/training", tags=["微调服�
 app.include_router(inference.router, prefix="/api/v1/inference", tags=["推理服务"])
 app.include_router(assets.router, prefix="/api/v1/assets", tags=["数据资产"])
 app.include_router(points.router, prefix="/api/v1/points", tags=["点位中心"])
+app.include_router(evaluation.router, prefix="/api/v1/evaluation", tags=["评估服务"])
 
 # 导入并注册迭代版本管理路由
 from src.api import iteration
@@ -105,6 +106,7 @@ async def root():
             "inference": "/api/v1/inference",
             "assets": "/api/v1/assets",
             "points": "/api/v1/points",
+            "evaluation": "/api/v1/evaluation",
         }
     }
 
