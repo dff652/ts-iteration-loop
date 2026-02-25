@@ -10,13 +10,13 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 from typing import List, Tuple
 
 from sqlalchemy import text
 
 from src.db.database import engine
+from src.utils.time_utils import utc_iso_z
 
 
 MIGRATIONS_DIR = Path(__file__).resolve().parent / "migrations"
@@ -76,6 +76,12 @@ def _split_sql_statements(sql_text: str) -> List[str]:
     return [p for p in parts if p]
 
 
+def _is_duplicate_column_add(stmt: str, error: Exception) -> bool:
+    text = str(error).lower()
+    stmt_low = stmt.lower()
+    return "duplicate column name" in text and "alter table" in stmt_low and "add column" in stmt_low
+
+
 def _apply_one(migration: MigrationFile) -> None:
     sql_text = migration.path.read_text(encoding="utf-8")
     checksum = _checksum(sql_text)
@@ -83,7 +89,13 @@ def _apply_one(migration: MigrationFile) -> None:
 
     with engine.begin() as conn:
         for stmt in statements:
-            conn.exec_driver_sql(stmt)
+            try:
+                conn.exec_driver_sql(stmt)
+            except Exception as exc:
+                # Keep migration idempotent for SQLite create_all + migration mixed startup.
+                if _is_duplicate_column_add(stmt, exc):
+                    continue
+                raise
         conn.execute(
             text(
                 """
@@ -95,7 +107,7 @@ def _apply_one(migration: MigrationFile) -> None:
                 "version": migration.version,
                 "filename": migration.filename,
                 "checksum": checksum,
-                "applied_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+                "applied_at": utc_iso_z(timespec="seconds"),
             },
         )
 

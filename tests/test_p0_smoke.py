@@ -36,6 +36,28 @@ def test_convert_to_annotation_format_from_legacy_payload():
     assert len(data[0]["annotations"]) == 2
 
 
+def test_to_annotation_rows_without_temp_file():
+    adapter = CheckOutlierAdapter()
+    payload = {
+        "results": [
+            {
+                "file": "test_data_002.csv",
+                "success": True,
+                "result": {
+                    "detected_anomalies": [
+                        {"type": "point", "interval": [5, 8], "reason": "spike"},
+                    ]
+                },
+            }
+        ],
+    }
+
+    rows = adapter.to_annotation_rows(payload)
+    assert len(rows) == 1
+    assert rows[0]["filename"] == "test_data_002.csv"
+    assert len(rows[0]["annotations"]) == 1
+
+
 def test_login_required_default_requires_auth(monkeypatch):
     monkeypatch.delenv("ANNOTATOR_AUTH_BYPASS", raising=False)
 

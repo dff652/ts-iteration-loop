@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 import json
-import re
 import tempfile
 import uuid
 from pathlib import Path
@@ -13,10 +12,11 @@ from typing import Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from configs.settings import settings
-from src.adapters.data_processing import DataProcessingAdapter
+from src.adapters.annotation_export import AnnotationExportAdapter
 from src.adapters.chatts_training import ChatTSTrainingAdapter
 from src.db.database import (
     get_db,
@@ -27,7 +27,8 @@ from src.db.database import (
     ReviewQueue,
 )
 from src.models.schemas import ApiResponse
-from src.utils.annotation_store import normalize_point_name, record_to_payload
+from src.utils.annotation_store import canonical_point_id, normalize_point_name, record_to_payload
+from src.utils.time_utils import utc_iso_z
 
 router = APIRouter()
 
@@ -37,6 +38,8 @@ class AssetSaveRequest(BaseModel):
     dataset_type: str = "train"  # train / golden
     items: List[str]
     note: str = ""
+    owner_id: Optional[str] = None
+    org_id: Optional[str] = None
     overwrite: bool = False
     freeze: bool = False
 
@@ -46,133 +49,100 @@ class ExportTrainingRequest(BaseModel):
     model_family: str = "chatts"  # chatts / qwen
     output_name: Optional[str] = None
     approved_only: bool = True
+    owner_id: Optional[str] = None
+    org_id: Optional[str] = None
+
+
+def _parse_asset_meta(meta_text: Optional[str]) -> dict:
+    if not meta_text:
+        return {}
+    try:
+        parsed = json.loads(meta_text)
+        if isinstance(parsed, dict):
+            return parsed
+    except Exception:
+        pass
+    return {}
 
 
 def _meta_note(meta_text: Optional[str]) -> str:
-    if not meta_text:
-        return ""
-    try:
-        return str(json.loads(meta_text).get("note", ""))
-    except Exception:
-        return ""
+    return str(_parse_asset_meta(meta_text).get("note", ""))
 
 
 def _normalize_point_name(name: str) -> str:
     return normalize_point_name(name)
 
 
+def _resolve_owner_id(owner_id: Optional[str]) -> str:
+    val = str(owner_id or "").strip()
+    return val or settings.DEFAULT_USER
+
+
+def _resolve_org_id(org_id: Optional[str]) -> str:
+    val = str(org_id or "").strip()
+    return val or settings.DEFAULT_ORG
+
+
+def _asset_scope_filters(owner_id: Optional[str], org_id: Optional[str]):
+    filters = []
+    if owner_id is not None:
+        normalized = _resolve_owner_id(owner_id)
+        filters.append(or_(DatasetAsset.owner_id == normalized, DatasetAsset.owner_id.is_(None)))
+    if org_id is not None:
+        normalized = _resolve_org_id(org_id)
+        filters.append(or_(DatasetAsset.org_id == normalized, DatasetAsset.org_id.is_(None)))
+    return filters
+
+
 def _approved_annotation_point_set(db: Session) -> set[str]:
     rows = (
-        db.query(ReviewQueue.source_id)
+        db.query(ReviewQueue.point_id, ReviewQueue.source_id)
         .filter(
             ReviewQueue.source_type == "annotation",
             ReviewQueue.status == "approved",
         )
         .all()
     )
-    return {_normalize_point_name(r[0]) for r in rows if r and r[0]}
+    return {canonical_point_id(r[0], r[1]) for r in rows if canonical_point_id(r[0], r[1])}
 
 
-_POINT_PATTERN = re.compile(r"([A-Za-z][A-Za-z0-9_]*\.[A-Za-z0-9]+)")
+def _infer_training_family(point_name: str, row: AnnotationRecord) -> str:
+    method = str(getattr(row, "method", "") or "").strip().lower()
+    if method in {"qwen", "chatts"}:
+        return method
 
-
-def _extract_point_name_from_text(text: str) -> Optional[str]:
-    raw = str(text or "").strip()
-    if not raw:
-        return None
-
-    base = Path(raw).name
-    matches = _POINT_PATTERN.findall(base)
-    if matches:
-        candidates = []
-        for m in matches:
-            lower = m.lower()
-            if lower.endswith((".csv", ".json", ".jpg", ".png", ".jpeg")):
-                continue
-            candidates.append(m)
-        if candidates:
-            candidates.sort(key=lambda s: (s.count("_"), len(s)), reverse=True)
-            return _normalize_point_name(candidates[0])
-
-    stem = Path(base).stem
-    normalized = _normalize_point_name(stem)
-    return normalized or None
-
-
-def _iter_training_records(file_path: Path):
-    suffix = file_path.suffix.lower()
-    if suffix == ".jsonl":
-        with file_path.open("r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    item = json.loads(line)
-                except Exception:
-                    continue
-                if isinstance(item, dict):
-                    yield item
-        return
-
-    if suffix != ".json":
-        return
-
-    try:
-        with file_path.open("r", encoding="utf-8") as f:
-            data = json.load(f)
-    except Exception:
-        return
-
-    if isinstance(data, list):
-        for item in data:
-            if isinstance(item, dict):
-                yield item
-        return
-
-    if isinstance(data, dict):
-        if isinstance(data.get("data"), list):
-            for item in data["data"]:
-                if isinstance(item, dict):
-                    yield item
-            return
-        yield data
-
-
-def _extract_training_point_name(record: Dict) -> Optional[str]:
-    for key in ("point_name", "source_id", "id", "filename"):
-        value = record.get(key)
-        if not value:
-            continue
-        point = _extract_point_name_from_text(str(value))
-        if point:
-            return point
-
-    image = record.get("image")
-    if image:
-        point = _extract_point_name_from_text(str(image))
-        if point:
-            return point
-
-    return None
+    text = f"{getattr(row, 'filename', '')} {getattr(row, 'source_id', '')} {point_name}".lower()
+    if "qwen" in text:
+        return "qwen"
+    return "chatts"
 
 
 @router.get("/datasets", response_model=ApiResponse)
 async def list_assets(
     dataset_type: Optional[str] = Query(None, description="train or golden"),
+    owner_id: Optional[str] = Query(None, description="按 owner_id 过滤"),
+    org_id: Optional[str] = Query(None, description="按 org_id 过滤"),
     db: Session = Depends(get_db),
 ):
     query = db.query(DatasetAsset)
     if dataset_type:
         query = query.filter(DatasetAsset.dataset_type == dataset_type)
+    for scope_filter in _asset_scope_filters(owner_id=owner_id, org_id=org_id):
+        query = query.filter(scope_filter)
     rows = query.order_by(DatasetAsset.created_at.desc()).all()
 
     assets = []
     for r in rows:
+        asset_owner = _resolve_owner_id(getattr(r, "owner_id", None))
+        asset_org = _resolve_org_id(getattr(r, "org_id", None))
         assets.append(
             {
                 "id": r.id,
                 "name": r.name,
+                "owner_id": asset_owner,
+                "org_id": asset_org,
+                "created_by": str(getattr(r, "created_by", "") or asset_owner),
+                "updated_by": str(getattr(r, "updated_by", "") or asset_owner),
                 "dataset_type": r.dataset_type,
                 "status": r.status,
                 "point_count": r.point_count or 0,
@@ -185,20 +155,38 @@ async def list_assets(
 
 
 @router.get("/datasets/{dataset_id}", response_model=ApiResponse)
-async def get_asset(dataset_id: str, db: Session = Depends(get_db)):
-    asset = db.query(DatasetAsset).filter(DatasetAsset.id == dataset_id).first()
+async def get_asset(
+    dataset_id: str,
+    owner_id: Optional[str] = Query(None, description="按 owner_id 校验"),
+    org_id: Optional[str] = Query(None, description="按 org_id 校验"),
+    db: Session = Depends(get_db),
+):
+    query = db.query(DatasetAsset).filter(DatasetAsset.id == dataset_id)
+    for scope_filter in _asset_scope_filters(owner_id=owner_id, org_id=org_id):
+        query = query.filter(scope_filter)
+    asset = query.first()
     if not asset:
         raise HTTPException(status_code=404, detail="数据集不存在")
 
-    items = db.query(DatasetItem.point_name).filter(DatasetItem.dataset_id == dataset_id).all()
-    points = sorted([str(r[0]) for r in items])
+    items = (
+        db.query(DatasetItem.point_id, DatasetItem.point_name)
+        .filter(DatasetItem.dataset_id == dataset_id)
+        .all()
+    )
+    points = sorted([canonical_point_id(r[0], r[1]) for r in items if canonical_point_id(r[0], r[1])])
 
+    asset_owner = _resolve_owner_id(getattr(asset, "owner_id", None))
+    asset_org = _resolve_org_id(getattr(asset, "org_id", None))
     return ApiResponse(
         success=True,
         data={
             "asset": {
                 "id": asset.id,
                 "name": asset.name,
+                "owner_id": asset_owner,
+                "org_id": asset_org,
+                "created_by": str(getattr(asset, "created_by", "") or asset_owner),
+                "updated_by": str(getattr(asset, "updated_by", "") or asset_owner),
                 "dataset_type": asset.dataset_type,
                 "status": asset.status,
                 "point_count": asset.point_count or len(points),
@@ -217,6 +205,10 @@ async def save_asset(request: AssetSaveRequest, db: Session = Depends(get_db)):
     if not name:
         raise HTTPException(status_code=400, detail="必须输入数据集名称")
 
+    owner_id = _resolve_owner_id(request.owner_id)
+    org_id = _resolve_org_id(request.org_id)
+    actor = _resolve_owner_id(settings.DEFAULT_USER)
+
     if request.dataset_type not in {"train", "golden"}:
         raise HTTPException(status_code=400, detail="dataset_type 必须是 train 或 golden")
 
@@ -233,7 +225,15 @@ async def save_asset(request: AssetSaveRequest, db: Session = Depends(get_db)):
             detail=f"仅允许保存审核通过点位，未通过数量: {len(invalid_items)}，示例: {sample}",
         )
 
-    asset = db.query(DatasetAsset).filter(DatasetAsset.name == name).first()
+    asset = (
+        db.query(DatasetAsset)
+        .filter(
+            DatasetAsset.name == name,
+            or_(DatasetAsset.owner_id == owner_id, DatasetAsset.owner_id.is_(None)),
+            or_(DatasetAsset.org_id == org_id, DatasetAsset.org_id.is_(None)),
+        )
+        .first()
+    )
     if asset and not request.overwrite:
         raise HTTPException(status_code=400, detail="数据集已存在（需启用覆盖）")
     if asset and asset.status == "frozen":
@@ -246,6 +246,10 @@ async def save_asset(request: AssetSaveRequest, db: Session = Depends(get_db)):
         asset = DatasetAsset(
             id=str(uuid.uuid4()),
             name=name,
+            owner_id=owner_id,
+            org_id=org_id,
+            created_by=actor,
+            updated_by=actor,
             dataset_type=request.dataset_type,
             status=status,
             point_count=len(items),
@@ -253,6 +257,11 @@ async def save_asset(request: AssetSaveRequest, db: Session = Depends(get_db)):
         )
         db.add(asset)
     else:
+        asset.owner_id = owner_id
+        asset.org_id = org_id
+        if not (asset.created_by or "").strip():
+            asset.created_by = actor
+        asset.updated_by = actor
         asset.dataset_type = request.dataset_type
         asset.status = status
         asset.point_count = len(items)
@@ -260,20 +269,34 @@ async def save_asset(request: AssetSaveRequest, db: Session = Depends(get_db)):
         db.query(DatasetItem).filter(DatasetItem.dataset_id == asset.id).delete()
 
     for p in items:
-        db.add(DatasetItem(dataset_id=asset.id, point_name=p))
+        db.add(DatasetItem(dataset_id=asset.id, point_id=p, point_name=p))
 
     db.commit()
 
     return ApiResponse(
         success=True,
-        data={"id": asset.id, "name": asset.name, "point_count": len(items)},
+        data={
+            "id": asset.id,
+            "name": asset.name,
+            "owner_id": owner_id,
+            "org_id": org_id,
+            "point_count": len(items),
+        },
         message=f"已保存: {asset.name} ({len(items)} pts)",
     )
 
 
 @router.delete("/datasets/{dataset_id}", response_model=ApiResponse)
-async def delete_asset(dataset_id: str, db: Session = Depends(get_db)):
-    asset = db.query(DatasetAsset).filter(DatasetAsset.id == dataset_id).first()
+async def delete_asset(
+    dataset_id: str,
+    owner_id: Optional[str] = Query(None, description="按 owner_id 校验"),
+    org_id: Optional[str] = Query(None, description="按 org_id 校验"),
+    db: Session = Depends(get_db),
+):
+    query = db.query(DatasetAsset).filter(DatasetAsset.id == dataset_id)
+    for scope_filter in _asset_scope_filters(owner_id=owner_id, org_id=org_id):
+        query = query.filter(scope_filter)
+    asset = query.first()
     if not asset:
         raise HTTPException(status_code=404, detail="数据集不存在")
 
@@ -331,7 +354,7 @@ async def list_source_items(
 
         score_map: Dict[str, InferenceResult] = {}
         for row in inference_rows:
-            key = _normalize_point_name(row.point_name or "")
+            key = canonical_point_id(getattr(row, "point_id", None), row.point_name)
             if not key:
                 continue
             # Keep latest row per point.
@@ -341,7 +364,7 @@ async def list_source_items(
         seen = set()
         entries = []
         for row in rows:
-            point_name = _normalize_point_name(row.source_id or row.filename or "")
+            point_name = canonical_point_id(getattr(row, "point_id", None), row.source_id, row.filename)
             if not point_name or point_name in seen:
                 continue
             if approved_set is not None and point_name not in approved_set:
@@ -399,53 +422,66 @@ async def list_source_items(
             raise HTTPException(status_code=400, detail="model_family 仅支持 chatts / qwen / all")
 
         approved_set = _approved_annotation_point_set(db) if approved_only else None
+        inference_query = db.query(InferenceResult)
+        if method:
+            inference_query = inference_query.filter(InferenceResult.method == method)
+        if min_score is not None:
+            inference_query = inference_query.filter(InferenceResult.score_avg >= min_score)
+        if max_score is not None:
+            inference_query = inference_query.filter(InferenceResult.score_avg <= max_score)
+        inference_rows = inference_query.order_by(InferenceResult.created_at.desc()).all()
 
-        roots = []
-        if fam in {None, "all", "chatts"}:
-            roots.append(("chatts", Path(settings.DATA_TRAINING_CHATTS_DIR)))
-        if fam in {None, "all", "qwen"}:
-            roots.append(("qwen", Path(settings.DATA_TRAINING_QWEN_DIR)))
+        score_map: Dict[str, InferenceResult] = {}
+        for r in inference_rows:
+            key = canonical_point_id(getattr(r, "point_id", None), r.point_name)
+            if key and key not in score_map:
+                score_map[key] = r
 
-        point_entries: Dict[str, Dict] = {}
-        for model_tag, root in roots:
-            if not root.exists():
+        ann_rows = (
+            db.query(AnnotationRecord)
+            .filter(AnnotationRecord.user_id == settings.DEFAULT_USER)
+            .order_by(AnnotationRecord.updated_at.desc())
+            .all()
+        )
+
+        entries = []
+        seen = set()
+        for row in ann_rows:
+            point_name = canonical_point_id(getattr(row, "point_id", None), row.source_id, row.filename)
+            if not point_name or point_name in seen:
                 continue
-            files = sorted(
-                [
-                    p for p in root.iterdir()
-                    if p.is_file()
-                    and p.suffix.lower() in {".json", ".jsonl"}
-                    and not p.name.startswith(".")
-                    and not p.name.startswith("_")
-                    and not p.name.startswith("dataset_info")
-                ],
-                key=lambda p: p.stat().st_mtime,
-                reverse=True,
-            )
-            for fp in files:
-                try:
-                    updated_ts = fp.stat().st_mtime
-                except Exception:
-                    updated_ts = 0.0
-                for row in _iter_training_records(fp):
-                    point_name = _extract_training_point_name(row)
-                    if not point_name:
-                        continue
-                    if keyword and keyword not in point_name.lower():
-                        continue
-                    if approved_set is not None and point_name not in approved_set:
-                        continue
-                    if point_name in point_entries:
-                        continue
-                    point_entries[point_name] = {
-                        "point_name": point_name,
-                        "model_family": model_tag,
-                        "source_file": fp.name,
-                        "updated_ts": updated_ts,
-                    }
+            if approved_set is not None and point_name not in approved_set:
+                continue
+            if keyword and keyword not in point_name.lower():
+                continue
 
-        entries = list(point_entries.values())
-        if sort_by == "updated_asc":
+            inferred_family = _infer_training_family(point_name, row)
+            if fam in {"chatts", "qwen"} and inferred_family != fam:
+                continue
+
+            score_row = score_map.get(point_name)
+            if (method or min_score is not None or max_score is not None) and score_row is None:
+                continue
+
+            seen.add(point_name)
+            score_value = float(score_row.score_avg or 0.0) if score_row is not None and score_row.score_avg is not None else None
+            source_kind_tag = (row.source_kind or "human").strip().lower()
+            entries.append(
+                {
+                    "point_name": point_name,
+                    "model_family": inferred_family,
+                    "source_kind": source_kind_tag,
+                    "score_value": score_value,
+                    "score_method": (score_row.method or "unknown") if score_row is not None else None,
+                    "updated_ts": row.updated_at.timestamp() if row.updated_at else 0.0,
+                }
+            )
+
+        if sort_by == "score_desc":
+            entries.sort(key=lambda e: (1 if e["score_value"] is None else 0, -(e["score_value"] or 0)))
+        elif sort_by == "score_asc":
+            entries.sort(key=lambda e: (1e18 if e["score_value"] is None else e["score_value"]))
+        elif sort_by == "updated_asc":
             entries.sort(key=lambda e: e["updated_ts"])
         elif sort_by == "name_asc":
             entries.sort(key=lambda e: e["point_name"])
@@ -456,12 +492,16 @@ async def list_source_items(
 
         choices = []
         for e in entries[:limit]:
-            label = f"{e['point_name']} | [TRAINING:{e['model_family'].upper()}] | {e['source_file']}"
+            kind_tag = "[AUTO]" if e["source_kind"] == "auto" else "[HUMAN]"
+            label = f"{e['point_name']} | [TRAINING:{e['model_family'].upper()}] | {kind_tag}"
+            if e["score_value"] is not None:
+                label += f" | Score: {e['score_value']:.2f} ({e['score_method']})"
             choices.append(
                 {
                     "label": label,
                     "value": e["point_name"],
                     "source_kind": "training",
+                    "model_family": e["model_family"],
                 }
             )
         return ApiResponse(success=True, data={"choices": choices, "count": len(choices)}, message="ok")
@@ -510,26 +550,35 @@ async def list_source_items(
 
 @router.post("/export/training", response_model=ApiResponse)
 async def export_training_dataset(request: ExportTrainingRequest, db: Session = Depends(get_db)):
-    asset = db.query(DatasetAsset).filter(DatasetAsset.id == request.dataset_id).first()
+    query = db.query(DatasetAsset).filter(DatasetAsset.id == request.dataset_id)
+    for scope_filter in _asset_scope_filters(owner_id=request.owner_id, org_id=request.org_id):
+        query = query.filter(scope_filter)
+    asset = query.first()
     if not asset:
         raise HTTPException(status_code=404, detail="数据集不存在")
     if asset.dataset_type != "train":
         raise HTTPException(status_code=400, detail="仅允许导出 train 数据集")
+    if request.model_family not in {"chatts", "qwen"}:
+        raise HTTPException(status_code=400, detail="model_family 仅支持 chatts 或 qwen")
 
-    rows = db.query(DatasetItem.point_name).filter(DatasetItem.dataset_id == request.dataset_id).all()
-    point_set = {_normalize_point_name(r[0]) for r in rows if r and r[0]}
+    rows = (
+        db.query(DatasetItem.point_id, DatasetItem.point_name)
+        .filter(DatasetItem.dataset_id == request.dataset_id)
+        .all()
+    )
+    point_set = {canonical_point_id(r[0], r[1]) for r in rows if canonical_point_id(r[0], r[1])}
     if not point_set:
         raise HTTPException(status_code=400, detail="数据集为空")
 
     approved_set = None
     if request.approved_only:
-        approved_rows = db.query(ReviewQueue.source_id).filter(
+        approved_rows = db.query(ReviewQueue.point_id, ReviewQueue.source_id).filter(
             ReviewQueue.source_type == "annotation",
             ReviewQueue.status == "approved",
         ).all()
-        approved_set = {_normalize_point_name(r[0]) for r in approved_rows if r and r[0]}
+        approved_set = {canonical_point_id(r[0], r[1]) for r in approved_rows if canonical_point_id(r[0], r[1])}
 
-    adapter = DataProcessingAdapter()
+    adapter = AnnotationExportAdapter()
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp_path = Path(tmpdir)
         selected = 0
@@ -541,14 +590,14 @@ async def export_training_dataset(request: ExportTrainingRequest, db: Session = 
         )
 
         for row in ann_rows:
-            normalized = _normalize_point_name(row.source_id or row.filename)
+            normalized = canonical_point_id(getattr(row, "point_id", None), row.source_id, row.filename)
             if normalized not in point_set:
                 continue
             if approved_set is not None and normalized not in approved_set:
                 continue
 
             payload = record_to_payload(row)
-            out_name = f"{_normalize_point_name(row.filename or row.source_id)}.json"
+            out_name = f"{canonical_point_id(getattr(row, 'point_id', None), row.filename, row.source_id)}.json"
             (tmp_path / out_name).write_text(
                 json.dumps(payload, ensure_ascii=False, indent=2),
                 encoding="utf-8",
@@ -574,11 +623,41 @@ async def export_training_dataset(request: ExportTrainingRequest, db: Session = 
         error_text = result.get("error") or result.get("stderr") or "导出失败"
         raise HTTPException(status_code=500, detail=error_text)
 
+    export_id = str(uuid.uuid4())
+    exported_at = utc_iso_z()
+    output_path = str(result.get("output_path") or out_path)
+
+    meta = _parse_asset_meta(asset.meta)
+    history = meta.get("exports")
+    if not isinstance(history, list):
+        history = []
+    history.append(
+        {
+            "export_id": export_id,
+            "model_family": request.model_family,
+            "approved_only": bool(request.approved_only),
+            "selected_count": int(selected),
+            "point_count": int(len(point_set)),
+            "output_path": output_path,
+            "exported_at": exported_at,
+        }
+    )
+    meta["exports"] = history[-20:]
+    meta["last_export"] = history[-1]
+    asset.meta = json.dumps(meta, ensure_ascii=False)
+    asset.updated_by = _resolve_owner_id(settings.DEFAULT_USER)
+    db.commit()
+
     # Refresh dataset_info.json for selected model family.
     ChatTSTrainingAdapter(model_family=request.model_family).get_dataset_list()
 
     return ApiResponse(
         success=True,
-        data={"output_path": result.get("output_path"), "selected_count": selected},
+        data={
+            "output_path": output_path,
+            "selected_count": selected,
+            "export_id": export_id,
+            "exported_at": exported_at,
+        },
         message="导出完成",
     )

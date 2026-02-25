@@ -2,21 +2,46 @@
 微调服务 API
 封装 ChatTS-Training 项目功能
 """
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Query
+from pathlib import Path
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
-from typing import List
 import json
 import uuid
 
+from src.core.logging_config import get_logger
+from src.core.tasks import celery_app
 from src.db.database import get_db, Task
 from src.models.schemas import (
-    TrainingConfig, TrainingTaskRequest,
+    TrainingTaskRequest,
     TrainingEvalRequest,
     TaskResponse, TaskStatus, ApiResponse
 )
 from src.adapters.chatts_training import ChatTSTrainingAdapter
+from src.utils.time_utils import utc_now_naive
 
 router = APIRouter()
+logger = get_logger(__name__)
+
+
+def _dispatch_training_task(task_id: str, request: TrainingTaskRequest) -> str:
+    async_result = celery_app.send_task(
+        "training.run",
+        kwargs={
+            "task_id": task_id,
+            "config_name": request.config_name,
+            "version_tag": request.version_tag,
+            "model_family": request.model_family,
+            "auto_eval": request.auto_eval,
+            "eval_truth_dir": request.eval_truth_dir,
+            "eval_data_dir": request.eval_data_dir,
+            "eval_dataset_name": request.eval_dataset_name,
+            "eval_output_dir": request.eval_output_dir,
+            "eval_device": request.eval_device,
+            "eval_method": request.eval_method,
+            "params": request.params or {},
+        },
+    )
+    return str(async_result.id)
 
 def get_adapter(model_family: str) -> ChatTSTrainingAdapter:
     return ChatTSTrainingAdapter(model_family=model_family or "chatts")
@@ -31,6 +56,29 @@ def get_adapter_from_task(task: Task) -> ChatTSTrainingAdapter:
     except Exception:
         pass
     return get_adapter(model_family)
+
+
+def _task_output_dir(task: Task) -> Path | None:
+    """根据任务配置/结果推导训练输出目录。"""
+    try:
+        result_data = json.loads(task.result or "{}")
+        if isinstance(result_data, dict):
+            output_dir = result_data.get("output_dir")
+            if output_dir:
+                return Path(str(output_dir))
+    except Exception:
+        pass
+
+    try:
+        cfg = json.loads(task.config or "{}")
+    except Exception:
+        cfg = {}
+    config_name = str(cfg.get("config_name") or "").strip()
+    if not config_name:
+        return None
+    model_family = str(cfg.get("model_family") or "chatts")
+    version_tag = str(cfg.get("version_tag") or "").strip() or task.id[:8]
+    return get_adapter(model_family).saves_path / f"{config_name}_{version_tag}"
 
 
 @router.get("/configs", response_model=ApiResponse)
@@ -78,7 +126,6 @@ async def list_training_datasets(model_family: str = Query("chatts", description
 @router.post("/start", response_model=TaskResponse)
 async def start_training(
     request: TrainingTaskRequest,
-    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db)
 ):
     """启动训练任务"""
@@ -93,22 +140,24 @@ async def start_training(
     )
     db.add(task)
     db.commit()
-    
-    # 后台执行训练
-    background_tasks.add_task(
-        get_adapter(request.model_family).run_training,
-        task_id=task_id,
-        config_name=request.config_name,
-        version_tag=request.version_tag,
-        auto_eval=request.auto_eval,
-        eval_truth_dir=request.eval_truth_dir,
-        eval_data_dir=request.eval_data_dir,
-        eval_dataset_name=request.eval_dataset_name,
-        eval_output_dir=request.eval_output_dir,
-        eval_device=request.eval_device,
-        eval_method=request.eval_method,
-    )
-    
+
+    try:
+        celery_task_id = _dispatch_training_task(task_id, request)
+    except Exception as e:
+        logger.error("提交 Celery 训练任务失败 task_id=%s: %s", task_id, e, exc_info=True)
+        task.status = TaskStatus.FAILED
+        task.error = f"Celery dispatch failed: {e}"
+        db.commit()
+        raise HTTPException(status_code=503, detail="任务队列不可用，提交失败")
+
+    config_data = request.model_dump()
+    config_data.update({
+        "executor": "celery",
+        "celery_task_id": celery_task_id,
+    })
+    task.config = json.dumps(config_data, ensure_ascii=False)
+    db.commit()
+
     return TaskResponse(
         task_id=task_id,
         status=TaskStatus.PENDING,
@@ -122,36 +171,78 @@ async def get_training_status(task_id: str, db: Session = Depends(get_db)):
     task = db.query(Task).filter(Task.id == task_id).first()
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
-    
-    # 获取训练进度
-    progress = get_adapter_from_task(task).get_training_progress(task_id)
-    
+
+    status_text = str(task.status or "").lower()
+    if status_text == TaskStatus.FAILED:
+        msg = f"训练失败: {task.error or 'unknown error'}"
+    elif status_text == TaskStatus.COMPLETED:
+        msg = "训练已完成"
+    elif status_text == TaskStatus.CANCELLED:
+        msg = "训练已取消"
+    elif status_text == TaskStatus.RUNNING:
+        msg = "训练进行中"
+    else:
+        msg = "任务排队中"
+
+    progress = {"status": status_text or "unknown", "progress": 0}
+    if status_text in {TaskStatus.PENDING, TaskStatus.RUNNING}:
+        try:
+            progress = get_adapter_from_task(task).get_training_progress(task_id)
+        except Exception:
+            progress = {"status": status_text or "unknown", "progress": 0}
+
+    output_dir = _task_output_dir(task)
+    log_path = str(output_dir / "train.log") if output_dir else None
+
     return ApiResponse(
         success=True,
         data={
             "task_id": task.id,
             "status": task.status,
-            "progress": progress
+            "progress": progress,
+            "message": msg,
+            "error": task.error or "",
+            "output_dir": str(output_dir) if output_dir else None,
+            "log_path": log_path,
         },
-        message=""
+        message=msg
     )
 
 
 @router.post("/stop/{task_id}", response_model=TaskResponse)
 async def stop_training(task_id: str, db: Session = Depends(get_db)):
-    """停止训练任务"""
+    """取消训练任务（best effort，优先 Celery revoke）。"""
     task = db.query(Task).filter(Task.id == task_id).first()
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
-    
-    if task.status != TaskStatus.RUNNING:
-        raise HTTPException(status_code=400, detail="任务未在运行中")
-    
+
+    if task.status in {TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED}:
+        return TaskResponse(task_id=task.id, status=TaskStatus(task.status), message="任务已结束")
+
+    celery_task_id = None
     try:
+        cfg = json.loads(task.config or "{}")
+        celery_task_id = cfg.get("celery_task_id")
+    except Exception:
+        celery_task_id = None
+
+    try:
+        if celery_task_id:
+            celery_app.control.revoke(celery_task_id, terminate=True)
+    except Exception as e:
+        logger.warning("撤销 Celery 训练任务失败 task_id=%s celery_id=%s: %s", task_id, celery_task_id, e)
+
+    try:
+        # 兼容历史本地训练任务（非 Celery）兜底停止
         get_adapter_from_task(task).stop_training(task_id)
+    except Exception:
+        pass
+
+    try:
         task.status = TaskStatus.CANCELLED
+        task.completed_at = utc_now_naive()
         db.commit()
-        
+
         return TaskResponse(
             task_id=task.id,
             status=TaskStatus.CANCELLED,
@@ -159,6 +250,76 @@ async def stop_training(task_id: str, db: Session = Depends(get_db)):
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/log/{task_id}", response_model=ApiResponse)
+async def get_training_task_log(
+    task_id: str,
+    offset: int = Query(0, ge=0),
+    max_bytes: int = Query(200000, ge=1, le=2000000),
+    db: Session = Depends(get_db),
+):
+    """按 offset 读取训练任务日志增量。"""
+    task = db.query(Task).filter(Task.id == task_id).first()
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+
+    output_dir = _task_output_dir(task)
+    if output_dir is None:
+        return ApiResponse(
+            success=True,
+            data={
+                "task_id": task.id,
+                "status": task.status,
+                "log": "",
+                "offset": offset,
+                "exists": False,
+                "log_path": None,
+            },
+            message="任务输出目录尚不可用",
+        )
+
+    log_path = output_dir / "train.log"
+    if not log_path.exists():
+        return ApiResponse(
+            success=True,
+            data={
+                "task_id": task.id,
+                "status": task.status,
+                "log": "",
+                "offset": offset,
+                "exists": False,
+                "log_path": str(log_path),
+            },
+            message="日志文件尚未生成",
+        )
+
+    file_size = int(log_path.stat().st_size)
+    safe_offset = min(int(offset), file_size)
+    content = ""
+    new_offset = safe_offset
+    try:
+        with open(log_path, "r", encoding="utf-8", errors="ignore") as f:
+            f.seek(safe_offset)
+            content = f.read(max_bytes)
+            new_offset = int(f.tell())
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"读取日志失败: {e}")
+
+    return ApiResponse(
+        success=True,
+        data={
+            "task_id": task.id,
+            "status": task.status,
+            "log": content,
+            "offset": new_offset,
+            "exists": True,
+            "log_path": str(log_path),
+            "eof": new_offset >= file_size,
+            "error": task.error or "",
+        },
+        message="",
+    )
 
 
 @router.get("/models/{model_name}", response_model=ApiResponse)

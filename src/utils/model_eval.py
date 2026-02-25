@@ -50,6 +50,7 @@ def _load_dataset_points(dataset_name: str, dataset_type: str = "golden") -> Opt
         return None
     try:
         from src.db.database import SessionLocal, DatasetAsset, DatasetItem, init_db
+        from src.utils.annotation_store import canonical_point_id
         init_db()
         db = SessionLocal()
         asset = db.query(DatasetAsset).filter(
@@ -58,8 +59,8 @@ def _load_dataset_points(dataset_name: str, dataset_type: str = "golden") -> Opt
         ).first()
         if not asset:
             return None
-        rows = db.query(DatasetItem.point_name).filter(DatasetItem.dataset_id == asset.id).all()
-        points = [str(r[0]) for r in rows]
+        rows = db.query(DatasetItem.point_id, DatasetItem.point_name).filter(DatasetItem.dataset_id == asset.id).all()
+        points = [canonical_point_id(r[0], r[1]) for r in rows if canonical_point_id(r[0], r[1])]
         return points
     except Exception:
         return None

@@ -4,7 +4,10 @@ IoTDB 配置加载器
 """
 import os
 import json
+import logging
 from typing import Dict, Any, Optional
+
+logger = logging.getLogger("ts.utils.iotdb_config")
 
 # 默认配置文件路径
 _CONFIG_PATHS = [
@@ -42,7 +45,7 @@ def load_iotdb_config(config_path: str = None) -> Dict[str, Any]:
                     _cached_config = config
                     return config
             except Exception as e:
-                print(f"Warning: Failed to load config from {path}: {e}")
+                logger.warning("加载 IoTDB 配置文件失败 %s: %s", path, e)
                 continue
     
     # 返回默认配置

@@ -91,6 +91,7 @@ class TrainingTaskRequest(BaseModel):
     eval_output_dir: Optional[str] = None
     eval_device: Optional[str] = None
     eval_method: Optional[str] = None
+    params: Optional[dict] = None
 
 
 class TrainingEvalRequest(BaseModel):
@@ -112,6 +113,7 @@ class InferenceTaskRequest(BaseModel):
     model: str  # 模型名称或路径
     algorithm: str = "chatts"  # chatts / adtk_hbos
     input_files: List[str]
+    params: Optional[dict] = None
 
 
 class InferenceResult(BaseModel):

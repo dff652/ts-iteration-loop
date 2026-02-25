@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import json
 import uuid
-from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -16,6 +15,7 @@ from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from src.db.database import AnnotationRecord, AnnotationSegment
+from src.utils.time_utils import utc_now_naive
 
 
 def normalize_point_name(name: str) -> str:
@@ -30,6 +30,14 @@ def normalize_point_name(name: str) -> str:
         text = text.replace("annotations_", "", 1)
     text = text.replace("数据集", "")
     return text.strip()
+
+
+def canonical_point_id(*values: Any) -> str:
+    for value in values:
+        point_id = normalize_point_name(str(value or ""))
+        if point_id:
+            return point_id
+    return ""
 
 
 def _loads_json(raw: Optional[str], default: Any) -> Any:
@@ -83,7 +91,13 @@ def infer_source_kind(payload: Dict[str, Any], annotations: List[Dict[str, Any]]
     return "human"
 
 
-def _segment_rows(user_id: str, source_id: str, annotation_id: str, annotations: List[Dict[str, Any]]) -> List[AnnotationSegment]:
+def _segment_rows(
+    user_id: str,
+    point_id: str,
+    source_id: str,
+    annotation_id: str,
+    annotations: List[Dict[str, Any]],
+) -> List[AnnotationSegment]:
     rows: List[AnnotationSegment] = []
     for ann_idx, ann in enumerate(annotations):
         label = ann.get("label")
@@ -110,6 +124,7 @@ def _segment_rows(user_id: str, source_id: str, annotation_id: str, annotations:
                 AnnotationSegment(
                     annotation_id=annotation_id,
                     user_id=user_id,
+                    point_id=point_id,
                     source_id=source_id,
                     ann_index=ann_idx,
                     seg_index=seg_idx,
@@ -136,6 +151,7 @@ def upsert_annotation(
     if not filename_in:
         filename_in = str(filename or "").strip()
     source_id = normalize_point_name(filename_in)
+    point_id = canonical_point_id(payload.get("point_id"), source_id, filename_in)
     annotations = payload.get("annotations") or []
     if not isinstance(annotations, list):
         annotations = []
@@ -152,16 +168,20 @@ def upsert_annotation(
 
     record = (
         db.query(AnnotationRecord)
-        .filter(AnnotationRecord.user_id == user_id, AnnotationRecord.source_id == source_id)
+        .filter(
+            AnnotationRecord.user_id == user_id,
+            or_(AnnotationRecord.point_id == point_id, AnnotationRecord.source_id == source_id),
+        )
         .first()
     )
     if record is None:
         record = AnnotationRecord(
             id=str(uuid.uuid4()),
             user_id=user_id,
+            point_id=point_id,
             source_id=source_id,
             filename=filename_in,
-            created_at=datetime.utcnow(),
+            created_at=utc_now_naive(),
         )
         db.add(record)
 
@@ -172,6 +192,7 @@ def upsert_annotation(
     }
 
     record.filename = filename_in
+    record.point_id = point_id
     record.source_kind = source_kind
     record.source_inference_id = payload.get("source_inference_id")
     record.method = payload.get("method")
@@ -182,23 +203,27 @@ def upsert_annotation(
     record.overall_attribute_json = json.dumps(overall_attribute, ensure_ascii=False)
     record.annotations_json = json.dumps(annotations, ensure_ascii=False)
     record.meta = json.dumps(meta, ensure_ascii=False)
-    record.updated_at = datetime.utcnow()
+    record.updated_at = utc_now_naive()
     db.flush()
 
     db.query(AnnotationSegment).filter(AnnotationSegment.annotation_id == record.id).delete()
-    for seg_row in _segment_rows(user_id, source_id, record.id, annotations):
+    for seg_row in _segment_rows(user_id, point_id, source_id, record.id, annotations):
         db.add(seg_row)
     db.flush()
     return record
 
 
 def get_annotation_record(db: Session, user_id: str, filename: str) -> Optional[AnnotationRecord]:
-    normalized = normalize_point_name(filename)
+    normalized = canonical_point_id(filename)
     return (
         db.query(AnnotationRecord)
         .filter(
             AnnotationRecord.user_id == user_id,
-            or_(AnnotationRecord.source_id == normalized, AnnotationRecord.filename == filename),
+            or_(
+                AnnotationRecord.point_id == normalized,
+                AnnotationRecord.source_id == normalized,
+                AnnotationRecord.filename == filename,
+            ),
         )
         .order_by(AnnotationRecord.updated_at.desc())
         .first()
@@ -206,8 +231,10 @@ def get_annotation_record(db: Session, user_id: str, filename: str) -> Optional[
 
 
 def record_to_payload(record: AnnotationRecord, fallback_filename: Optional[str] = None) -> Dict[str, Any]:
+    point_id = canonical_point_id(getattr(record, "point_id", None), record.source_id, record.filename)
     payload: Dict[str, Any] = {
         "filename": record.filename or fallback_filename or record.source_id,
+        "point_id": point_id,
         "annotations": _loads_json(record.annotations_json, []),
         "overall_attribute": _loads_json(record.overall_attribute_json, {}),
     }
@@ -216,6 +243,7 @@ def record_to_payload(record: AnnotationRecord, fallback_filename: Optional[str]
         payload["export_time"] = meta.get("export_time")
     if meta.get("last_updated"):
         payload["last_updated"] = meta.get("last_updated")
+    payload["source_id"] = record.source_id
     payload["source_kind"] = record.source_kind
     payload["is_human_edited"] = bool(record.is_human_edited)
     return payload
@@ -232,9 +260,9 @@ def list_annotation_records(
         key = f"%{keyword.strip()}%"
         query = query.filter(
             or_(
+                AnnotationRecord.point_id.ilike(key),
                 AnnotationRecord.source_id.ilike(key),
                 AnnotationRecord.filename.ilike(key),
             )
         )
     return query.order_by(AnnotationRecord.updated_at.desc()).limit(limit).all()
-

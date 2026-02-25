@@ -14,6 +14,8 @@ import os
 import httpx
 
 from configs.settings import settings
+from src.core.logging_config import get_logger
+from src.adapters.annotation_export import AnnotationExportAdapter
 from src.adapters.chatts_training import ChatTSTrainingAdapter
 from src.adapters.data_processing import DataProcessingAdapter
 from src.adapters.check_outlier import CheckOutlierAdapter
@@ -21,7 +23,11 @@ from src.utils.iotdb_config import load_iotdb_config
 from src.utils.file_filters import is_inference_or_generated_csv, match_result_method
 from src.utils.model_eval import evaluate_model_on_golden
 from src.utils.plot_utils import generate_ts_thumbnail, create_ts_image
+from src.utils.annotation_store import canonical_point_id
+from src.utils.time_utils import utc_now_naive
 
+
+logger = get_logger(__name__)
 
 TRAINING_MODEL_FAMILIES = ["chatts", "qwen"]
 TRAINING_METHODS = ["all", "lora", "full"]
@@ -42,6 +48,7 @@ chatts_adapter = ChatTSTrainingAdapter(model_family="chatts")
 qwen_adapter = ChatTSTrainingAdapter(model_family="qwen")
 training_adapter = chatts_adapter
 data_adapter = DataProcessingAdapter()
+annotation_export_adapter = AnnotationExportAdapter()
 inference_adapter = CheckOutlierAdapter()
 
 # 为了兼容性保留旧变量名
@@ -59,6 +66,10 @@ RESULTS_BASE_PATH = Path(settings.DATA_INFERENCE_DIR)
 
 # 文件名到完整路径的映射 (用于在UI显示文件名，内部使用完整路径)
 _unified_file_mapping: Dict[str, str] = {}
+# 点位ID到最新CSV完整路径映射（point-first推理入口）
+_point_file_mapping: Dict[str, str] = {}
+# 数据页点位到文件名映射（按修改时间选择最新文件）
+_dataset_point_mapping: Dict[str, str] = {}
 
 # UI logs can grow very large; keep a tail to avoid infinite expansion.
 LOG_TAIL_MAX_CHARS = 20000
@@ -76,6 +87,9 @@ LOG_SCROLL_CSS = """
 """
 
 ASSETS_API_BASE = f"http://127.0.0.1:{settings.API_PORT}/api/v1/assets"
+INFERENCE_API_BASE = f"http://127.0.0.1:{settings.API_PORT}/api/v1/inference"
+DATA_API_BASE = f"http://127.0.0.1:{settings.API_PORT}/api/v1/data"
+TRAINING_API_BASE = f"http://127.0.0.1:{settings.API_PORT}/api/v1/training"
 
 
 def _assets_api_call(method: str, path: str, params: Optional[dict] = None, payload: Optional[dict] = None) -> Dict:
@@ -92,6 +106,86 @@ def _assets_api_call(method: str, path: str, params: Optional[dict] = None, payl
         return {"success": True, "data": data}
     except Exception as e:
         return {"success": False, "error": str(e)}
+
+
+def _inference_api_call(method: str, path: str, params: Optional[dict] = None, payload: Optional[dict] = None) -> Dict:
+    url = f"{INFERENCE_API_BASE}{path}"
+    try:
+        with httpx.Client(timeout=30.0) as client:
+            resp = client.request(method.upper(), url, params=params, json=payload)
+        data = resp.json() if resp.content else {}
+        if resp.status_code >= 400:
+            detail = data.get("detail") if isinstance(data, dict) else None
+            return {"success": False, "error": detail or f"HTTP {resp.status_code}"}
+        if isinstance(data, dict) and data.get("success") is False:
+            return {
+                "success": False,
+                "error": str(data.get("message") or "API 返回业务失败"),
+                "data": data,
+            }
+        return {"success": True, "data": data}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+def _data_api_call(method: str, path: str, params: Optional[dict] = None, payload: Optional[dict] = None) -> Dict:
+    url = f"{DATA_API_BASE}{path}"
+    try:
+        with httpx.Client(timeout=30.0) as client:
+            resp = client.request(method.upper(), url, params=params, json=payload)
+        data = resp.json() if resp.content else {}
+        if resp.status_code >= 400:
+            detail = data.get("detail") if isinstance(data, dict) else None
+            return {"success": False, "error": detail or f"HTTP {resp.status_code}"}
+        if isinstance(data, dict) and data.get("success") is False:
+            return {
+                "success": False,
+                "error": str(data.get("message") or "API 返回业务失败"),
+                "data": data,
+            }
+        return {"success": True, "data": data}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+def _training_api_call(method: str, path: str, params: Optional[dict] = None, payload: Optional[dict] = None) -> Dict:
+    url = f"{TRAINING_API_BASE}{path}"
+    try:
+        with httpx.Client(timeout=30.0) as client:
+            resp = client.request(method.upper(), url, params=params, json=payload)
+        data = resp.json() if resp.content else {}
+        if resp.status_code >= 400:
+            detail = data.get("detail") if isinstance(data, dict) else None
+            return {"success": False, "error": detail or f"HTTP {resp.status_code}"}
+        if isinstance(data, dict) and data.get("success") is False:
+            return {
+                "success": False,
+                "error": str(data.get("message") or "API 返回业务失败"),
+                "data": data,
+            }
+        return {"success": True, "data": data}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+def _extract_task_status_payload(payload: Optional[Dict]) -> Dict:
+    """
+    兼容两类返回：
+    1) 直接 TaskResponse: {"task_id","status","message"}
+    2) ApiResponse: {"success":true,"data":{...},"message":"..."}
+    """
+    if not isinstance(payload, dict):
+        return {}
+    if "task_id" in payload and "status" in payload:
+        return payload
+
+    inner = payload.get("data")
+    if isinstance(inner, dict) and ("status" in inner or "task_id" in inner):
+        merged = dict(inner)
+        if not merged.get("message") and payload.get("message"):
+            merged["message"] = payload.get("message")
+        return merged
+    return {}
 
 
 def get_unified_file_list() -> List[str]:
@@ -133,6 +227,20 @@ def get_unified_file_names() -> List[str]:
     return list(_unified_file_mapping.keys())
 
 
+def get_unified_point_ids() -> List[str]:
+    """获取统一点位列表（由数据文件自动归一化映射）"""
+    global _point_file_mapping
+    _point_file_mapping.clear()
+    for full_path in get_unified_file_list():
+        point_id = canonical_point_id(Path(full_path).name)
+        if not point_id:
+            continue
+        # 保留最新文件（get_unified_file_list 已按 mtime desc）
+        if point_id not in _point_file_mapping:
+            _point_file_mapping[point_id] = full_path
+    return list(_point_file_mapping.keys())
+
+
 def resolve_filenames_to_paths(filenames: List[str]) -> List[str]:
     """将文件名列表转换为完整路径列表"""
     global _unified_file_mapping
@@ -146,6 +254,34 @@ def resolve_filenames_to_paths(filenames: List[str]) -> List[str]:
         elif Path(name).exists():
             # 如果已经是完整路径
             paths.append(name)
+    return paths
+
+
+def resolve_point_ids_to_paths(point_ids: List[str]) -> List[str]:
+    """将点位ID列表转换为完整路径列表（兼容旧文件名输入）"""
+    global _point_file_mapping
+    if not _point_file_mapping:
+        get_unified_point_ids()
+
+    paths = []
+    seen = set()
+    for item in point_ids or []:
+        key = str(item or "").strip()
+        if not key:
+            continue
+        path = _point_file_mapping.get(key)
+        if path is None:
+            # 兼容旧值：文件名或全路径
+            if key in _unified_file_mapping:
+                path = _unified_file_mapping[key]
+            elif Path(key).exists():
+                path = key
+            else:
+                norm = canonical_point_id(key)
+                path = _point_file_mapping.get(norm)
+        if path and path not in seen:
+            seen.add(path)
+            paths.append(path)
     return paths
 
 
@@ -210,7 +346,7 @@ def delete_selected_files(method: str, filenames: List[str]) -> tuple:
     
     for fname in filenames:
         file_path = results_dir / fname.strip()  # Strip whitespace just in case
-        print(f"DEBUG: Attempting to delete {file_path}")
+        logger.debug("尝试删除文件: %s", file_path)
         
         # 处理符号链接和普通文件
         # is_file() 对符号链接如果指向存在文件则为真
@@ -222,7 +358,7 @@ def delete_selected_files(method: str, filenames: List[str]) -> tuple:
             if file_path.is_symlink() or file_path.exists():
                 file_path.unlink()
                 deleted_count += 1
-                print(f"DEBUG: Deleted {file_path}")
+                logger.debug("已删除: %s", file_path)
                 
                 # 同步删除关联的符号链接 (在 downsampled 和用户目录中)
                 try:
@@ -230,7 +366,7 @@ def delete_selected_files(method: str, filenames: List[str]) -> tuple:
                     symlink_path = Path(settings.DATA_DOWNSAMPLED_DIR) / fname.strip()
                     if symlink_path.is_symlink():
                         symlink_path.unlink()
-                        print(f"DEBUG: Deleted symlink {symlink_path}")
+                        logger.debug("已删除符号链接: %s", symlink_path)
                         
                     # 2. 删除 Annotator 用户目录下的同名链接
                     annotator_users_file = Path(settings.DATA_PROCESSING_PATH).parent / "annotator" / "backend" / "users.json"
@@ -243,22 +379,22 @@ def delete_selected_files(method: str, filenames: List[str]) -> tuple:
                                 u_link = Path(u_info['data_path']) / fname.strip()
                                 if u_link.is_symlink():
                                     u_link.unlink()
-                                    print(f"DEBUG: Deleted user symlink {u_link}")
+                                    logger.debug("已删除用户符号链接: %s", u_link)
                 except Exception as e_link:
-                    print(f"DEBUG: Error cleaning up symlinks: {e_link}")
+                    logger.warning("清理符号链接失败: %s", e_link)
             else:
                 # 再次检查是否是“断裂的符号链接”（exists()返回False但链接本身存在）
                 # Path.is_symlink() 即使目标不存在也返回 True
                 if file_path.is_symlink():
                      file_path.unlink()
                      deleted_count += 1
-                     print(f"DEBUG: Deleted broken symlink {file_path}")
+                     logger.debug("已删除断裂符号链接: %s", file_path)
                 else:
-                     print(f"DEBUG: File not found {file_path}")
+                     logger.debug("文件未找到: %s", file_path)
                      # 此时可能用户选了一个已经不存在的文件（缓存问题），不报错，只记录
         except Exception as e:
             errors.append(f"{fname}: {str(e)}")
-            print(f"DEBUG: Error deleting {file_path}: {e}")
+            logger.error("删除文件失败 %s: %s", file_path, e)
     
     # 刷新列表
     time.sleep(0.5)  # 等待文件系统同步
@@ -588,17 +724,60 @@ def get_comparison_plot(model_paths: List[str], model_family: str):
 
 # ==================== 数据获取辅助函数 ====================
 
+def _dataset_records() -> List[Dict]:
+    rows = data_adapter.list_datasets()
+    rows.sort(key=lambda x: x.get("modified_time", 0), reverse=True)
+    return rows
+
+
+def _refresh_dataset_point_mapping() -> Dict[str, str]:
+    global _dataset_point_mapping
+    _dataset_point_mapping.clear()
+    for row in _dataset_records():
+        filename = str(row.get("filename") or "").strip()
+        if not filename:
+            continue
+        point_id = canonical_point_id(filename, row.get("name"))
+        if point_id and point_id not in _dataset_point_mapping:
+            _dataset_point_mapping[point_id] = filename
+    return _dataset_point_mapping
+
+
+def resolve_dataset_identifier_to_filename(identifier: str) -> Optional[str]:
+    """
+    将点位ID/文件名/路径统一解析为 data_adapter 可读的文件名。
+    """
+    text = str(identifier or "").strip()
+    if not text:
+        return None
+    records = _dataset_records()
+    by_filename = {str(r.get("filename") or ""): str(r.get("filename") or "") for r in records}
+    if text in by_filename:
+        return text
+    base = Path(text).name
+    if base in by_filename:
+        return base
+    mapping = _refresh_dataset_point_mapping()
+    key = canonical_point_id(text)
+    if key in mapping:
+        return mapping[key]
+    return None
+
+
 def get_datasets_table() -> pd.DataFrame:
-    """获取数据集列表并返回 DataFrame"""
-    datasets = data_adapter.list_datasets()
+    """获取数据集列表并返回 DataFrame（点位视角）"""
+    datasets = _dataset_records()
     if not datasets:
-        return pd.DataFrame(columns=["文件名", "大小 (KB)", "修改时间"])
+        return pd.DataFrame(columns=["点位ID", "数据文件", "大小 (KB)", "修改时间"])
     
     from datetime import datetime
     rows = []
     for d in datasets:
+        filename = str(d.get("filename") or "")
+        point_id = canonical_point_id(filename, d.get("name"))
         rows.append({
-            "文件名": d["filename"],
+            "点位ID": point_id,
+            "数据文件": filename,
             "大小 (KB)": round(d["size_bytes"] / 1024, 2),
             "修改时间": datetime.fromtimestamp(d["modified_time"]).strftime("%Y-%m-%d %H:%M")
         })
@@ -606,16 +785,19 @@ def get_datasets_table() -> pd.DataFrame:
 
 
 def get_dataset_names() -> List[str]:
-    """获取数据集文件名列表"""
-    datasets = data_adapter.list_datasets()
-    return [d["filename"] for d in datasets]
+    """获取数据集点位ID列表（默认映射到最新文件）"""
+    mapping = _refresh_dataset_point_mapping()
+    return list(mapping.keys())
 
 
-def delete_selected_dataset(filename: str):
+def delete_selected_dataset(dataset_selector: str):
     """删除选中的数据集"""
-    print(f"[DEBUG] delete_selected_dataset called with: '{filename}'")
-    if not filename:
+    logger.debug("delete_selected_dataset: %s", dataset_selector)
+    if not dataset_selector:
         return get_datasets_table(), gr.Dropdown(choices=get_dataset_names(), value=None), "❌ No dataset selected"
+    filename = resolve_dataset_identifier_to_filename(dataset_selector)
+    if not filename:
+        return get_datasets_table(), gr.Dropdown(choices=get_dataset_names(), value=None), "❌ 点位未匹配到数据文件"
     
     result = data_adapter.delete_dataset(filename)
     if result.get("success"):
@@ -627,37 +809,41 @@ def delete_selected_dataset(filename: str):
         return get_datasets_table(), gr.Dropdown(choices=get_dataset_names()), f"❌ {result.get('error')}"
 
 
-def preview_dataset(filename: str) -> tuple:
+def preview_dataset(dataset_selector: str) -> tuple:
     """预览数据集，返回 (表格数据, 列选择器更新, 曲线图)"""
-    print(f"[DEBUG] preview_dataset called with filename: '{filename}'")
+    logger.debug("preview_dataset: %s", dataset_selector)
     
-    if isinstance(filename, list):
-        filename = filename[0] if filename else None
+    if isinstance(dataset_selector, list):
+        dataset_selector = dataset_selector[0] if dataset_selector else None
     
+    if not dataset_selector:
+        logger.debug("preview_dataset: 空文件名")
+        return [], gr.CheckboxGroup(choices=[], value=[]), None
+    filename = resolve_dataset_identifier_to_filename(dataset_selector)
     if not filename:
-        print("[DEBUG] Empty filename, returning empty")
+        logger.debug("preview_dataset: 未匹配到文件 selector=%s", dataset_selector)
         return [], gr.CheckboxGroup(choices=[], value=[]), None
     
     try:
         # 获取预览数据
-        print(f"[DEBUG] Calling preview_csv for: {filename}")
+        logger.debug("preview_csv: %s", filename)
         data = data_adapter.preview_csv(filename, limit=5000)
-        print(f"[DEBUG] preview_csv returned {len(data)} records")
+        logger.debug("preview_csv 返回 %d 条记录", len(data))
         
         df = pd.DataFrame(data)
-        print(f"[DEBUG] DataFrame created: shape={df.shape}, columns={df.columns.tolist()}")
+        logger.debug("DataFrame shape=%s, columns=%s", df.shape, df.columns.tolist())
         
         # 过滤掉 Unnamed 和 category 列
         df = df.loc[:, ~df.columns.str.contains('^Unnamed|^category', case=False)]
-        print(f"[DEBUG] After filtering: shape={df.shape}, columns={df.columns.tolist()}")
+        logger.debug("过滤后 shape=%s, columns=%s", df.shape, df.columns.tolist())
         
         # 获取数值列作为可选项
         numeric_cols = df.select_dtypes(include=['number']).columns.tolist()
-        print(f"[DEBUG] Numeric columns: {numeric_cols}")
+        logger.debug("数值列: %s", numeric_cols)
         
         # 默认选中第一个数值列
         default_selected = numeric_cols[:1] if numeric_cols else []
-        print(f"[DEBUG] Default selected: {default_selected}")
+        logger.debug("默认选中: %s", default_selected)
         
         # 生成默认曲线图
         plot_path = None
@@ -672,17 +858,17 @@ def preview_dataset(filename: str) -> tuple:
         
         # 如果图片不存在，尝试使用公共组件自动生成
         if not pre_gen_img_path.exists():
-            print(f"[DEBUG] Generating missing thumbnail: {pre_gen_img_path}")
+            logger.debug("生成缩略图: %s", pre_gen_img_path)
             try:
                 # 优先使用 value 列，否则使用第一列
                 target_col = 'value' if 'value' in df.columns else (numeric_cols[0] if numeric_cols else df.columns[0])
                 if target_col in df.columns:
                     generate_ts_thumbnail(df[[target_col]], str(pre_gen_img_path))
             except Exception as e:
-                print(f"[ERROR] Failed to auto-generate thumbnail: {e}")
+                logger.error("自动生成缩略图失败: %s", e)
 
         if pre_gen_img_path.exists():
-            print(f"[DEBUG] Using image: {pre_gen_img_path}")
+            logger.debug("使用图片: %s", pre_gen_img_path)
             plot_path = str(pre_gen_img_path)
             
         # 如果没有找到，或者用户选择了特定的列组合(这里初始化默认选第一列，假设预生成图也是画的主列)
@@ -691,18 +877,18 @@ def preview_dataset(filename: str) -> tuple:
         
         if not plot_path:
              plot_path = generate_plot(df, filename, default_selected)
-             print(f"[DEBUG] Plot generated: {plot_path}")
+             logger.debug("曲线图生成: %s", plot_path)
         
         # 转换为列表格式，确保 Gradio 6.x 兼容
         # 使用 values 列表 + headers 的方式
         table_data = df.values.tolist()
         headers = df.columns.tolist()
-        print(f"[DEBUG] Table data rows: {len(table_data)}, headers: {headers}")
+        logger.debug("表格数据: %d 行, 列: %s", len(table_data), headers)
         
         return gr.Dataframe(value=table_data, headers=headers), gr.update(choices=numeric_cols, value=default_selected), plot_path
     except Exception as e:
         import traceback
-        print(f"[DEBUG ERROR] Exception: {e}")
+        logger.error("preview_dataset 异常: %s", e, exc_info=True)
         traceback.print_exc()
         return [], gr.CheckboxGroup(choices=[], value=[]), None
 
@@ -724,16 +910,19 @@ def generate_plot(df: pd.DataFrame, filename: str, selected_cols: list):
         
         return str(plot_path)
     except Exception as e:
-        print(f"Plot generation failed: {e}")
+        logger.warning("曲线图生成失败: %s", e)
         return None
 
 
-def update_plot_from_selection(filename: str, selected_cols: list):
+def update_plot_from_selection(dataset_selector: str, selected_cols: list):
     """根据用户选择的列更新曲线图"""
-    if not filename or not selected_cols:
+    if not dataset_selector or not selected_cols:
         return None
     
     try:
+        filename = resolve_dataset_identifier_to_filename(dataset_selector)
+        if not filename:
+            return None
         data = data_adapter.preview_csv(filename, limit=5000)
         df = pd.DataFrame(data)
         df = df.loc[:, ~df.columns.str.contains('^Unnamed|^category', case=False)]
@@ -753,25 +942,72 @@ def start_acquire_task(
     end_time: str,
     target_points: int
 ):
-    """启动数据采集任务（流式输出日志）"""
+    """启动数据采集任务（通过 API 提交并轮询状态）"""
     if not source:
         yield "❌ Please enter IoTDB source path"
         return
-    
-    # 使用流式输出版本
-    for log in data_adapter.run_acquire_task_streaming(
-        task_id="manual",
-        source=source,
-        host=host,
-        port=port,
-        user=user,
-        password=password,
-        point_name=point_name,
-        target_points=int(target_points),
-        start_time=start_time,
-        end_time=end_time
-    ):
-        yield log
+
+    payload = {
+        "source": source,
+        "host": host,
+        "port": str(port),
+        "user": user,
+        "password": password,
+        "point_name": point_name or "*",
+        "target_points": int(target_points),
+        "start_time": start_time or None,
+        "end_time": end_time or None,
+    }
+
+    submit_resp = _data_api_call("post", "/acquire", payload=payload)
+    if not submit_resp.get("success"):
+        yield f"❌ 数据采集任务提交失败: {submit_resp.get('error') or '未知错误'}"
+        return
+
+    submit_data = submit_resp.get("data") or {}
+    task_id = str(submit_data.get("task_id") or "")
+    if not task_id:
+        yield "❌ 数据采集提交成功，但未返回 task_id"
+        return
+
+    yield (
+        f"🚀 已提交数据采集任务: {task_id}\n"
+        f"Source: {source}\n"
+        f"Point: {point_name or '*'}\n"
+        f"Target points: {int(target_points)}"
+    )
+
+    poll_interval = 2.0
+    max_polls = 1800  # 约 1 小时
+    last_status = None
+
+    for i in range(max_polls):
+        status_resp = _data_api_call("get", f"/status/{task_id}")
+        if not status_resp.get("success"):
+            if i % 5 == 0:
+                yield f"⚠️ 状态查询失败: {status_resp.get('error') or '未知错误'}"
+            time.sleep(poll_interval)
+            continue
+
+        status_data = _extract_task_status_payload(status_resp.get("data"))
+        status = str(status_data.get("status") or "").lower()
+        message = str(status_data.get("message") or "")
+
+        if status != last_status:
+            yield f"[{time.strftime('%H:%M:%S')}] 任务状态: {status or 'unknown'} {message}".strip()
+            last_status = status
+
+        if status == "completed":
+            yield "✅ 数据采集完成，请点击“刷新列表”查看最新点位数据。"
+            return
+        if status in {"failed", "cancelled"}:
+            err = message or "数据采集失败"
+            yield f"❌ 数据采集结束: {status} - {err}"
+            return
+
+        time.sleep(poll_interval)
+
+    yield "❌ 数据采集任务轮询超时，请稍后在任务历史中检查状态。"
 
 
 # ==================== 推理监控辅助函数 ====================
@@ -806,7 +1042,7 @@ def start_inference_task(
     base_model_path: str,
     lora_run_path: str,
     lora_checkpoint: str,
-    files: List[str],
+    point_ids: List[str],
     n_downsample: int,
     threshold: float,
     downsample_mode: str,
@@ -830,11 +1066,21 @@ def start_inference_task(
     adtk_hbos_ratio: float
 ):
     """启动推理任务"""
+    def _ui_payload(log_text: str, status_text: str, stop_visible: bool, submit_visible: bool, task_id_val, files_val):
+        return (
+            format_log_html(log_text),
+            status_text,
+            gr.update(visible=stop_visible),
+            gr.update(visible=submit_visible),
+            task_id_val,
+            files_val,
+        )
+
     if not algorithm:
-        yield "❌ 请选择算法", "❌ 请选择算法"
+        yield _ui_payload("❌ 请选择算法", "❌ 请选择算法", False, True, None, None)
         return
-    if not files:
-        yield "❌ 请选择输入文件", "❌ 请选择输入文件"
+    if not point_ids:
+        yield _ui_payload("❌ 请选择输入点位", "❌ 请选择输入点位", False, True, None, None)
         return
     
     # 验证模型路径与算法是否匹配
@@ -844,71 +1090,33 @@ def start_inference_task(
         
         # 简单的关键词检查
         if algorithm == "qwen" and "chatts" in path_lower:
-            yield (
+            warning = (
                 "⚠️ 警告：选择了 Qwen 算法，但模型路径似乎是 ChatTS 模型。\n"
                 f"当前路径: {base_model_path}\n"
                 f"建议路径: {expected_model}\n"
-                "请确认模型路径是否正确，或点击算法下拉框重新选择以自动切换。",
-                "⚠️ 模型路径警告"
+                "请确认模型路径是否正确，或点击算法下拉框重新选择以自动切换。"
             )
+            yield _ui_payload(warning, "⚠️ 模型路径警告", False, True, None, None)
             return
         if algorithm == "chatts" and "qwen" in path_lower:
-            yield (
+            warning = (
                 "⚠️ 警告：选择了 ChatTS 算法，但模型路径似乎是 Qwen 模型。\n"
                 f"当前路径: {base_model_path}\n"
                 f"建议路径: {expected_model}\n"
-                "请确认模型路径是否正确，或点击算法下拉框重新选择以自动切换。",
-                "⚠️ 模型路径警告"
+                "请确认模型路径是否正确，或点击算法下拉框重新选择以自动切换。"
             )
+            yield _ui_payload(warning, "⚠️ 模型路径警告", False, True, None, None)
             return
     
-    # 将选中的文件名转换为完整路径（使用统一数据源映射）
-    file_paths = resolve_filenames_to_paths(files)
+    # 将选中的点位ID转换为完整路径（使用统一数据源映射）
+    file_paths = resolve_point_ids_to_paths(point_ids)
     
     if not file_paths:
-        yield "❌ 未找到有效的输入文件", "❌ 未找到有效的输入文件"
+        yield _ui_payload("❌ 未找到有效的输入点位文件", "❌ 未找到有效的输入点位文件", False, True, None, None)
         return
-    
-    import uuid
-    task_id = str(uuid.uuid4())
-    
+
     # 解析 LoRA Adapter 路径（支持 checkpoint 分层选择）
     lora_adapter_path = resolve_lora_adapter_path(lora_run_path, lora_checkpoint)
-
-    # 保存任务到数据库
-    from datetime import datetime
-    from src.db.database import SessionLocal, Task
-    db = SessionLocal()
-    try:
-        task = Task(
-            id=task_id,
-            type="inference",
-            status="running",
-            config=json.dumps({
-                "algorithm": algorithm,
-                "files": files,
-                "base_model_path": base_model_path,
-                "lora_adapter_path": lora_adapter_path
-            }),
-            created_at=datetime.utcnow(),
-            started_at=datetime.utcnow()
-        )
-        db.add(task)
-        db.commit()
-    except Exception as e:
-        print(f"[DB Error] Failed to save task: {e}")
-    finally:
-        db.close()
-    
-    accumulated_log = f"🚀 Starting batch inference for {len(file_paths)} files...\\n"
-    yield (
-        format_log_html(accumulated_log), 
-        "🔄 正在初始化...", 
-        gr.update(visible=True), # Show stop button
-        gr.update(visible=False), # Hide submit button
-        task_id, # Return task_id to state
-        None # download_files
-    )
     
     try:
         # Resolve downsample args
@@ -950,58 +1158,115 @@ def start_inference_task(
             "bin_nums": adtk_bin_nums,
             "hbos_ratio": adtk_hbos_ratio
         }
-        
-        generated_files = []
-        
-        # 执行推理（流式）
-        accumulated_log = ""
-        for log_chunk in inference_adapter.run_batch_inference_streaming(
-            task_id=task_id,
-            model=lora_adapter_path, # 兼容旧接口命名，实际逻辑在 adapter 中已处理
-            algorithm=algorithm,
-            input_files=file_paths,
-            **advanced_args
-        ):
-            # 检查是否包含文件路径返回
-            if isinstance(log_chunk, dict) and "file_path" in log_chunk:
-                # adapter 返回了完整路径
-                generated_files.append(log_chunk["file_path"])
-            elif isinstance(log_chunk, dict) and "file_name" in log_chunk:
-                # 兼容旧格式，仅有文件名
-                generated_files.append(log_chunk["file_name"])
-            elif isinstance(log_chunk, dict):
-                 pass # 其他结构化消息
+
+        model_for_inference = lora_adapter_path or base_model_path or ALGORITHM_DEFAULT_MODELS.get(algorithm, "")
+        submit_payload = {
+            "model": model_for_inference,
+            "algorithm": algorithm,
+            "input_files": file_paths,
+            "params": advanced_args,
+        }
+
+        submit_resp = _inference_api_call("post", "/batch", payload=submit_payload)
+        if not submit_resp.get("success"):
+            err = submit_resp.get("error") or "提交失败"
+            yield _ui_payload(f"❌ 提交推理任务失败: {err}", f"❌ {err}", False, True, None, None)
+            return
+
+        submit_data = submit_resp.get("data") or {}
+        task_id = str(submit_data.get("task_id") or "")
+        if not task_id:
+            yield _ui_payload("❌ 提交成功但未返回 task_id", "❌ 提交失败", False, True, None, None)
+            return
+
+        accumulated_log = (
+            f"🚀 已提交推理任务: {task_id}\n"
+            f"算法: {algorithm}\n"
+            f"输入点位数: {len(point_ids)}\n"
+            f"输入文件数: {len(file_paths)}\n"
+        )
+        yield _ui_payload(accumulated_log, "🔄 已提交，等待执行...", True, False, task_id, None)
+
+        poll_interval = 2.0
+        max_polls = 1800  # 约 1 小时
+        last_status = None
+        final_status = None
+        final_message = ""
+        for i in range(max_polls):
+            status_resp = _inference_api_call("get", f"/status/{task_id}")
+            if not status_resp.get("success"):
+                if i % 5 == 0:
+                    err = status_resp.get("error") or "状态查询失败"
+                    accumulated_log += f"\n⚠️ 状态查询异常: {err}"
             else:
-                accumulated_log += log_chunk
-                if len(accumulated_log) > LOG_TAIL_MAX_CHARS:
-                    accumulated_log = accumulated_log[-LOG_TAIL_MAX_CHARS:]
-                yield (
-                    format_log_html(accumulated_log), 
-                    "🔄 正在执行...",
-                    gr.update(visible=True),
-                    gr.update(visible=False),
-                    task_id,
-                    None
-                )
-        
-        # 任务结束，尝试查找生成的结果文件
-        # 假设保存在 /home/share/results/data/<method> 下，按时间最新查找？
-        # 这比较 hacky。更好的方法是 adapter 返回。
-        # 我们在 adapter 中增加了 yield {"file_name": ...} 逻辑
-        # 这里需要处理它。
-        
-        # 更新数据库任务状态为完成
-        db = SessionLocal()
-        try:
-            task = db.query(Task).filter(Task.id == task_id).first()
-            if task:
-                task.status = "completed"
-                task.completed_at = datetime.utcnow()
-                db.commit()
-        except Exception as e:
-            print(f"[DB Error] Failed to update task: {e}")
-        finally:
-            db.close()
+                st_data = _extract_task_status_payload(status_resp.get("data"))
+                status = str(st_data.get("status") or "").lower()
+                message = str(st_data.get("message") or "")
+                if status != last_status:
+                    accumulated_log += f"\n[{time.strftime('%H:%M:%S')}] 状态: {status}"
+                    if message:
+                        accumulated_log += f" | {message}"
+                    last_status = status
+                if status in {"completed", "failed", "cancelled"}:
+                    final_status = status
+                    final_message = message
+                    break
+
+            if len(accumulated_log) > LOG_TAIL_MAX_CHARS:
+                accumulated_log = accumulated_log[-LOG_TAIL_MAX_CHARS:]
+            yield _ui_payload(accumulated_log, f"🔄 执行中... ({i+1})", True, False, task_id, None)
+            time.sleep(poll_interval)
+
+        if final_status is None:
+            yield _ui_payload(
+                accumulated_log + "\n❌ 任务轮询超时",
+                "❌ 任务超时",
+                False,
+                True,
+                task_id,
+                None,
+            )
+            return
+
+        if final_status == "cancelled":
+            yield _ui_payload(accumulated_log + "\n🛑 任务已取消", "🛑 任务已取消", False, True, task_id, None)
+            return
+
+        if final_status == "failed":
+            error_text = final_message or "推理失败"
+            yield _ui_payload(accumulated_log + f"\n❌ 任务失败: {error_text}", f"❌ {error_text}", False, True, task_id, None)
+            return
+
+        # completed
+        results_resp = _inference_api_call("get", f"/results/{task_id}")
+        if not results_resp.get("success"):
+            err = results_resp.get("error") or "结果获取失败"
+            yield _ui_payload(accumulated_log + f"\n⚠️ 任务完成但结果读取失败: {err}", f"⚠️ {err}", False, True, task_id, None)
+            return
+
+        payload = (results_resp.get("data") or {}).get("data")
+        rows = []
+        if isinstance(payload, dict):
+            rows = payload.get("results") if isinstance(payload.get("results"), list) else []
+        elif isinstance(payload, list):
+            rows = payload
+
+        generated_files = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            candidate = row.get("result_path") or row.get("file_path") or row.get("output_path")
+            if not candidate:
+                continue
+            candidate_path = Path(str(candidate))
+            if not candidate_path.exists():
+                alt = RESULTS_BASE_PATH / algorithm / candidate_path.name
+                if alt.exists():
+                    candidate_path = alt
+            if candidate_path.exists():
+                p = str(candidate_path)
+                if p not in generated_files:
+                    generated_files.append(p)
         
         # 自动将结果文件链接到用户数据目录，以便标注工具默认可见
         try:
@@ -1024,9 +1289,9 @@ def start_inference_task(
                                 if os.access(user_dir, os.W_OK):
                                     target_dirs.append(user_dir)
                                 else:
-                                    print(f"[Auto-Link] Skipping {user_dir}: No write permission")
+                                    logger.debug("Auto-Link 跳过 %s: 无写权限", user_dir)
             except Exception as e:
-                print(f"[Auto-Link] Warning: Could not read annotator users.json: {e}")
+                logger.warning("Auto-Link: 读取 users.json 失败: %s", e)
             
             for res_file in generated_files:
                 res_path = Path(res_file)
@@ -1049,11 +1314,11 @@ def start_inference_task(
                             if target_link.is_symlink() or target_link.exists():
                                 target_link.unlink()
                             target_link.symlink_to(res_path)
-                            print(f"[Auto-Link] Created symlink for {res_path.name} in {target_dir}")
+                            logger.info("Auto-Link: 创建符号链接 %s -> %s", res_path.name, target_dir)
                         except Exception as link_err:
-                            print(f"[Auto-Link] Failed to link to {target_dir}: {link_err}")
+                            logger.warning("Auto-Link: 链接失败 %s: %s", target_dir, link_err)
         except Exception as e:
-            print(f"[Auto-Link Error] Failed to link results: {e}")
+            logger.error("Auto-Link: 链接结果文件失败: %s", e)
         
         # 读取并汇总评分信息
         score_summary = ""
@@ -1076,59 +1341,47 @@ def start_inference_task(
                     score_summary += f"   - 最高分 (score_max): {summary.get('score_max', 0):.4f}\n"
                     score_summary += f"   - 异常段数: {summary.get('segment_count', 0)}\n"
             except Exception as score_err:
-                print(f"[Score Summary] Failed to read metrics for {gen_file}: {score_err}")
+                logger.warning("读取评分指标失败 %s: %s", gen_file, score_err)
         
         final_log = accumulated_log + "\n✅ 所有任务已完成"
         if score_summary:
             final_log += "\n\n---\n### 📈 评分摘要" + score_summary
-        
-        yield (
-            format_log_html(final_log), 
-            "✅ 任务完成",
-             gr.update(visible=False),
-             gr.update(visible=True),
-             task_id,
-             generated_files # TODO: 填充 output files if capture logic works perfectly
-        )
+
+        yield _ui_payload(final_log, "✅ 任务完成", False, True, task_id, generated_files or None)
 
     except Exception as e:
         import traceback
         traceback.print_exc()
-        
-        # 更新数据库任务状态为失败
-        db = SessionLocal()
-        try:
-            task = db.query(Task).filter(Task.id == task_id).first()
-            if task:
-                task.status = "failed"
-                task.error = str(e)
-                task.completed_at = datetime.utcnow()
-                db.commit()
-        except Exception as db_e:
-            print(f"[DB Error] Failed to update task: {db_e}")
-        finally:
-            db.close()
-        
-        yield (
-            format_log_html(f"❌ 发生错误: {str(e)}"), 
-            f"❌ 错误: {str(e)}",
-            gr.update(visible=False),
-            gr.update(visible=True),
-            None,
-            None
-        )
+        yield _ui_payload(f"❌ 发生错误: {str(e)}", f"❌ 错误: {str(e)}", False, True, None, None)
 
 def stop_task_action(task_id_state):
     """实际执行停止动作"""
-    print(f"DEBUG: Stop requested for task ID: {task_id_state}")
+    logger.debug("Stop requested: task_id=%s", task_id_state)
     if task_id_state:
+        cancel_resp = _inference_api_call("post", f"/cancel/{task_id_state}")
+        if cancel_resp.get("success"):
+            payload = cancel_resp.get("data") or {}
+            status = str(payload.get("status") or "").lower()
+            message = str(payload.get("message") or "任务已取消")
+            if status in {"completed", "failed"}:
+                ui_msg = f"ℹ️ {message}"
+            else:
+                ui_msg = f"🛑 {message}"
+            logger.info("推理任务取消请求完成: task_id=%s, status=%s", task_id_state, status or "unknown")
+            return ui_msg, gr.update(visible=False), gr.update(visible=True), None, None
+
+        api_error = str(cancel_resp.get("error") or "取消请求失败")
+        if "任务不存在" in api_error:
+            logger.info("取消请求返回任务不存在: %s", task_id_state)
+            return "ℹ️ 任务不存在或已结束", gr.update(visible=False), gr.update(visible=True), None, None
+
+        logger.warning("API 取消失败，回退本地停止 task_id=%s: %s", task_id_state, api_error)
         if inference_adapter.stop_inference_task(task_id_state):
-            print(f"DEBUG: Stop successful for {task_id_state}")
-            return "🛑 任务已请求停止", gr.update(visible=False), gr.update(visible=True), None, None
-        else:
-            print(f"DEBUG: Stop failed for {task_id_state} (not found or error)")
-            return f"❌ 停止失败: 任务 {task_id_state} 不存在或已结束", gr.update(visible=True), gr.update(visible=False), task_id_state, None
-    print("DEBUG: No active task ID found")
+            return f"⚠️ API 取消失败，已回退本地停止: {api_error}", gr.update(visible=False), gr.update(visible=True), None, None
+
+        logger.warning("停止推理任务失败: %s", task_id_state)
+        return f"❌ 停止失败: {api_error}", gr.update(visible=True), gr.update(visible=False), task_id_state, None
+    logger.debug("无活动任务ID")
     return "⚠️ 无活动任务", gr.update(visible=False), gr.update(visible=True), None, None
 
 
@@ -1238,17 +1491,17 @@ def create_training_ui() -> gr.Blocks:
         with gr.Tab("📁 数据获取"):
             with gr.Row():
                 with gr.Column(scale=1):
-                    gr.Markdown("### 数据集列表")
+                    gr.Markdown("### 点位数据列表")
                     datasets_table = gr.Dataframe(
                         value=get_datasets_table(),
-                        label="已有数据集",
+                        label="已有点位（映射到最新CSV）",
                         interactive=False
                     )
                     refresh_datasets_btn = gr.Button("🔄 刷新列表")
                     
-                    gr.Markdown("### 预览数据")
+                    gr.Markdown("### 预览点位")
                     preview_dropdown = gr.Dropdown(
-                        label="选择数据集",
+                        label="选择点位ID",
                         choices=get_dataset_names(),
                         interactive=True
                     )
@@ -1389,8 +1642,8 @@ def create_training_ui() -> gr.Blocks:
                         )
                         
                     files_select = gr.CheckboxGroup(
-                        label="选择输入文件",
-                        choices=get_unified_file_names()
+                        label="选择输入点位（自动匹配最新CSV）",
+                        choices=get_unified_point_ids()
                     )
                     
                     with gr.Accordion("⚙️ 高级配置 (可选)", open=False):
@@ -1574,7 +1827,7 @@ def create_training_ui() -> gr.Blocks:
                 outputs=task_table
             )
             refresh_tasks_btn.click(
-                fn=lambda: gr.CheckboxGroup(choices=get_unified_file_names()),
+                fn=lambda: gr.CheckboxGroup(choices=get_unified_point_ids()),
                 outputs=files_select
             )
             refresh_tasks_btn.click(
@@ -1606,7 +1859,7 @@ def create_training_ui() -> gr.Blocks:
             
             # Tab 切换时自动刷新文件列表
             inference_tab.select(
-                fn=lambda: gr.CheckboxGroup(choices=get_unified_file_names()),
+                fn=lambda: gr.CheckboxGroup(choices=get_unified_point_ids()),
                 outputs=files_select
             )
             inference_tab.select(
@@ -1709,16 +1962,8 @@ def create_training_ui() -> gr.Blocks:
                 
                 with gr.Column(scale=2):
                     gr.Markdown("### 📊 状态概览")
-                    # 动态获取标注文件数
+                    # 动态获取 DB 标注统计
                     def get_annotation_stats():
-                        fs_count = 0
-                        try:
-                            ann_dir = Path(settings.ANNOTATIONS_ROOT) / settings.DEFAULT_USER
-                            if ann_dir.exists():
-                                fs_count = len(list(ann_dir.glob("*.json")))
-                        except Exception:
-                            fs_count = 0
-
                         db_count = 0
                         try:
                             from src.db.database import SessionLocal, AnnotationRecord
@@ -1735,7 +1980,7 @@ def create_training_ui() -> gr.Blocks:
                         except Exception:
                             db_count = 0
 
-                        return f"DB 标注记录: {db_count} | 文件标注: {fs_count}"
+                        return f"DB 标注记录: {db_count}"
 
                     annotation_stats = gr.Textbox(
                         value=get_annotation_stats(),
@@ -1759,7 +2004,7 @@ def create_training_ui() -> gr.Blocks:
                     
                     with gr.Accordion("⚙️ 路径与参数配置 (Settings)", open=False):
                         conf_input_dir = gr.Textbox(
-                            label="标注文件来源 (Annotation Dir)", 
+                            label="标注来源 (DB-First，目录仅兼容展示)", 
                             value=str(Path(settings.ANNOTATIONS_ROOT) / settings.DEFAULT_USER)
                         )
                         conf_image_dir = gr.Textbox(
@@ -1785,31 +2030,23 @@ def create_training_ui() -> gr.Blocks:
                     def _get_approved_set():
                         try:
                             from src.db.database import SessionLocal, ReviewQueue
+                            from src.utils.annotation_store import canonical_point_id
                         except Exception:
                             return set()
                         db = SessionLocal()
                         try:
-                            rows = db.query(ReviewQueue.source_id).filter(
+                            rows = db.query(ReviewQueue.point_id, ReviewQueue.source_id).filter(
                                 ReviewQueue.source_type == "annotation",
                                 ReviewQueue.status == "approved"
                             ).all()
-                            return {_normalize_ann_name(r[0]) for r in rows if r and r[0]}
+                            return {canonical_point_id(r[0], r[1]) for r in rows if canonical_point_id(r[0], r[1])}
                         finally:
                             db.close()
-
-                    def _is_approved_json(path: Path, approved_set: set) -> bool:
-                        try:
-                            with open(path, "r", encoding="utf-8") as f:
-                                data = json.load(f)
-                            filename = data.get("filename") or path.stem
-                        except Exception:
-                            filename = path.stem
-                        return _normalize_ann_name(filename) in approved_set
 
                     def _list_annotation_payloads_from_db(filter_keyword=None, approved_only_flag=False):
                         try:
                             from src.db.database import SessionLocal, AnnotationRecord, ReviewQueue
-                            from src.utils.annotation_store import record_to_payload
+                            from src.utils.annotation_store import canonical_point_id, record_to_payload
                         except Exception:
                             return []
 
@@ -1822,7 +2059,7 @@ def create_training_ui() -> gr.Blocks:
                                 .all()
                             )
                             review_rows = (
-                                db.query(ReviewQueue.source_id, ReviewQueue.status, ReviewQueue.updated_at)
+                                db.query(ReviewQueue.point_id, ReviewQueue.source_id, ReviewQueue.status, ReviewQueue.updated_at)
                                 .filter(ReviewQueue.source_type == "annotation")
                                 .order_by(ReviewQueue.updated_at.desc())
                                 .all()
@@ -1831,8 +2068,8 @@ def create_training_ui() -> gr.Blocks:
                             db.close()
 
                         review_status_map = {}
-                        for source_id, status, _updated_at in review_rows:
-                            key = _normalize_ann_name(source_id)
+                        for point_id, source_id, status, _updated_at in review_rows:
+                            key = canonical_point_id(point_id, source_id)
                             if not key or key in review_status_map:
                                 continue
                             review_status_map[key] = (status or "").strip().lower() or "unreviewed"
@@ -1851,7 +2088,7 @@ def create_training_ui() -> gr.Blocks:
                         payloads = []
                         seen = set()
                         for row in rows:
-                            norm = _normalize_ann_name(row.source_id or row.filename)
+                            norm = canonical_point_id(getattr(row, "point_id", None), row.source_id, row.filename)
                             if not norm:
                                 continue
                             if approved_set is not None and norm not in approved_set:
@@ -1888,36 +2125,11 @@ def create_training_ui() -> gr.Blocks:
 
                         return payloads
 
-                    # 获取标注文件列表（优先 DB-First，兼容文件目录）
+                    # 获取标注文件列表（DB-First）
                     def get_file_choices(ann_dir, filter_keyword=None, approved_only_flag=False):
+                        _ = ann_dir
                         db_payloads = _list_annotation_payloads_from_db(filter_keyword, approved_only_flag)
-                        if db_payloads:
-                            return [(row["label"], row["value"]) for row in db_payloads]
-
-                        path_obj = Path(ann_dir)
-                        if not path_obj.exists():
-                            return []
-                        try:
-                            files = list(path_obj.glob("*.json"))
-                            # 按修改时间排序
-                            files.sort(key=lambda x: x.stat().st_mtime, reverse=True)
-                            if approved_only_flag:
-                                approved_set = _get_approved_set()
-                                if not approved_set:
-                                    return []
-                                files = [f for f in files if _is_approved_json(f, approved_set)]
-                            
-                            # 过滤逻辑
-                            if filter_keyword == "qwen":
-                                # Qwen 模式：只显示包含 qwen 的文件
-                                files = [f for f in files if "qwen" in f.name.lower()]
-                            elif filter_keyword == "chatts":
-                                # ChatTS 模式：排除 qwen 文件 (显示 chatts 和 legacy)
-                                files = [f for f in files if "qwen" not in f.name.lower()]
-                                
-                            return [(f.name, f.name) for f in files]
-                        except Exception:
-                            return []
+                        return [(row["label"], row["value"]) for row in db_payloads]
 
                     def _resolve_selected_payload(selected_file: str, family: str, approved_only_flag: bool):
                         if not selected_file:
@@ -1978,23 +2190,14 @@ def create_training_ui() -> gr.Blocks:
                 
             def preview_source_file(selected_file, input_dir_val, image_dir_val, model_family="qwen", approved_only_flag=True):
                 """选择文件时立即预览，并执行真实转换（优先 DB-First）。"""
+                _ = input_dir_val
                 if not selected_file:
                     return None, None
 
                 source_content = _resolve_selected_payload(selected_file, model_family, approved_only_flag)
 
-                # Fallback: legacy 文件模式
-                if source_content is None and input_dir_val:
-                    src_p = Path(input_dir_val) / selected_file
-                    try:
-                        if src_p.exists():
-                            with open(src_p, "r", encoding="utf-8") as f:
-                                source_content = json.load(f)
-                    except Exception as e:
-                        source_content = {"error": str(e)}
-
                 if source_content is None:
-                    return {"error": "未找到标注内容（DB 和文件目录均无）"}, None
+                    return {"error": "未找到标注内容（DB 查询为空）"}, None
 
                 converted_content = None
                 try:
@@ -2011,7 +2214,7 @@ def create_training_ui() -> gr.Blocks:
                         with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp:
                             tmp_out = tmp.name
 
-                        res = data_adapter.convert_annotations(
+                        res = annotation_export_adapter.convert_annotations(
                             input_dir=str(tmp_input_path),
                             output_path=tmp_out,
                             image_dir=img_d,
@@ -2040,6 +2243,7 @@ def create_training_ui() -> gr.Blocks:
 
             def convert_core(selected_file, input_dir, image_dir, output_path, model_family, approved_only_flag, mode="single"):
                 """核心转换逻辑（优先 DB-First）。"""
+                _ = input_dir
                 try:
                     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
                 except Exception as e:
@@ -2049,7 +2253,7 @@ def create_training_ui() -> gr.Blocks:
                 img_d = image_dir or settings.DATA_DOWNSAMPLED_DIR
 
                 def _run_convert(work_dir, target_filename, preview_payload, preview_file):
-                    result = data_adapter.convert_annotations(
+                    result = annotation_export_adapter.convert_annotations(
                         work_dir,
                         output_path,
                         image_dir=img_d,
@@ -2125,53 +2329,7 @@ def create_training_ui() -> gr.Blocks:
 
                         return _run_convert(str(tmp_path), target_filename, preview_payload, preview_file)
 
-                # Legacy 文件路径（兜底）
-                src_dir = Path(input_dir or "")
-                if not src_dir.exists():
-                    return "❌ 未找到可转换标注（DB 和文件目录均为空）", {}, {}
-
-                candidate_files = list(src_dir.glob("*.json"))
-                candidate_files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-                if mode == "single":
-                    if not selected_file:
-                        return "❌ 未选择文件", {}, {}
-                    selected = src_dir / selected_file
-                    if not selected.exists():
-                        return "❌ 标注文件不存在", {}, {}
-                    candidate_files = [selected]
-
-                if approved_only_flag:
-                    approved_set = _get_approved_set()
-                    if not approved_set:
-                        return "❌ 未找到已审核通过的标注", {}, {}
-                    candidate_files = [p for p in candidate_files if _is_approved_json(p, approved_set)]
-
-                if not candidate_files:
-                    return "❌ 没有匹配的标注文件", {}, {}
-
-                with tempfile.TemporaryDirectory() as tmpdir:
-                    tmp_path = Path(tmpdir)
-                    preview_payload = {}
-                    preview_file = None
-                    target_filename = None
-                    for idx, src_file in enumerate(candidate_files):
-                        try:
-                            with open(src_file, "r", encoding="utf-8") as f:
-                                data = json.load(f)
-                            dst_name = src_file.name
-                            with open(tmp_path / dst_name, "w", encoding="utf-8") as wf:
-                                json.dump(data, wf, ensure_ascii=False, indent=2)
-                            if idx == 0:
-                                preview_payload = data
-                                preview_file = dst_name
-                                if mode == "single":
-                                    target_filename = dst_name
-                        except Exception:
-                            continue
-
-                    if not preview_file:
-                        return "❌ 标注文件读取失败", {}, {}
-                    return _run_convert(str(tmp_path), target_filename, preview_payload, preview_file)
+                return "❌ 未找到可转换标注（DB 查询为空）", {}, {}
 
             # 绑定事件
             # 绑定事件
@@ -2275,7 +2433,7 @@ def create_training_ui() -> gr.Blocks:
             with gr.Tabs():
                 # 1. 标注数据管理
                 with gr.Tab("标注数据 (Annotations)", render=False) as annotations_manage_tab:
-                    gr.Markdown("### 📝 标注文件管理")
+                    gr.Markdown("### 📝 标注记录管理（DB-First）")
                     with gr.Row():
                         with gr.Column(scale=1):
                             ann_mgr_family = gr.Dropdown(
@@ -2284,58 +2442,154 @@ def create_training_ui() -> gr.Blocks:
                                 value="all",
                                 interactive=True
                             )
-                            ann_mgr_dir = gr.Textbox(label="标注目录", value=str(Path(settings.ANNOTATIONS_ROOT) / "douff"), interactive=False)
-                            ann_mgr_list = gr.Dropdown(label="选择文件", interactive=True)
+                            ann_mgr_dir = gr.Textbox(
+                                label="标注目录（仅兼容清理）",
+                                value=str(Path(settings.ANNOTATIONS_ROOT) / settings.DEFAULT_USER),
+                                interactive=False,
+                            )
+                            ann_mgr_list = gr.Dropdown(label="选择记录", interactive=True)
                             refresh_ann_mgr = gr.Button("🔄 刷新列表")
-                            delete_ann_btn = gr.Button("🗑️ 删除选中文件", variant="stop")
+                            delete_ann_btn = gr.Button("🗑️ 删除选中记录", variant="stop")
                             ann_op_status = gr.Textbox(label="操作状态", interactive=False)
                         
                         with gr.Column(scale=2):
-                            ann_mgr_view = gr.JSON(label="文件内容预览", height=600)
+                            ann_mgr_view = gr.JSON(label="记录内容预览", height=600)
 
                     # Logic
                     def list_ann_files(path_str, model_type="all"):
-                        p = Path(path_str)
-                        if not p.exists(): return []
-                        files = list(p.glob("*.json"))
-                        files.sort(key=lambda x: x.stat().st_mtime, reverse=True)
-                        names = [f.name for f in files]
-                        mt = (model_type or "all").lower()
-                        if mt == "all":
-                            return names
+                        _ = path_str
+                        try:
+                            from src.db.database import SessionLocal, AnnotationRecord
+                            from src.utils.annotation_store import canonical_point_id
+                        except Exception:
+                            return []
 
-                        def _matches(name: str) -> bool:
-                            lower = name.lower()
+                        mt = (model_type or "all").lower()
+                        db = SessionLocal()
+                        try:
+                            rows = (
+                                db.query(AnnotationRecord)
+                                .filter(AnnotationRecord.user_id == settings.DEFAULT_USER)
+                                .order_by(AnnotationRecord.updated_at.desc())
+                                .all()
+                            )
+                        finally:
+                            db.close()
+
+                        def _matches(row) -> bool:
+                            name = str(getattr(row, "filename", "") or getattr(row, "source_id", "") or "").lower()
+                            method = str(getattr(row, "method", "") or "").lower()
                             if mt == "qwen":
-                                return "qwen" in lower
+                                return method == "qwen" or "qwen" in name
                             if mt == "timer":
-                                return "timer" in lower
+                                return method == "timer" or "timer" in name
                             if mt == "adtk_hbos":
-                                return "adtk_hbos" in lower
+                                return method == "adtk_hbos" or "adtk_hbos" in name
                             if mt == "ensemble":
-                                return "ensemble" in lower
+                                return method == "ensemble" or "ensemble" in name
                             if mt == "chatts":
-                                return not any(k in lower for k in ["qwen", "timer", "adtk_hbos", "ensemble"])
+                                if method:
+                                    return method == "chatts"
+                                return not any(k in name for k in ["qwen", "timer", "adtk_hbos", "ensemble"])
                             return True
 
-                        return [n for n in names if _matches(n)]
+                        choices = []
+                        seen = set()
+                        for row in rows:
+                            if not _matches(row):
+                                continue
+                            point_id = canonical_point_id(getattr(row, "point_id", None), row.source_id, row.filename)
+                            if not point_id or point_id in seen:
+                                continue
+                            seen.add(point_id)
+                            source_kind = str(getattr(row, "source_kind", "") or "human").strip().lower()
+                            method = str(getattr(row, "method", "") or "unknown").strip().lower()
+                            label = f"{point_id} | [{source_kind.upper()}] | {method}"
+                            choices.append((label, point_id))
+                        return choices
 
-                    def load_ann_content(path_str, filename):
-                        if not filename: return None
+                    def load_ann_content(path_str, point_id):
+                        _ = path_str
+                        if not point_id:
+                            return None
                         try:
-                            with open(Path(path_str) / filename, 'r') as f:
-                                return json.load(f)
+                            from sqlalchemy import or_
+                            from src.db.database import SessionLocal, AnnotationRecord
+                            from src.utils.annotation_store import record_to_payload
+                            db = SessionLocal()
+                            try:
+                                row = (
+                                    db.query(AnnotationRecord)
+                                    .filter(
+                                        AnnotationRecord.user_id == settings.DEFAULT_USER,
+                                        or_(
+                                            AnnotationRecord.point_id == point_id,
+                                            AnnotationRecord.source_id == point_id,
+                                            AnnotationRecord.filename == point_id,
+                                        ),
+                                    )
+                                    .order_by(AnnotationRecord.updated_at.desc())
+                                    .first()
+                                )
+                                if not row:
+                                    return {"error": f"未找到标注记录: {point_id}"}
+                                return record_to_payload(row, fallback_filename=row.filename or f"{point_id}.csv")
+                            finally:
+                                db.close()
                         except Exception as e:
                             return {"error": str(e)}
 
-                    def delete_ann_file(path_str, filename):
-                        if not filename: return "未选择文件", gr.update()
+                    def delete_ann_file(path_str, point_id, model_type):
+                        if not point_id:
+                            return "未选择记录", gr.update()
                         try:
-                            p = Path(path_str) / filename
-                            p.unlink()
-                            # 刷新列表
-                            new_list = list_ann_files(path_str)
-                            return f"已删除: {filename}", gr.update(choices=new_list, value=None)
+                            from sqlalchemy import or_
+                            from src.db.database import SessionLocal, AnnotationRecord, AnnotationSegment
+                            from src.utils.annotation_store import canonical_point_id
+
+                            db = SessionLocal()
+                            try:
+                                row = (
+                                    db.query(AnnotationRecord)
+                                    .filter(
+                                        AnnotationRecord.user_id == settings.DEFAULT_USER,
+                                        or_(
+                                            AnnotationRecord.point_id == point_id,
+                                            AnnotationRecord.source_id == point_id,
+                                            AnnotationRecord.filename == point_id,
+                                        ),
+                                    )
+                                    .order_by(AnnotationRecord.updated_at.desc())
+                                    .first()
+                                )
+                                if not row:
+                                    return f"未找到记录: {point_id}", gr.update()
+
+                                db.query(AnnotationSegment).filter(AnnotationSegment.annotation_id == row.id).delete()
+                                db.delete(row)
+                                db.commit()
+
+                                # 可选兼容清理：移除同名文件，不作为在线主链依赖
+                                ann_dir = Path(path_str)
+                                normalized = canonical_point_id(getattr(row, "point_id", None), row.source_id, row.filename)
+                                candidates = {
+                                    row.filename or "",
+                                    f"{normalized}.json" if normalized else "",
+                                    f"annotations_{normalized}.json" if normalized else "",
+                                }
+                                deleted_files = 0
+                                for name in candidates:
+                                    if not name:
+                                        continue
+                                    p = ann_dir / name
+                                    if p.exists():
+                                        p.unlink()
+                                        deleted_files += 1
+                            finally:
+                                db.close()
+
+                            new_list = list_ann_files(path_str, model_type)
+                            return f"已删除记录: {point_id}（兼容清理文件 {deleted_files} 个）", gr.update(choices=new_list, value=None)
                         except Exception as e:
                             return f"删除失败: {e}", gr.update()
 
@@ -2356,7 +2610,11 @@ def create_training_ui() -> gr.Blocks:
                         outputs=ann_mgr_list
                     )
                     ann_mgr_list.change(fn=load_ann_content, inputs=[ann_mgr_dir, ann_mgr_list], outputs=ann_mgr_view)
-                    delete_ann_btn.click(fn=delete_ann_file, inputs=[ann_mgr_dir, ann_mgr_list], outputs=[ann_op_status, ann_mgr_list])
+                    delete_ann_btn.click(
+                        fn=delete_ann_file,
+                        inputs=[ann_mgr_dir, ann_mgr_list, ann_mgr_family],
+                        outputs=[ann_op_status, ann_mgr_list],
+                    )
 
                 # 1.5 审核队列管理
                 with gr.Tab("审核队列 (Review Queue)", render=False) as review_queue_tab:
@@ -2692,11 +2950,21 @@ def create_training_ui() -> gr.Blocks:
                                 db.query(AnnotationRecord)
                                 .filter(
                                     AnnotationRecord.user_id == settings.DEFAULT_USER,
-                                    AnnotationRecord.source_id == normalized,
+                                    AnnotationRecord.point_id == normalized,
                                 )
                                 .order_by(AnnotationRecord.updated_at.desc())
                                 .first()
                             )
+                            if row is None:
+                                row = (
+                                    db.query(AnnotationRecord)
+                                    .filter(
+                                        AnnotationRecord.user_id == settings.DEFAULT_USER,
+                                        AnnotationRecord.source_id == normalized,
+                                    )
+                                    .order_by(AnnotationRecord.updated_at.desc())
+                                    .first()
+                                )
                         finally:
                             db.close()
 
@@ -2850,6 +3118,7 @@ def create_training_ui() -> gr.Blocks:
                                 norm_method = _normalize_review_method(method)
                                 ann_rows = (
                                     db.query(
+                                        AnnotationRecord.point_id,
                                         AnnotationRecord.source_id,
                                         AnnotationRecord.source_kind,
                                         AnnotationRecord.annotation_count,
@@ -2859,8 +3128,8 @@ def create_training_ui() -> gr.Blocks:
                                     .all()
                                 )
                                 ann_meta_map: Dict[str, Dict] = {}
-                                for source_id, source_kind, ann_count, seg_count in ann_rows:
-                                    key = _normalize_review_name(source_id)
+                                for point_id, source_id, source_kind, ann_count, seg_count in ann_rows:
+                                    key = _normalize_review_name(point_id or source_id)
                                     if not key:
                                         continue
                                     ann_meta_map[key] = {
@@ -2871,6 +3140,7 @@ def create_training_ui() -> gr.Blocks:
 
                                 review_rows = (
                                     db.query(
+                                        ReviewQueue.point_id,
                                         ReviewQueue.source_id,
                                         ReviewQueue.status,
                                         ReviewQueue.reviewer,
@@ -2881,8 +3151,8 @@ def create_training_ui() -> gr.Blocks:
                                     .all()
                                 )
                                 review_status_map: Dict[str, Dict] = {}
-                                for source_id, st, reviewer, updated_at in review_rows:
-                                    key = _normalize_review_name(source_id)
+                                for point_id, source_id, st, reviewer, updated_at in review_rows:
+                                    key = _normalize_review_name(point_id or source_id)
                                     if not key or key in review_status_map:
                                         continue
                                     mapped = "needs_fix" if (st or "").strip().lower() == "rejected" else ((st or "").strip().lower() or "pending")
@@ -2895,7 +3165,7 @@ def create_training_ui() -> gr.Blocks:
                                 inf_rows = db.query(InferenceResult).order_by(InferenceResult.created_at.desc()).all()
                                 score_map: Dict[str, Dict] = {}
                                 for row in inf_rows:
-                                    key = _normalize_review_name(row.point_name or "")
+                                    key = _normalize_review_name(getattr(row, "point_id", None) or row.point_name or "")
                                     if not key or key in score_map:
                                         continue
                                     if norm_method and (row.method or "").strip() != norm_method:
@@ -3014,7 +3284,6 @@ def create_training_ui() -> gr.Blocks:
                             "needs_fix": "需标注修订",
                         }
                         try:
-                            from datetime import datetime
                             from src.db.database import SessionLocal, ReviewQueue, init_db
                             init_db()
                             db = SessionLocal()
@@ -3029,18 +3298,26 @@ def create_training_ui() -> gr.Blocks:
                                         continue
                                     row = (
                                         db.query(ReviewQueue)
-                                        .filter(
-                                            ReviewQueue.source_type == "annotation",
-                                            ReviewQueue.source_id == point_name,
-                                        )
+                                        .filter(ReviewQueue.source_type == "annotation", ReviewQueue.point_id == point_name)
                                         .order_by(ReviewQueue.updated_at.desc())
                                         .first()
                                     )
+                                    if row is None:
+                                        row = (
+                                            db.query(ReviewQueue)
+                                            .filter(
+                                                ReviewQueue.source_type == "annotation",
+                                                ReviewQueue.source_id == point_name,
+                                            )
+                                            .order_by(ReviewQueue.updated_at.desc())
+                                            .first()
+                                        )
                                     if row is None:
                                         row = ReviewQueue(
                                             id=str(uuid.uuid4()),
                                             source_type="annotation",
                                             source_id=point_name,
+                                            point_id=_normalize_review_name(point_name),
                                             method=item.get("method"),
                                             model=None,
                                             point_name=point_name,
@@ -3048,13 +3325,13 @@ def create_training_ui() -> gr.Blocks:
                                             strategy="training_review",
                                             status=status,
                                             reviewer=reviewer_text,
-                                            updated_at=datetime.utcnow(),
+                                            updated_at=utc_now_naive(),
                                         )
                                         db.add(row)
                                     else:
                                         row.status = status
                                         row.reviewer = reviewer_text
-                                        row.updated_at = datetime.utcnow()
+                                        row.updated_at = utc_now_naive()
                                     updated += 1
                                 db.commit()
                             except Exception:
@@ -3267,7 +3544,7 @@ def create_training_ui() -> gr.Blocks:
                     with gr.Row():
                         with gr.Column(scale=1):
                             ds_preview_dropdown = gr.Dropdown(
-                                label="选择数据集",
+                                label="选择点位ID",
                                 choices=get_dataset_names(),
                                 interactive=True
                             )
@@ -3922,12 +4199,7 @@ def create_training_ui() -> gr.Blocks:
                         auto_eval_enabled, eval_truth, eval_data, eval_dataset, eval_output, eval_device_val
                     ):
                         if not config_name:
-                            return "❌ 请选择训练模板", "", model_family
-                            
-                        task_id = f"qs_{int(time.time())}"
-                        
-                        local_adapter = get_training_adapter(model_family)
-                        print(f"[TRAIN_UI] start_training_wrap task_id={task_id} model_family={model_family} config={config_name}")
+                            return "❌ 请选择训练模板", ""
 
                         cuda_devices = (cuda_devices or "").strip() or None
                         extra_args = (extra_args or "").strip() or None
@@ -3947,8 +4219,8 @@ def create_training_ui() -> gr.Blocks:
                         eval_dataset = (eval_dataset or "").strip() or None
                         eval_output = (eval_output or "").strip() or None
                         eval_device_val = (eval_device_val or "").strip() or None
+                        version_tag = (output_name or "").strip() or None
 
-                        # Call backend
                         overrides = {
                             "override_learning_rate": lr,
                             "override_epochs": epochs,
@@ -3977,49 +4249,100 @@ def create_training_ui() -> gr.Blocks:
                             "override_freeze_trainable_layers": freeze_layers,
                             "override_freeze_trainable_modules": freeze_modules
                         }
-                        
-                        res = local_adapter.run_training(
-                            task_id,
-                            config_name,
-                            version_tag=output_name,
-                            auto_eval=auto_eval_enabled,
-                            eval_truth_dir=eval_truth,
-                            eval_data_dir=eval_data,
-                            eval_dataset_name=eval_dataset,
-                            eval_output_dir=eval_output,
-                            eval_device=eval_device_val,
-                            **overrides,
-                        )
-                        
-                        if res.get("success"):
-                            return f"✅ 训练任务已成功启动!\n任务ID: {task_id}\n输出目录: {res.get('output_dir')}\n\n正在后台运行中... 请留意下方实时日志。", task_id, model_family
-                        else:
-                            return f"❌ 启动错误: {res.get('error')}", "", model_family
 
-                    def stream_logs(model_family, task_id, current_log_text, offset):
+                        submit_payload = {
+                            "config_name": config_name,
+                            "version_tag": version_tag,
+                            "model_family": model_family,
+                            "auto_eval": bool(auto_eval_enabled),
+                            "eval_truth_dir": eval_truth,
+                            "eval_data_dir": eval_data,
+                            "eval_dataset_name": eval_dataset,
+                            "eval_output_dir": eval_output,
+                            "eval_device": eval_device_val,
+                            "params": {k: v for k, v in overrides.items() if v is not None},
+                        }
+                        submit_resp = _training_api_call("post", "/start", payload=submit_payload)
+                        if not submit_resp.get("success"):
+                            return f"❌ 启动错误: {submit_resp.get('error')}", ""
+
+                        submit_data = submit_resp.get("data") or {}
+                        task_id = str(submit_data.get("task_id") or "")
                         if not task_id:
-                            return format_log_html(current_log_text), current_log_text, offset
-                        
-                        # Read increment
-                        res = get_training_adapter(model_family).get_training_log(task_id, offset)
-                        new_content = res.get("log", "")
-                        new_offset = res.get("offset", offset)
-                        
+                            return "❌ 启动成功但未返回 task_id", ""
+
+                        adapter = get_training_adapter(model_family)
+                        output_dir = adapter.saves_path / f"{config_name}_{version_tag or task_id[:8]}"
+                        logger.info("训练任务已提交: task_id=%s family=%s config=%s", task_id, model_family, config_name)
+
+                        return (
+                            f"✅ 训练任务已成功提交!\n任务ID: {task_id}\n输出目录: {output_dir}\n\n正在后台运行中... 请留意下方实时日志与状态。",
+                            task_id,
+                        )
+
+                    def stream_logs(task_id, current_log_text, offset, current_status_text):
+                        if not task_id:
+                            return format_log_html(current_log_text), current_log_text, offset, current_status_text, ""
+
+                        new_offset = int(offset or 0)
+                        log_resp = _training_api_call(
+                            "get",
+                            f"/log/{task_id}",
+                            params={"offset": new_offset, "max_bytes": 200000},
+                        )
+                        if not log_resp.get("success"):
+                            status_text = f"⚠️ 日志查询失败: {log_resp.get('error') or '未知错误'}"
+                            return format_log_html(current_log_text), current_log_text, new_offset, status_text, task_id
+
+                        log_payload = log_resp.get("data") or {}
+                        log_data = log_payload.get("data") if isinstance(log_payload, dict) else {}
+                        new_content = str((log_data or {}).get("log") or "")
+                        try:
+                            new_offset = int((log_data or {}).get("offset", new_offset))
+                        except Exception:
+                            pass
+                        task_status = str((log_data or {}).get("status") or "").lower()
+                        task_error = str((log_data or {}).get("error") or "")
+
                         if new_content:
                             current_log_text = (current_log_text or "") + new_content
                             if len(current_log_text) > LOG_TAIL_MAX_CHARS:
                                 current_log_text = current_log_text[-LOG_TAIL_MAX_CHARS:]
-                            
-                        return format_log_html(current_log_text), current_log_text, new_offset
 
-                    def stop_training_wrap(model_family, task_id):
+                        if task_status in {"pending", "running"}:
+                            status_text = f"🔄 训练进行中: {task_id} ({task_status})"
+                            return format_log_html(current_log_text), current_log_text, new_offset, status_text, task_id
+
+                        if task_status == "completed":
+                            status_text = f"✅ 训练任务已完成: {task_id}"
+                            return format_log_html(current_log_text), current_log_text, new_offset, status_text, ""
+
+                        if task_status == "cancelled":
+                            status_text = f"🛑 训练任务已取消: {task_id}"
+                            return format_log_html(current_log_text), current_log_text, new_offset, status_text, ""
+
+                        if task_status == "failed":
+                            msg = task_error or "训练失败"
+                            status_text = f"❌ 训练任务失败: {msg}"
+                            return format_log_html(current_log_text), current_log_text, new_offset, status_text, ""
+
+                        status_text = f"ℹ️ 训练状态: {task_status or 'unknown'}"
+                        return format_log_html(current_log_text), current_log_text, new_offset, status_text, task_id
+
+                    def stop_training_wrap(task_id):
                         if not task_id:
-                            return "无运行中的任务"
-                        res = get_training_adapter(model_family).stop_training(task_id)
-                        if res.get("success"):
-                            return "🛑 任务已手动停止"
-                        else:
-                            return f"停止失败: {res.get('error')}"
+                            return "无运行中的任务", ""
+
+                        resp = _training_api_call("post", f"/stop/{task_id}")
+                        if resp.get("success"):
+                            payload = resp.get("data") or {}
+                            msg = str(payload.get("message") or "训练已停止")
+                            return f"🛑 {msg}", ""
+
+                        api_error = str(resp.get("error") or "停止失败")
+                        if "任务不存在" in api_error or "任务未在运行中" in api_error:
+                            return f"ℹ️ {api_error}", ""
+                        return f"❌ 停止失败: {api_error}", task_id
 
                     # --- Layout & Events ---
                     with gr.Column():
@@ -4031,7 +4354,6 @@ def create_training_ui() -> gr.Blocks:
                         
                         # Hidden state for Task ID and Log Offset
                         task_id_state = gr.State("")
-                        task_family_state = gr.State("chatts")
                         log_offset_state = gr.State(0)
                         training_log_state = gr.State("") # Raw text state
                         
@@ -4056,7 +4378,7 @@ def create_training_ui() -> gr.Blocks:
                                 freeze_multi_modal_projector, freeze_trainable_layers, freeze_trainable_modules,
                                 auto_eval, eval_truth_dir, eval_data_dir, eval_dataset_name, eval_output_dir, eval_device
                             ],
-                            outputs=[output_box, task_id_state, task_family_state],
+                            outputs=[output_box, task_id_state],
                             queue=False
                         ).then(
                             fn=lambda: 0, outputs=log_offset_state # Reset offset
@@ -4080,8 +4402,8 @@ def create_training_ui() -> gr.Blocks:
                         
                         stop_btn.click(
                             fn=stop_training_wrap,
-                            inputs=[task_family_state, task_id_state],
-                            outputs=output_box
+                            inputs=[task_id_state],
+                            outputs=[output_box, task_id_state]
                         )
 
                         validate_btn.click(
@@ -4093,8 +4415,8 @@ def create_training_ui() -> gr.Blocks:
                         # Timer ticks -> Update logs
                         timer.tick(
                             fn=stream_logs,
-                            inputs=[task_family_state, task_id_state, training_log_state, log_offset_state],
-                            outputs=[log_box, training_log_state, log_offset_state],
+                            inputs=[task_id_state, training_log_state, log_offset_state, output_box],
+                            outputs=[log_box, training_log_state, log_offset_state, output_box, task_id_state],
                             queue=False
                         )
                         refresh_btn.click(

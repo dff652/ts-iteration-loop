@@ -11,6 +11,9 @@ from pathlib import Path
 from typing import List, Dict, Optional, Any
 
 from configs.settings import settings
+from src.core.logging_config import get_logger
+
+logger = get_logger(__name__)
 
 
 class CheckOutlierAdapter:
@@ -33,7 +36,7 @@ class CheckOutlierAdapter:
                 del self.active_processes[task_id]
                 return True
             except Exception as e:
-                print(f"Error stopping task {task_id}: {e}")
+                logger.error("停止推理任务失败 task_id=%s: %s", task_id, e)
                 return False
         # If not in active_processes, we still marked it as cancelled, so return True
         return True
@@ -47,6 +50,19 @@ class CheckOutlierAdapter:
         - list: 多条结果
         - str: JSON 字符串或 JSON 文件路径
         """
+        rows = self.to_annotation_rows(inference_result)
+
+        output_dir = Path("/tmp/ts_iteration_loop")
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_path = output_dir / f"inference_annotations_{uuid.uuid4().hex}.json"
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(rows, f, ensure_ascii=False, indent=2)
+        return str(output_path)
+
+    def to_annotation_rows(self, inference_result: Any) -> List[Dict]:
+        """
+        将推理结果转换为标注行（内存结构，不落盘）。
+        """
         payload = inference_result
         if isinstance(inference_result, str):
             candidate_path = Path(inference_result.strip())
@@ -55,15 +71,7 @@ class CheckOutlierAdapter:
                     payload = json.load(f)
             else:
                 payload = json.loads(inference_result)
-
-        rows = self._extract_annotation_rows(payload)
-
-        output_dir = Path("/tmp/ts_iteration_loop")
-        output_dir.mkdir(parents=True, exist_ok=True)
-        output_path = output_dir / f"inference_annotations_{uuid.uuid4().hex}.json"
-        with open(output_path, "w", encoding="utf-8") as f:
-            json.dump(rows, f, ensure_ascii=False, indent=2)
-        return str(output_path)
+        return self._extract_annotation_rows(payload)
 
     def _extract_annotation_rows(self, payload: Any) -> List[Dict]:
         if payload is None:
@@ -272,39 +280,37 @@ class CheckOutlierAdapter:
         ]
         if task_id:
             cmd.extend(["--task-id", str(task_id)])
-        if task_id:
-            cmd.extend(["--task-id", str(task_id)])
+        
+        if "n_downsample" not in args:
+            cmd.extend(["--n_downsample", str(settings.DEFAULT_DOWNSAMPLE_POINTS)])
+
+        # Match streaming path behavior so API/Celery and UI local mode keep parity.
+        if algorithm == "chatts":
+            if args.get("lora_adapter_path"):
+                cmd.extend(["--chatts_lora_adapter_path", str(args["lora_adapter_path"])])
+            if args.get("base_model_path"):
+                cmd.extend(["--chatts_model_path", str(args["base_model_path"])])
+
+        if algorithm == "qwen":
+            if args.get("base_model_path"):
+                cmd.extend(["--qwen_model_path", str(args["base_model_path"])])
         
         # 处理参数映射
-        # 1. 必需参数
-        # 默认降采样点数，如果没有传入 n_downsample，则使用 settings 的默认值
-        if "n_downsample" not in args:
-             cmd.extend(["--n_downsample", str(settings.DEFAULT_DOWNSAMPLE_POINTS)])
-        
-        # 2. 遍历 args 添加参数
+        # 遍历 args 添加参数
         for k, v in args.items():
             if v is None or v == "":
                 continue
             
-            # 特殊处理内部标记
-            if k == "chatts_enabled":
-                cmd.append("--use-chatts")
+            # 跳过已处理或无效参数
+            if k in ["model", "base_model_path", "lora_adapter_path", "chatts_enabled"]:
                 continue
-            if k == "model_path": # 兼容旧代码，虽然上面改成了 chatts_model_path
-                 cmd.extend(["--model", str(v)])
-                 continue
 
-            # 处理布尔值参数 (例如 --chatts_load_in_4bit)
-            # 注意：run.py 中某些布尔参数可能是接收字符串 "true"/"false" 或 action="store_true"
-            # 根据 default_params.json 分析，大部分是字符串类型的 true/false 或 auto
-            
-            # 将下划线转换为连字符，例如 chatts_load_in_4bit -> --chatts-load-in-4bit
-            arg_name = f"--{k.replace('_', '-')}"
-            
             # 防止重复添加 method
-            if arg_name == "--method":
+            if k == "method":
                 continue
-            
+
+            # 与流式路径一致：保持下划线参数名
+            arg_name = f"--{k}"
             cmd.extend([arg_name, str(v)])
         
         # 强制指定输出路径，确保与系统统一配置一致

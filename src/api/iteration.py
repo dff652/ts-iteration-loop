@@ -11,6 +11,7 @@ import json
 
 from src.db.database import get_db, IterationVersion
 from src.models.schemas import ApiResponse
+from src.utils.time_utils import utc_now_naive
 
 router = APIRouter()
 
@@ -68,7 +69,7 @@ async def create_iteration(
         dataset_path=request.dataset_path,
         model_path=request.model_path,
         annotation_count=0,
-        created_at=datetime.utcnow()
+        created_at=utc_now_naive()
     )
     
     db.add(iteration)

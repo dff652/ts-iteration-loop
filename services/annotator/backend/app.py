@@ -2,7 +2,7 @@ import os
 import json
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 
 from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
@@ -59,6 +59,10 @@ def _normalize_annotation_name(filename: str) -> str:
             return name[: -len(ext)]
     return name
 
+
+def _is_truthy(value: Any) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
 # Ensure directories exist
 os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(ANNOTATIONS_DIR, exist_ok=True)
@@ -77,6 +81,7 @@ if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
 from src.utils.annotation_store import (
+    canonical_point_id,
     get_annotation_record,
     normalize_point_name,
     record_to_payload,
@@ -260,6 +265,7 @@ def _load_annotation_summary_map(user_id: str) -> Dict[str, Dict[str, Any]]:
     try:
         rows = (
             db.query(
+                AnnotationRecord.point_id,
                 AnnotationRecord.source_id,
                 AnnotationRecord.annotation_count,
                 AnnotationRecord.segment_count,
@@ -270,8 +276,8 @@ def _load_annotation_summary_map(user_id: str) -> Dict[str, Dict[str, Any]]:
             .all()
         )
         mapping: Dict[str, Dict[str, Any]] = {}
-        for source_id, ann_count, seg_count, source_kind, is_human_edited in rows:
-            key = normalize_point_name(source_id or "")
+        for point_id, source_id, ann_count, seg_count, source_kind, is_human_edited in rows:
+            key = canonical_point_id(point_id, source_id)
             if not key:
                 continue
             mapping[key] = {
@@ -832,11 +838,16 @@ def review_sample(current_user):
             db_for_ann = SessionLocal()
             try:
                 entries = (
-                    db_for_ann.query(AnnotationRecord.source_id, AnnotationRecord.updated_at)
+                    db_for_ann.query(AnnotationRecord.point_id, AnnotationRecord.source_id, AnnotationRecord.updated_at)
                     .filter(AnnotationRecord.user_id == current_user)
                     .all()
                 )
-                normalized_entries = [(str(source_id), updated_at.timestamp() if updated_at else 0) for source_id, updated_at in entries]
+                normalized_entries = []
+                for point_id, source_id, updated_at in entries:
+                    key = canonical_point_id(point_id, source_id)
+                    if not key:
+                        continue
+                    normalized_entries.append((key, updated_at.timestamp() if updated_at else 0))
             finally:
                 db_for_ann.close()
 
@@ -867,10 +878,10 @@ def review_sample(current_user):
         skipped = 0
         try:
             if source_type == 'annotation':
-                for filename, _mtime in rows:
+                for point_id, _mtime in rows:
                     exists = db.query(ReviewQueue).filter(
                         ReviewQueue.source_type == 'annotation',
-                        ReviewQueue.source_id == filename
+                        ReviewQueue.point_id == point_id
                     ).first()
                     if exists:
                         skipped += 1
@@ -878,10 +889,11 @@ def review_sample(current_user):
                     db.add(ReviewQueue(
                         id=str(uuid.uuid4()),
                         source_type='annotation',
-                        source_id=filename,
+                        source_id=point_id,
+                        point_id=point_id,
                         method=method,
                         model=None,
-                        point_name=filename,
+                        point_name=point_id,
                         score=None,
                         strategy=strategy,
                         status='pending',
@@ -903,6 +915,7 @@ def review_sample(current_user):
                         id=str(uuid.uuid4()),
                         source_type='inference',
                         source_id=row.id,
+                        point_id=normalize_point_name(row.point_name),
                         method=row.method,
                         model=row.model,
                         point_name=row.point_name,
@@ -965,18 +978,20 @@ def review_queue(current_user):
                 filename = os.path.basename(result_path) if result_path else None
                 result_dir = os.path.dirname(result_path) if result_path else None
                 if review.source_type == 'annotation':
+                    review_key = canonical_point_id(review.point_id, review.point_name, review.source_id)
                     if not filename or not result_dir:
-                        candidates = _annotation_csv_candidates(review.source_id)
+                        candidates = _annotation_csv_candidates(review_key)
                         found = _find_csv_path_for_candidates(candidates)
                         if found:
                             result_path = str(found)
                             result_dir = str(found.parent)
                             filename = found.name
                         elif not filename:
-                            filename = candidates[0] if candidates else review.source_id
+                            filename = candidates[0] if candidates else review_key
                 items.append({
                     'id': review.id,
                     'source_id': review.source_id,
+                    'point_id': review.point_id,
                     'source_type': review.source_type,
                     'method': review.method,
                     'model': review.model,
@@ -1019,7 +1034,7 @@ def review_queue_update(current_user, item_id):
                 return jsonify({'success': False, 'error': 'Item not found'}), 404
             item.status = status
             item.reviewer = reviewer
-            item.updated_at = datetime.utcnow()
+            item.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
             db.commit()
         except Exception as e:
             db.rollback()
@@ -1053,7 +1068,7 @@ def review_queue_batch_update(current_user):
                 {
                     ReviewQueue.status: status,
                     ReviewQueue.reviewer: reviewer,
-                    ReviewQueue.updated_at: datetime.utcnow(),
+                    ReviewQueue.updated_at: datetime.now(timezone.utc).replace(tzinfo=None),
                 },
                 synchronize_session=False
             )
@@ -1371,7 +1386,18 @@ def get_annotations(filename, current_user):
         except Exception as e:
             print(f"Warning: failed to read annotation from DB: {e}")
 
-        # No stored annotation, fallback to auto-generated preview from CSV global_mask.
+        # No stored annotation.
+        allow_csv_fallback = bool(getattr(settings, "ANNOTATION_ALLOW_CSV_FALLBACK", False))
+        if _is_truthy(request.args.get("allow_csv_fallback")):
+            allow_csv_fallback = True
+        if not allow_csv_fallback:
+            return jsonify({
+                'success': True,
+                'filename': filename,
+                'annotations': []
+            })
+
+        # Optional fallback: auto-generate preview from CSV global_mask.
         auto_annotations = []
         try:
             from auth import load_users

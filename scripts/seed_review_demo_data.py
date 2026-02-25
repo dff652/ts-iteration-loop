@@ -18,7 +18,7 @@ import math
 import random
 import sys
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Tuple
 
@@ -99,7 +99,7 @@ def _annotation_payload(point_name: str, source_kind: str, segs: List[Tuple[int,
                 },
             }
         ],
-        "export_time": datetime.utcnow().isoformat(),
+        "export_time": datetime.now(timezone.utc).isoformat(),
     }
 
 
@@ -206,7 +206,7 @@ def seed_demo_data(user: str, prefix: str, reset: bool, delete_csv_on_reset: boo
                     score_max=min(1.0, float(spec["score"]) + 0.06),
                     segment_count=len(spec["segments"]),
                     meta=json.dumps({"demo": True, "source_kind": spec["source_kind"]}, ensure_ascii=False),
-                    created_at=datetime.utcnow(),
+                    created_at=datetime.now(timezone.utc).replace(tzinfo=None),
                 )
                 db.add(inf)
             else:
@@ -244,7 +244,7 @@ def seed_demo_data(user: str, prefix: str, reset: bool, delete_csv_on_reset: boo
                 rq.strategy = "topk"
                 rq.status = spec["status"]
                 rq.reviewer = user
-                rq.updated_at = datetime.utcnow()
+                rq.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
             upserted_rq += 1
 
         db.commit()

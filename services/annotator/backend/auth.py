@@ -4,7 +4,7 @@
 """
 
 import jwt
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from functools import wraps
 from flask import request, jsonify
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -44,10 +44,11 @@ def save_users(users):
 
 def generate_token(username):
     """生成JWT token"""
+    now_utc = datetime.now(timezone.utc)
     payload = {
         'username': username,
-        'exp': datetime.utcnow() + timedelta(hours=TOKEN_EXPIRATION_HOURS),
-        'iat': datetime.utcnow()
+        'exp': now_utc + timedelta(hours=TOKEN_EXPIRATION_HOURS),
+        'iat': now_utc
     }
     return jwt.encode(payload, SECRET_KEY, algorithm='HS256')
 

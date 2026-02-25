@@ -12,6 +12,9 @@ from pathlib import Path
 from typing import List, Dict, Optional
 
 from configs.settings import settings
+from src.core.logging_config import get_logger
+
+logger = get_logger(__name__)
 
 
 class ChatTSTrainingAdapter:
@@ -219,7 +222,7 @@ class ChatTSTrainingAdapter:
             with open(info_path, 'w') as f:
                 json.dump(new_info, f, indent=4, ensure_ascii=False)
         except Exception as e:
-            print(f"Sync datasets failed: {e}")
+            logger.warning("同步数据集失败: %s", e, exc_info=True)
 
     def _build_chatts_dataset_info(self, training_dir: Path) -> Dict[str, Dict]:
         """构建 ChatTS 数据集信息（支持文件/目录）"""
@@ -418,7 +421,7 @@ class ChatTSTrainingAdapter:
                 except:
                     error_msg += "无法读取日志文件"
                 
-                print(f"[ERROR] {error_msg}") # 打印到后台控制台
+                logger.error("WebUI 启动失败: %s", error_msg)
                 self._running_processes.pop(task_id)
                 return {"success": False, "message": "启动失败，请查看日志", "error": error_msg}
             

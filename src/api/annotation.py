@@ -2,21 +2,32 @@
 标注服务 API
 集成 timeseries-annotator-v2 项目
 """
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException
 from sqlalchemy.orm import Session
-from typing import List
+from typing import Any, List, Optional
 import json
 import httpx
+from pydantic import BaseModel
 
+from src.adapters.annotation_export import AnnotationExportAdapter
+from src.adapters.annotation_import import AnnotationImportAdapter
+from src.core.logging_config import get_logger
 from src.db.database import get_db
 from src.models.schemas import AnnotationFile, ApiResponse
 from configs.settings import settings
 
 router = APIRouter()
+logger = get_logger(__name__)
 
 
 # 标注工具 API 基础 URL
 ANNOTATOR_API = settings.ANNOTATOR_API_URL
+
+
+class ImportInferenceRequest(BaseModel):
+    inference_file: Optional[str] = None
+    rows: Optional[List[dict[str, Any]]] = None
+    token: Optional[str] = None
 
 
 @router.get("/files", response_model=ApiResponse)
@@ -82,51 +93,60 @@ async def save_annotations(filename: str, annotations: AnnotationFile, token: st
 
 
 @router.post("/import-inference", response_model=ApiResponse)
-async def import_inference_results(inference_file: str):
+async def import_inference_results(
+    inference_file: Optional[str] = None,
+    request: Optional[ImportInferenceRequest] = Body(default=None),
+):
     """
     导入推理结果作为预标注
     用于迭代循环中的反馈机制
     """
     try:
-        result = await import_inference_results_internal(inference_file)
+        req_file = inference_file or ((request.inference_file if request else None) or "")
+        req_rows = request.rows if request else None
+        req_token = request.token if request else None
+        import_mode = "rows"
+        deprecated_file_mode = False
+
+        if isinstance(req_rows, list):
+            result = await import_inference_rows_internal(req_rows, token=req_token)
+        elif req_file:
+            import_mode = "file_compat"
+            deprecated_file_mode = True
+            logger.warning("annotation/import-inference 使用文件路径兼容模式，建议改为 rows 直传")
+            result = await import_inference_results_internal(req_file, token=req_token)
+        else:
+            raise HTTPException(status_code=400, detail="必须提供 inference_file 或 rows")
+
+        message = f"成功导入 {result['count']} 个文件的预标注"
+        if deprecated_file_mode:
+            message += "（文件路径模式兼容，建议改用 rows）"
+
         return ApiResponse(
             success=True,
-            data={"imported_count": result["count"]},
-            message=f"成功导入 {result['count']} 个文件的预标注"
+            data={
+                "imported_count": result["count"],
+                "mode": import_mode,
+                "deprecated_file_mode": deprecated_file_mode,
+            },
+            message=message,
         )
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-async def import_inference_results_internal(inference_file: str) -> dict:
+async def import_inference_results_internal(inference_file: str, token: Optional[str] = None) -> dict:
     """内部导入逻辑，支持跨模块调用"""
-    import json
-    from pathlib import Path
-    
-    file_path = Path(inference_file)
-    if not file_path.exists():
-        return {"success": False, "error": f"文件不存在: {inference_file}", "count": 0}
-    
-    with open(file_path, "r", encoding="utf-8") as f:
-        inference_data = json.load(f)
-    
-    # 转换为标注工具可接受的格式并导入
-    imported_count = 0
-    for item in inference_data:
-        filename = item.get("filename")
-        annotations = item.get("annotations", [])
-        
-        if filename and annotations:
-            # 调用标注工具 API 保存
-            async with httpx.AsyncClient() as client:
-                resp = await client.post(
-                    f"{ANNOTATOR_API}/api/annotations/{filename}",
-                    json={"annotations": annotations}
-                )
-                if resp.status_code == 200:
-                    imported_count += 1
-    
-    return {"success": True, "count": imported_count}
+    adapter = AnnotationImportAdapter(annotator_api_url=ANNOTATOR_API)
+    return await adapter.import_from_file(inference_file, token=token)
+
+
+async def import_inference_rows_internal(rows: List[dict[str, Any]], token: Optional[str] = None) -> dict:
+    """内部导入逻辑：直接导入标注行（不依赖中间文件）。"""
+    adapter = AnnotationImportAdapter(annotator_api_url=ANNOTATOR_API)
+    return await adapter.import_rows(rows, token=token)
 
 
 @router.get("/export/training-data", response_model=ApiResponse)
@@ -138,21 +158,20 @@ async def export_training_data(output_path: str = None, approved_only: bool = Tr
     try:
         import tempfile
         from pathlib import Path
-        from src.adapters.data_processing import DataProcessingAdapter
         from src.db.database import SessionLocal, AnnotationRecord, ReviewQueue
-        from src.utils.annotation_store import normalize_point_name, record_to_payload
+        from src.utils.annotation_store import canonical_point_id, record_to_payload
         
-        adapter = DataProcessingAdapter()
+        adapter = AnnotationExportAdapter()
         
         approved_set = None
         if approved_only:
             db = SessionLocal()
             try:
-                rows = db.query(ReviewQueue.source_id).filter(
+                rows = db.query(ReviewQueue.point_id, ReviewQueue.source_id).filter(
                     ReviewQueue.source_type == 'annotation',
                     ReviewQueue.status == 'approved'
                 ).all()
-                approved_set = {normalize_point_name(str(row[0])) for row in rows}
+                approved_set = {canonical_point_id(row[0], row[1]) for row in rows if canonical_point_id(row[0], row[1])}
             finally:
                 db.close()
 
@@ -169,7 +188,7 @@ async def export_training_data(output_path: str = None, approved_only: bool = Tr
                     .all()
                 )
                 for row in rows:
-                    normalized = normalize_point_name(row.source_id or row.filename)
+                    normalized = canonical_point_id(getattr(row, "point_id", None), row.source_id, row.filename)
                     if approved_set is not None and normalized not in approved_set:
                         continue
                     data = record_to_payload(row)

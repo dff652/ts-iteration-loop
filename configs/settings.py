@@ -3,7 +3,7 @@
 import os
 import sys
 from pathlib import Path
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # 项目根目录
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     
     # 用户配置
     DEFAULT_USER: str = "douff"
+    DEFAULT_ORG: str = "default"
     
     # 数据库
     DATABASE_URL: str = f"sqlite:///{PROJECT_ROOT}/data/iteration_loop.db"
@@ -101,6 +102,7 @@ class Settings(BaseSettings):
     
     # 标注工具配置 (复用 JWT)
     ANNOTATOR_API_URL: str = "http://localhost:5000"
+    ANNOTATION_ALLOW_CSV_FALLBACK: bool = False
     JWT_SECRET_KEY: str = "your-secret-key"  # 需与标注工具一致
     JWT_ALGORITHM: str = "HS256"
     
@@ -115,7 +117,6 @@ class Settings(BaseSettings):
     # 版本管理
     VERSIONS_DIR: str = str(PROJECT_ROOT / "data" / "versions")
     
-    class Config:
-        env_file = ".env"
+    model_config = SettingsConfigDict(env_file=".env")
 
 settings = Settings()

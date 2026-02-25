@@ -1,13 +1,12 @@
 """
 数据库模型和连接
 """
-from datetime import datetime
 from sqlalchemy import create_engine, Column, Integer, String, DateTime, Text, Enum, Float, Boolean
 from sqlalchemy.sql import func
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import declarative_base, sessionmaker
 
 from configs.settings import settings
+from src.utils.time_utils import utc_now_naive
 
 # 创建数据库引擎
 engine = create_engine(
@@ -34,7 +33,7 @@ class Task(Base):
     config = Column(Text)  # JSON 配置
     result = Column(Text)  # JSON 结果
     error = Column(Text)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=utc_now_naive)
     started_at = Column(DateTime)
     completed_at = Column(DateTime)
 
@@ -50,7 +49,7 @@ class IterationVersion(Base):
     annotation_count = Column(Integer, default=0)
     model_path = Column(String(500))
     metrics = Column(Text)  # JSON 指标
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=utc_now_naive)
 
 
 class Dataset(Base):
@@ -63,7 +62,7 @@ class Dataset(Base):
     point_count = Column(Integer)
     source = Column(String(500))  # 来源 (IoTDB路径等)
     version_id = Column(String(36))  # 关联迭代版本
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=utc_now_naive)
 
 
 class DatasetAsset(Base):
@@ -72,12 +71,16 @@ class DatasetAsset(Base):
 
     id = Column(String(36), primary_key=True)
     name = Column(String(200), nullable=False)
+    owner_id = Column(String(100), default=settings.DEFAULT_USER)
+    org_id = Column(String(100), default=settings.DEFAULT_ORG)
+    created_by = Column(String(100), default=settings.DEFAULT_USER)
+    updated_by = Column(String(100), default=settings.DEFAULT_USER)
     dataset_type = Column(String(20), nullable=False)  # train / golden
     status = Column(String(20), default="draft")  # draft / frozen
     point_count = Column(Integer, default=0)
     meta = Column(Text)  # JSON
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=func.now())
+    created_at = Column(DateTime, default=utc_now_naive)
+    updated_at = Column(DateTime, default=utc_now_naive, onupdate=func.now())
 
 
 class DatasetItem(Base):
@@ -86,8 +89,9 @@ class DatasetItem(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     dataset_id = Column(String(36), nullable=False)
+    point_id = Column(String(200))
     point_name = Column(String(200), nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=utc_now_naive)
 
 
 class AnnotationRecord(Base):
@@ -96,6 +100,7 @@ class AnnotationRecord(Base):
 
     id = Column(String(36), primary_key=True)
     user_id = Column(String(100), nullable=False)
+    point_id = Column(String(200))
     source_id = Column(String(200), nullable=False)  # 规范化点位名
     filename = Column(String(500), nullable=False)
     source_kind = Column(String(20), default="human")  # auto / human
@@ -108,8 +113,8 @@ class AnnotationRecord(Base):
     overall_attribute_json = Column(Text)  # JSON
     annotations_json = Column(Text)  # JSON
     meta = Column(Text)  # JSON
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=func.now())
+    created_at = Column(DateTime, default=utc_now_naive)
+    updated_at = Column(DateTime, default=utc_now_naive, onupdate=func.now())
 
 
 class AnnotationSegment(Base):
@@ -119,6 +124,7 @@ class AnnotationSegment(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     annotation_id = Column(String(36), nullable=False)
     user_id = Column(String(100), nullable=False)
+    point_id = Column(String(200))
     source_id = Column(String(200), nullable=False)
     ann_index = Column(Integer, default=0)
     seg_index = Column(Integer, default=0)
@@ -129,8 +135,8 @@ class AnnotationSegment(Base):
     label_text = Column(String(200))
     score = Column(Float)
     review_status = Column(String(20), default="pending")
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=func.now())
+    created_at = Column(DateTime, default=utc_now_naive)
+    updated_at = Column(DateTime, default=utc_now_naive, onupdate=func.now())
 
 
 class InferenceResult(Base):
@@ -139,6 +145,7 @@ class InferenceResult(Base):
 
     id = Column(String(36), primary_key=True)
     task_id = Column(String(36))
+    point_id = Column(String(200))
     method = Column(String(50))
     model = Column(String(200))
     point_name = Column(String(200))
@@ -149,7 +156,7 @@ class InferenceResult(Base):
     score_max = Column(Float)
     segment_count = Column(Integer)
     meta = Column(Text)  # JSON
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=utc_now_naive)
 
 
 class SegmentScore(Base):
@@ -164,7 +171,7 @@ class SegmentScore(Base):
     raw_p = Column(Float)
     left = Column(Float)
     right = Column(Float)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=utc_now_naive)
 
 
 class MetricRecord(Base):
@@ -176,7 +183,7 @@ class MetricRecord(Base):
     owner_id = Column(String(36))
     name = Column(String(100))
     data = Column(Text)  # JSON
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=utc_now_naive)
 
 
 class ReviewQueue(Base):
@@ -186,6 +193,7 @@ class ReviewQueue(Base):
     id = Column(String(36), primary_key=True)
     source_type = Column(String(50))  # inference / annotation
     source_id = Column(String(36))
+    point_id = Column(String(200))
     method = Column(String(50))
     model = Column(String(200))
     point_name = Column(String(200))
@@ -193,8 +201,8 @@ class ReviewQueue(Base):
     strategy = Column(String(50))  # topk / low_score / random
     status = Column(String(20), default="pending")
     reviewer = Column(String(100))
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=func.now())
+    created_at = Column(DateTime, default=utc_now_naive)
+    updated_at = Column(DateTime, default=utc_now_naive, onupdate=func.now())
 
 
 class ModelEval(Base):
@@ -205,7 +213,7 @@ class ModelEval(Base):
     model_path = Column(String(500))
     dataset_name = Column(String(200))
     metrics = Column(Text)  # JSON
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=utc_now_naive)
 
 
 # 创建所有表

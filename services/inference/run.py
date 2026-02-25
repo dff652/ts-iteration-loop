@@ -40,7 +40,7 @@ import patch_transformers
 
 import sys
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 # Ensure project root is on sys.path for DB access (src/...)
@@ -765,7 +765,7 @@ def _write_eval_outputs(series, mask, save_info, args, position_index=None, extr
     segments_path = os.path.join(save_info["folder_path"], f"{save_info['file_stem']}_segments.json")
 
     model_path = _get_model_path(args)
-    generated_at = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    generated_at = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
     metrics_payload = {
         "version": 1,
         "summary": summary,
@@ -842,9 +842,11 @@ def _write_inference_to_db(task_id, save_info, eval_result, args, sensor_info):
     }
 
     try:
+        from src.utils.annotation_store import canonical_point_id
         record = InferenceResult(
             id=inference_id,
             task_id=task_id,
+            point_id=canonical_point_id(save_info.get("output_point", "")),
             method=getattr(args, "method", ""),
             model=_get_model_path(args),
             point_name=save_info.get("output_point", ""),

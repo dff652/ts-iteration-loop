@@ -3,6 +3,7 @@
 
 与 /home/douff/ilabel/qwen3-vl-8B-test/reasoning/Qwen3-VL_test.py 保持一致的图像生成逻辑
 """
+import logging
 
 import matplotlib
 matplotlib.use('Agg')
@@ -14,6 +15,8 @@ from pathlib import Path
 from io import BytesIO
 from PIL import Image
 from typing import Tuple, List, Optional
+
+logger = logging.getLogger("ts.utils.plot")
 
 
 # ==================== 图像配置 ====================
@@ -149,5 +152,5 @@ def generate_ts_thumbnail(data, save_path: str) -> bool:
         return True
         
     except Exception as e:
-        print(f"Failed to generate plot: {save_path} | Error: {e}")
+        logger.error("图像生成失败: %s | 错误: %s", save_path, e)
         return False

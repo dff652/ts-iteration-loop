@@ -4,7 +4,7 @@ import json
 import os
 import sys
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -290,7 +290,7 @@ def main() -> int:
                     "metrics_path": str(metrics_path),
                     "segments_path": str(segments_path),
                     "model_path": "",
-                    "generated_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+                    "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
                 }
             write_json(metrics_path, metrics_payload)
             write_json(segments_path, segments)

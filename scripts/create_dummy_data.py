@@ -4,7 +4,7 @@ import sys
 import json
 import csv
 import random
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 # Add project root to sys.path
@@ -103,7 +103,7 @@ def create_dummy_data():
                 score_max=min(1.0, cfg['score'] + 0.05),
                 segment_count=2,
                 meta=json.dumps({"description": "dummy data for testing"}),
-                created_at=datetime.utcnow()
+                created_at=datetime.now(timezone.utc).replace(tzinfo=None)
             )
             db.add(record)
     

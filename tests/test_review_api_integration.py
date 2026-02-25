@@ -1,5 +1,5 @@
 import importlib
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -74,7 +74,7 @@ def _insert_inference_rows(session_local, rows):
                     score_max=row.get("score_max", row.get("score_avg", 0.0)),
                     segment_count=row.get("segment_count", 0),
                     meta=row.get("meta", "{}"),
-                    created_at=row.get("created_at", datetime.utcnow()),
+                    created_at=row.get("created_at", datetime.now(timezone.utc).replace(tzinfo=None)),
                 )
             )
         db.commit()
@@ -240,3 +240,31 @@ def test_annotations_db_first_save_get_and_file_marker(annotator_env):
         assert stored is not None
         assert stored.source_kind == "auto"
         assert int(stored.segment_count or 0) == 1
+
+
+def test_get_annotations_does_not_fallback_to_csv_by_default(annotator_env):
+    client = annotator_env["client"]
+    user_data_dir: Path = annotator_env["user_data_dir"]
+
+    (user_data_dir / "mask.csv").write_text("global_mask\n0\n1\n1\n0\n", encoding="utf-8")
+
+    resp = client.get("/api/annotations/mask.csv")
+    payload = resp.get_json()
+    assert resp.status_code == 200
+    assert payload["success"] is True
+    assert payload["filename"] == "mask.csv"
+    assert payload["annotations"] == []
+
+
+def test_get_annotations_allows_csv_fallback_when_explicitly_enabled(annotator_env):
+    client = annotator_env["client"]
+    user_data_dir: Path = annotator_env["user_data_dir"]
+
+    (user_data_dir / "mask2.csv").write_text("global_mask\n0\n1\n1\n0\n", encoding="utf-8")
+
+    resp = client.get("/api/annotations/mask2.csv?allow_csv_fallback=true")
+    payload = resp.get_json()
+    assert resp.status_code == 200
+    assert payload["success"] is True
+    assert payload["filename"] == "mask2.csv"
+    assert len(payload["annotations"]) >= 1

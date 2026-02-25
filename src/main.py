@@ -21,11 +21,16 @@ from fastapi.responses import RedirectResponse
 import gradio as gr
 
 from configs.settings import settings
+from src.core.logging_config import setup_logging, get_logger
 from src.db.database import init_db
 from src.db.migration import apply_pending_migrations
 
+# 初始化日志（必须在所有业务模块导入前调用）
+setup_logging()
+logger = get_logger(__name__)
+
 # 导入 API 路由
-from src.api import data, annotation, training, inference, assets
+from src.api import data, annotation, training, inference, assets, points
 
 # 导入 Gradio 界面
 from src.webui.training_ui import training_ui
@@ -38,13 +43,13 @@ async def lifespan(app: FastAPI):
     # Startup logic
     init_db()
     applied = apply_pending_migrations()
-    print("=" * 60)
-    print(f"🚀 {settings.APP_NAME} 启动成功")
-    print(f"📖 API 文档: http://localhost:{settings.API_PORT}/docs")
-    print(f"🎯 微调界面: http://localhost:{settings.API_PORT}/train-ui")
+    logger.info("=" * 60)
+    logger.info("🚀 %s 启动成功", settings.APP_NAME)
+    logger.info("📖 API 文档: http://localhost:%s/docs", settings.API_PORT)
+    logger.info("🎯 微调界面: http://localhost:%s/train-ui", settings.API_PORT)
     if applied:
-        print(f"🗄️ 已应用迁移: {', '.join(applied)}")
-    print("=" * 60)
+        logger.info("🗄️ 已应用迁移: %s", ", ".join(applied))
+    logger.info("=" * 60)
     yield
     # Shutdown logic if needed
 
@@ -72,6 +77,7 @@ app.include_router(annotation.router, prefix="/api/v1/annotation", tags=["标注
 app.include_router(training.router, prefix="/api/v1/training", tags=["微调服务"])
 app.include_router(inference.router, prefix="/api/v1/inference", tags=["推理服务"])
 app.include_router(assets.router, prefix="/api/v1/assets", tags=["数据资产"])
+app.include_router(points.router, prefix="/api/v1/points", tags=["点位中心"])
 
 # 导入并注册迭代版本管理路由
 from src.api import iteration
@@ -98,6 +104,7 @@ async def root():
             "training": "/api/v1/training",
             "inference": "/api/v1/inference",
             "assets": "/api/v1/assets",
+            "points": "/api/v1/points",
         }
     }
 
@@ -108,22 +115,22 @@ async def redirect_to_train_ui():
 
 if __name__ == "__main__":
     # 启动 Annotator 后端子进程
-    print("-" * 60)
-    print("🚀正在启动 Annotator 后端服务 (Port: 5000)...")
+    logger.info("-" * 60)
+    logger.info("🚀正在启动 Annotator 后端服务 (Port: 5000)...")
     annotator_process = subprocess.Popen([sys.executable, "-m", "services.annotator.backend.app"])
     
     def cleanup():
         if annotator_process.poll() is None:
-            print(f"\n🛑 正在停止 Annotator 服务 (PID: {annotator_process.pid})...")
+            logger.info("🛑 正在停止 Annotator 服务 (PID: %s)...", annotator_process.pid)
             annotator_process.terminate()
             annotator_process.wait()
-            print("✅ Annotator 服务已停止")
+            logger.info("✅ Annotator 服务已停止")
             
     atexit.register(cleanup)
     
     # 等待几秒让后端启动
     time.sleep(2)
-    print("-" * 60)
+    logger.info("-" * 60)
 
     uvicorn.run(
         "src.main:app",

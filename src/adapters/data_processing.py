@@ -1,8 +1,7 @@
 """
 Data-Processing 项目适配器
-封装数据采集和转换功能
+封装数据采集与数据集文件管理功能
 """
-import os
 import subprocess
 import pandas as pd
 from pathlib import Path
@@ -218,63 +217,3 @@ class DataProcessingAdapter:
                 
         except Exception as e:
             yield f"❌ **Error:** {str(e)}"
-    
-    def convert_annotations(self, input_dir: str, output_path: str, image_dir: str = None, filename: str = None, model_family: str = "qwen", csv_src_dir: str = None) -> Dict:
-        """
-        转换标注格式
-        调用 convert_annotations.py 脚本
-        """
-        script_path = self.scripts_path / "transformation" / "convert_annotations.py"
-        
-        if not script_path.exists():
-            return {"success": False, "error": f"脚本不存在: {script_path}"}
-        
-        if image_dir is None:
-            # 默认图片目录
-            image_dir = str(self.data_path)
-
-        python_exe = settings.PYTHON_UNIFIED if settings.USE_LOCAL_MODULES else settings.PYTHON_DATA_PROCESSING
-        cmd = [
-            python_exe, str(script_path),
-            "--input-dir", input_dir,
-            "--image-dir", image_dir,
-            "--output", output_path,
-            "--format", model_family  # chatts or qwen
-        ]
-        
-        if csv_src_dir:
-             cmd.extend(["--csv-src", csv_src_dir])
-        
-        if filename:
-             cmd.extend(["--file", filename])
-        
-        try:
-            result = subprocess.run(
-                cmd,
-                cwd=str(self.project_path),
-                capture_output=True,
-                text=True,
-                timeout=600
-            )
-            output_path_final = output_path
-            try:
-                import re
-                stdout = result.stdout or ""
-                match = re.search(r"所有转换结果已保存到:\\s*(.+)", stdout)
-                if not match:
-                    match = re.search(r"单文件已更新至:\\s*(.+)", stdout)
-                if match:
-                    candidate = match.group(1).strip()
-                    if candidate:
-                        output_path_final = candidate
-            except Exception:
-                pass
-
-            return {
-                "success": result.returncode == 0,
-                "output_path": output_path_final,
-                "stdout": result.stdout,
-                "stderr": result.stderr
-            }
-        except Exception as e:
-            return {"success": False, "error": str(e)}
