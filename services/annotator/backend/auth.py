@@ -12,11 +12,32 @@ import json
 import os
 
 # JWT配置
-SECRET_KEY = os.environ.get('JWT_SECRET_KEY', 'your-secret-key-change-this-in-production')
 TOKEN_EXPIRATION_HOURS = 24
+_SECRET_CACHE = None
 
 # 用户数据文件
 USERS_FILE = os.path.join(os.path.dirname(__file__), 'users.json')
+
+
+def _get_secret_key():
+    global _SECRET_CACHE
+    if _SECRET_CACHE:
+        return _SECRET_CACHE
+
+    secret = str(os.environ.get('JWT_SECRET_KEY', '')).strip()
+    weak_values = {
+        "",
+        "your-secret-key",
+        "your-secret-key-change-this-in-production",
+        "change-me",
+        "default",
+        "test",
+    }
+    if len(secret) < 32 or secret.lower() in weak_values:
+        raise RuntimeError("JWT_SECRET_KEY 未配置或过弱（要求长度不少于 32）")
+
+    _SECRET_CACHE = secret
+    return _SECRET_CACHE
 
 
 def load_users():
@@ -50,7 +71,7 @@ def generate_token(username):
         'exp': now_utc + timedelta(hours=TOKEN_EXPIRATION_HOURS),
         'iat': now_utc
     }
-    return jwt.encode(payload, SECRET_KEY, algorithm='HS256')
+    return jwt.encode(payload, _get_secret_key(), algorithm='HS256')
 
 
 def verify_token(token):
@@ -58,8 +79,10 @@ def verify_token(token):
     try:
         if token.startswith('Bearer '):
             token = token[7:]
-        payload = jwt.decode(token, SECRET_KEY, algorithms=['HS256'])
+        payload = jwt.decode(token, _get_secret_key(), algorithms=['HS256'])
         return payload['username']
+    except RuntimeError:
+        return None
     except jwt.ExpiredSignatureError:
         return None
     except jwt.InvalidTokenError:

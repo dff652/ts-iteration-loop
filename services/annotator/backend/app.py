@@ -436,8 +436,8 @@ def fetch_from_iotdb(metadata: dict) -> pd.DataFrame:
             config = {
                 "host": "192.168.199.185",
                 "port": "6667",
-                "user": "root",
-                "password": "root"
+                "user": os.environ.get("IOTDB_USER", ""),
+                "password": os.environ.get("IOTDB_PASSWORD", ""),
             }
         
         from iotdb.Session import Session

@@ -103,8 +103,9 @@ class Settings(BaseSettings):
     # 标注工具配置 (复用 JWT)
     ANNOTATOR_API_URL: str = "http://localhost:5000"
     ANNOTATION_ALLOW_CSV_FALLBACK: bool = False
-    JWT_SECRET_KEY: str = "your-secret-key"  # 需与标注工具一致
+    JWT_SECRET_KEY: str = ""
     JWT_ALGORITHM: str = "HS256"
+    CORS_ALLOW_ORIGINS: str = "http://localhost:8000,http://127.0.0.1:8000,http://localhost:5173,http://127.0.0.1:5173"
     
     # Redis (任务队列) - Temporary switch to SQLite for verification
     # REDIS_URL: str = "redis://localhost:6379/0"
@@ -116,6 +117,34 @@ class Settings(BaseSettings):
     
     # 版本管理
     VERSIONS_DIR: str = str(PROJECT_ROOT / "data" / "versions")
+
+    @property
+    def cors_allow_origins(self) -> list[str]:
+        return [x.strip() for x in str(self.CORS_ALLOW_ORIGINS or "").split(",") if x.strip()]
+
+    def validate_security_settings(self) -> None:
+        errors: list[str] = []
+
+        secret = str(self.JWT_SECRET_KEY or "").strip()
+        weak_values = {
+            "",
+            "your-secret-key",
+            "your-secret-key-change-this-in-production",
+            "change-me",
+            "default",
+            "test",
+        }
+        if len(secret) < 32 or secret.lower() in weak_values:
+            errors.append("JWT_SECRET_KEY 必须通过环境变量配置，且长度不少于 32")
+
+        origins = self.cors_allow_origins
+        if not origins:
+            errors.append("CORS_ALLOW_ORIGINS 不能为空")
+        elif any(origin == "*" for origin in origins):
+            errors.append("CORS_ALLOW_ORIGINS 不允许使用 '*'，请改为显式白名单")
+
+        if errors:
+            raise RuntimeError("安全配置校验失败: " + "; ".join(errors))
     
     model_config = SettingsConfigDict(env_file=".env")
 

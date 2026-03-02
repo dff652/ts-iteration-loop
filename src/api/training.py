@@ -188,6 +188,11 @@ async def get_training_status(task_id: str, db: Session = Depends(get_db)):
     if status_text in {TaskStatus.PENDING, TaskStatus.RUNNING}:
         try:
             progress = get_adapter_from_task(task).get_training_progress(task_id)
+            if (
+                not isinstance(progress, dict)
+                or str(progress.get("status") or "").lower() in {"", "unknown"}
+            ):
+                progress = {"status": status_text or "unknown", "progress": 0}
         except Exception:
             progress = {"status": status_text or "unknown", "progress": 0}
 

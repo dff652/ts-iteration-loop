@@ -35,7 +35,7 @@ def run_training_task(
     self,
     task_id: str,
     config_name: str,
-    version_tag: str,
+    version_tag: str | None,
     model_family: str = "chatts",
     auto_eval: bool = False,
     eval_truth_dir: str | None = None,
@@ -60,10 +60,13 @@ def run_training_task(
     
     adapter = ChatTSTrainingAdapter(model_family=model_family or "chatts")
     db = SessionLocal()
+    task = None
     
     try:
         # 更新任务状态为运行中
         task = db.query(Task).filter(Task.id == task_id).first()
+        if task and task.status == "cancelled":
+            return {"success": False, "cancelled": True, "message": "任务已取消"}
         if task:
             task.status = "running"
             task.started_at = utc_now_naive()
@@ -112,6 +115,11 @@ def run_training_task(
                 if isinstance(k, str) and k in allowed_override_keys
             }
 
+        def _should_cancel() -> bool:
+            db.expire_all()
+            state = db.query(Task.status).filter(Task.id == task_id).scalar()
+            return str(state or "").lower() == "cancelled"
+
         result = adapter.run_training(
             task_id=task_id,
             config_name=config_name,
@@ -123,15 +131,20 @@ def run_training_task(
             eval_output_dir=eval_output_dir,
             eval_device=eval_device,
             eval_method=eval_method,
+            wait_for_completion=True,
+            should_cancel=_should_cancel,
             **runtime_overrides,
         )
         
         # 更新任务状态
         if task:
-            task.status = "completed" if result.get("success") else "failed"
+            if result.get("cancelled"):
+                task.status = "cancelled"
+            else:
+                task.status = "completed" if result.get("success") else "failed"
             task.completed_at = utc_now_naive()
             task.result = json.dumps(result)
-            if not result.get("success"):
+            if task.status == "failed":
                 task.error = result.get("error", "Unknown error")
             db.commit()
         
@@ -286,8 +299,8 @@ def run_acquire_task(
     end_time: str | None,
     host: str = "192.168.199.185",
     port: str = "6667",
-    user: str = "root",
-    password: str = "root",
+    user: str = "",
+    password: str = "",
     point_name: str = "*",
 ):
     """

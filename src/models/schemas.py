@@ -3,7 +3,7 @@
 """
 from datetime import datetime
 from typing import Optional, List
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 from enum import Enum
 
 
@@ -33,12 +33,20 @@ class AcquireTaskRequest(BaseModel):
     source: str  # IoTDB 路径
     host: str = "192.168.199.185"
     port: str = "6667"
-    user: str = "root"
-    password: str = "root"
+    user: str = Field(..., min_length=1)
+    password: str = Field(..., min_length=1)
     point_name: str = "*"
     target_points: int = 5000  # 降采样目标点数
     start_time: Optional[str] = None
     end_time: Optional[str] = None
+
+    @field_validator("user", "password")
+    @classmethod
+    def _validate_non_empty(cls, value: str) -> str:
+        normalized = str(value or "").strip()
+        if not normalized:
+            raise ValueError("字段不能为空")
+        return normalized
 
 
 # ==================== 标注服务 ====================

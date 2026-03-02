@@ -8,8 +8,9 @@ import subprocess
 import signal
 import sys
 import threading
+import time
 from pathlib import Path
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Callable
 
 from configs.settings import settings
 from src.core.logging_config import get_logger
@@ -29,7 +30,7 @@ class ChatTSTrainingAdapter:
         self.data_path = Path(self._get_data_dir())
         
         # 运行中的训练进程
-        self._running_processes: Dict[str, subprocess.Popen] = {}
+        self._running_processes: Dict[str, Dict[str, object]] = {}
     
     def list_configs(self) -> List[Dict]:
         """列出可用的训练配置"""
@@ -472,6 +473,8 @@ class ChatTSTrainingAdapter:
         override_freeze_multi_modal_projector: Optional[str] = None,
         override_freeze_trainable_layers: Optional[str] = None,
         override_freeze_trainable_modules: Optional[str] = None,
+        wait_for_completion: bool = False,
+        should_cancel: Optional[Callable[[], bool]] = None,
     ) -> Dict:
         """
         执行训练任务 (支持 Quick Start 参数覆盖)
@@ -637,7 +640,7 @@ class ChatTSTrainingAdapter:
                 "auto_eval_status": "pending" if auto_eval else "disabled",
             }
 
-            if auto_eval:
+            if not wait_for_completion and auto_eval:
                 self._schedule_auto_eval(
                     task_id=task_id,
                     model_path=str(output_dir),
@@ -648,7 +651,23 @@ class ChatTSTrainingAdapter:
                     device=eval_device,
                     method=eval_method,
                 )
-            
+
+            if wait_for_completion:
+                return self._wait_for_training_completion(
+                    task_id=task_id,
+                    output_dir=output_dir,
+                    process=process,
+                    file_handle=f_log,
+                    auto_eval=auto_eval,
+                    eval_truth_dir=eval_truth_dir or settings.EVAL_GOLDEN_TRUTH_DIR,
+                    eval_data_dir=eval_data_dir or settings.EVAL_GOLDEN_DATA_DIR,
+                    eval_dataset_name=eval_dataset_name or settings.EVAL_DEFAULT_DATASET_NAME,
+                    eval_output_dir=eval_output_dir or settings.EVAL_DEFAULT_OUTPUT_DIR,
+                    eval_device=eval_device,
+                    eval_method=eval_method,
+                    should_cancel=should_cancel,
+                )
+
             return {
                 "success": True,
                 "message": f"训练已启动 (PID: {process.pid})，正在写入日志: {log_file.name}",
@@ -657,6 +676,114 @@ class ChatTSTrainingAdapter:
             }
         except Exception as e:
              return {"success": False, "error": str(e)}
+
+    @staticmethod
+    def _terminate_process(process: subprocess.Popen) -> int:
+        try:
+            process.terminate()
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
+        return int(process.returncode) if process.returncode is not None else -1
+
+    def _run_auto_eval_inline(
+        self,
+        task_id: str,
+        model_path: str,
+        truth_dir: Optional[str],
+        data_dir: Optional[str],
+        dataset_name: str,
+        output_dir: Optional[str],
+        device: Optional[str],
+        method: Optional[str],
+    ) -> Dict:
+        if not truth_dir or not data_dir:
+            return {"status": "skipped_missing_paths", "result": None}
+        try:
+            from src.utils.model_eval import evaluate_model_on_golden
+
+            result = evaluate_model_on_golden(
+                model_path=model_path,
+                model_family=self.model_family,
+                truth_dir=truth_dir,
+                data_dir=data_dir,
+                dataset_name=dataset_name,
+                task_id=task_id,
+                output_dir=output_dir or None,
+                device=device,
+                method=method,
+            )
+            status = "completed" if result.get("success") else "failed"
+            return {"status": status, "result": result}
+        except Exception as e:
+            return {"status": f"failed: {e}", "result": None}
+
+    def _wait_for_training_completion(
+        self,
+        task_id: str,
+        output_dir: Path,
+        process: subprocess.Popen,
+        file_handle,
+        auto_eval: bool,
+        eval_truth_dir: Optional[str],
+        eval_data_dir: Optional[str],
+        eval_dataset_name: str,
+        eval_output_dir: Optional[str],
+        eval_device: Optional[str],
+        eval_method: Optional[str],
+        should_cancel: Optional[Callable[[], bool]] = None,
+    ) -> Dict:
+        cancelled = False
+        return_code: Optional[int] = None
+
+        try:
+            while True:
+                return_code = process.poll()
+                if return_code is not None:
+                    break
+                if should_cancel and should_cancel():
+                    cancelled = True
+                    return_code = self._terminate_process(process)
+                    break
+                time.sleep(1)
+        finally:
+            try:
+                file_handle.close()
+            except Exception:
+                pass
+            self._running_processes.pop(task_id, None)
+
+        result: Dict[str, object] = {
+            "success": bool(return_code == 0 and not cancelled),
+            "output_dir": str(output_dir),
+            "return_code": int(return_code or 0),
+            "cancelled": bool(cancelled),
+        }
+        if cancelled:
+            result["message"] = "训练任务已取消"
+            return result
+        if return_code != 0:
+            result["error"] = f"训练进程退出码: {return_code}"
+            return result
+
+        if auto_eval:
+            eval_result = self._run_auto_eval_inline(
+                task_id=task_id,
+                model_path=str(output_dir),
+                truth_dir=eval_truth_dir,
+                data_dir=eval_data_dir,
+                dataset_name=eval_dataset_name,
+                output_dir=eval_output_dir,
+                device=eval_device,
+                method=eval_method,
+            )
+            result["auto_eval_status"] = eval_result.get("status")
+            if eval_result.get("result") is not None:
+                result["auto_eval_result"] = eval_result.get("result")
+
+        result["message"] = "训练已完成"
+        return result
 
     def _schedule_auto_eval(
         self,
@@ -798,7 +925,7 @@ class ChatTSTrainingAdapter:
     def _replace_arg_val(self, content: str, arg_name: str, new_value: str) -> str:
         """替换命令行参数 --arg val """
         import re
-        pattern = re.compile(f'{arg_name}\s+["\']?.*?["\']?(\s|\\\\|$)', re.MULTILINE)
+        pattern = re.compile(rf'{re.escape(arg_name)}\s+["\']?.*?["\']?(\s|\\\\|$)', re.MULTILINE)
         if pattern.search(content):
             return pattern.sub(f'{arg_name} {new_value}\\1', content)
         return content

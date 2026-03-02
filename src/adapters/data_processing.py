@@ -19,6 +19,18 @@ class DataProcessingAdapter:
         self.scripts_path = self.project_path / "scripts"
         # 使用标准化数据目录
         self.data_path = Path(settings.DATA_DOWNSAMPLED_DIR)
+
+    def _resolve_dataset_path(self, filename: str) -> Path:
+        """Resolve a dataset file path and ensure it stays under data_path."""
+        candidate = (self.data_path / str(filename or "")).resolve()
+        root = self.data_path.resolve()
+        try:
+            candidate.relative_to(root)
+        except ValueError as exc:
+            raise ValueError("非法文件路径") from exc
+        if candidate.suffix.lower() != ".csv":
+            raise ValueError("仅支持 CSV 文件")
+        return candidate
     
     def list_datasets(self) -> List[Dict]:
         """列出所有数据集"""
@@ -50,7 +62,7 @@ class DataProcessingAdapter:
     
     def preview_csv(self, filename: str, limit: int = 5000) -> List[Dict]:
         """预览 CSV 文件"""
-        file_path = self.data_path / filename
+        file_path = self._resolve_dataset_path(filename)
         if not file_path.exists():
             raise FileNotFoundError(f"文件不存在: {filename}")
         
@@ -59,7 +71,10 @@ class DataProcessingAdapter:
     
     def delete_dataset(self, filename: str) -> Dict:
         """删除数据集文件及关联的图片"""
-        file_path = self.data_path / filename
+        try:
+            file_path = self._resolve_dataset_path(filename)
+        except ValueError as e:
+            return {"success": False, "error": str(e)}
         if not file_path.exists():
             return {"success": False, "error": f"文件不存在: {filename}"}
         
@@ -87,8 +102,8 @@ class DataProcessingAdapter:
         source: str,
         host: str = "192.168.199.185",
         port: str = "6667",
-        user: str = "root",
-        password: str = "root",
+        user: str = "",
+        password: str = "",
         point_name: str = "*",
         target_points: int = 5000,
         start_time: Optional[str] = None,
@@ -102,6 +117,8 @@ class DataProcessingAdapter:
         
         if not script_path.exists():
             return {"success": False, "error": f"脚本不存在: {script_path}"}
+        if not str(user or "").strip() or not str(password or "").strip():
+            return {"success": False, "error": "IoTDB 用户名和密码不能为空"}
         
         # 构建命令 - 使用 Python 解释器（统一模式使用 PYTHON_UNIFIED）
         python_exe = settings.PYTHON_UNIFIED if settings.USE_LOCAL_MODULES else settings.PYTHON_DATA_PROCESSING
@@ -150,8 +167,8 @@ class DataProcessingAdapter:
         source: str,
         host: str = "192.168.199.185",
         port: str = "6667",
-        user: str = "root",
-        password: str = "root",
+        user: str = "",
+        password: str = "",
         point_name: str = "*",
         target_points: int = 5000,
         start_time: Optional[str] = None,
@@ -165,6 +182,9 @@ class DataProcessingAdapter:
         
         if not script_path.exists():
             yield f"❌ 脚本不存在: {script_path}"
+            return
+        if not str(user or "").strip() or not str(password or "").strip():
+            yield "❌ IoTDB 用户名和密码不能为空"
             return
         
         # 构建命令

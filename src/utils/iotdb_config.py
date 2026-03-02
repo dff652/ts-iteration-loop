@@ -52,8 +52,8 @@ def load_iotdb_config(config_path: str = None) -> Dict[str, Any]:
     default_config = {
         "host": "192.168.199.185",
         "port": "6667",
-        "user": "root",
-        "password": "root",
+        "user": os.environ.get("IOTDB_USER", ""),
+        "password": os.environ.get("IOTDB_PASSWORD", ""),
         "default_path": "root.supcon.nb.whlj.LJSJ",
         "fetch_size": 2000000,
         "limit": 1000000000
@@ -73,6 +73,6 @@ def get_iotdb_connection_params() -> Dict[str, str]:
     return {
         "host": config.get("host", "192.168.199.185"),
         "port": config.get("port", "6667"),
-        "user": config.get("user", "root"),
-        "password": config.get("password", "root"),
+        "user": config.get("user", os.environ.get("IOTDB_USER", "")),
+        "password": config.get("password", os.environ.get("IOTDB_PASSWORD", "")),
     }

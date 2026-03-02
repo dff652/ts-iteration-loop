@@ -23,6 +23,13 @@ adapter = DataProcessingAdapter()
 logger = get_logger(__name__)
 
 
+def _sanitize_task_config(config: dict) -> dict:
+    masked = dict(config or {})
+    if masked.get("password"):
+        masked["password"] = "***"
+    return masked
+
+
 def _dispatch_acquire_task(task_id: str, request: AcquireTaskRequest) -> str:
     async_result = celery_app.send_task(
         "data.acquire",
@@ -118,11 +125,12 @@ async def start_acquire_task(
     task_id = str(uuid.uuid4())
     
     # 创建任务记录
+    initial_config = _sanitize_task_config(request.model_dump())
     task = Task(
         id=task_id,
         type="acquire",
         status=TaskStatus.PENDING,
-        config=request.model_dump_json()
+        config=json.dumps(initial_config, ensure_ascii=False)
     )
     db.add(task)
     db.commit()
@@ -136,7 +144,7 @@ async def start_acquire_task(
         db.commit()
         raise HTTPException(status_code=503, detail="任务队列不可用，提交失败")
 
-    config_data = request.model_dump()
+    config_data = _sanitize_task_config(request.model_dump())
     config_data.update({
         "executor": "celery",
         "celery_task_id": celery_task_id,
@@ -216,5 +224,7 @@ async def preview_data(filename: str, limit: int = 100):
         )
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail=f"文件不存在: {filename}")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

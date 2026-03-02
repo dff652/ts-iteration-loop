@@ -2,6 +2,8 @@ import asyncio
 import json
 from pathlib import Path
 
+import pytest
+from fastapi import HTTPException
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -52,11 +54,13 @@ def test_start_acquire_task_dispatches_to_celery(tmp_path, monkeypatch):
     assert captured["name"] == "data.acquire"
     assert captured["kwargs"]["task_id"] == resp.task_id
     assert captured["kwargs"]["source"] == "root.a.b"
+    assert captured["kwargs"]["password"] == "root"
     assert captured["kwargs"]["point_name"] == "FI_1.PV"
     assert task is not None
     cfg = json.loads(task.config or "{}")
     assert cfg.get("executor") == "celery"
     assert cfg.get("celery_task_id") == "celery-acquire-1"
+    assert cfg.get("password") == "***"
 
 
 def test_get_acquire_status_contract(tmp_path, monkeypatch):
@@ -120,3 +124,12 @@ def test_get_acquire_log_contract_incremental(tmp_path, monkeypatch):
     assert (resp1.data or {}).get("log") == "line-a\n"
     assert offset_1 == 7
     assert (resp2.data or {}).get("log") == "line-b\n\nwarn-x"
+
+
+def test_preview_rejects_path_traversal(tmp_path):
+    data_api.adapter.data_path = Path(tmp_path / "downsampled")
+    data_api.adapter.data_path.mkdir(parents=True, exist_ok=True)
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(data_api.preview_data("/etc/passwd", limit=10))
+    assert exc_info.value.status_code == 400

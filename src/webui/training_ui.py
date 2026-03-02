@@ -1559,8 +1559,8 @@ def create_training_ui() -> gr.Blocks:
                             host_input = gr.Textbox(label="Host", value=_iotdb_cfg.get("host", "192.168.199.185"))
                             port_input = gr.Textbox(label="Port", value=_iotdb_cfg.get("port", "6667"))
                         with gr.Row():
-                            user_input = gr.Textbox(label="User", value=_iotdb_cfg.get("user", "root"))
-                            pwd_input = gr.Textbox(label="Password", value=_iotdb_cfg.get("password", "root"), type="password")
+                            user_input = gr.Textbox(label="User", value=_iotdb_cfg.get("user", ""))
+                            pwd_input = gr.Textbox(label="Password", value=_iotdb_cfg.get("password", ""), type="password")
 
                     gr.Markdown("### 查询参数")
                     source_input = gr.Textbox(
