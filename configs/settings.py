@@ -111,6 +111,15 @@ class Settings(BaseSettings):
     # REDIS_URL: str = "redis://localhost:6379/0"
     CELERY_BROKER_URL: str = "sqla+sqlite:///" + str(PROJECT_ROOT / "data" / "celery_broker.db")
     CELERY_RESULT_BACKEND: str = "db+sqlite:///" + str(PROJECT_ROOT / "data" / "celery_results.db")
+    TASK_CENTER_ENABLED: bool = False
+    TASK_CENTER_EVENTS_ENABLED: bool = False
+    TASK_CENTER_EXECUTION_MODE: str = "dispatch"  # dispatch / simulate
+    TASK_CENTER_SCHEDULER_INTERVAL_SEC: int = 30
+    TASK_CENTER_WEBHOOK_SECRETS: str = ""
+    TASK_CENTER_WEBHOOK_SIGNATURE_HEADER: str = "X-TaskCenter-Signature"
+    TASK_CENTER_FILE_WATCH_INTERVAL_SEC: int = 15
+    TASK_CENTER_EVENT_RATE_LIMIT_PER_MIN: int = 300
+    TASK_CENTER_DEAD_LETTER_PATH: str = str(PROJECT_ROOT / "data" / "task_center_dead_letter.jsonl")
     
     # 数据处理配置 - 统一降采样参数确保数据链路一致性
     DEFAULT_DOWNSAMPLE_POINTS: int = 5000  # 与 Data-Processing 的 target_points 保持一致
@@ -123,7 +132,10 @@ class Settings(BaseSettings):
         return [x.strip() for x in str(self.CORS_ALLOW_ORIGINS or "").split(",") if x.strip()]
 
     def validate_security_settings(self) -> None:
+        import logging
+        _log = logging.getLogger(__name__)
         errors: list[str] = []
+        warnings: list[str] = []
 
         secret = str(self.JWT_SECRET_KEY or "").strip()
         weak_values = {
@@ -135,13 +147,20 @@ class Settings(BaseSettings):
             "test",
         }
         if len(secret) < 32 or secret.lower() in weak_values:
-            errors.append("JWT_SECRET_KEY 必须通过环境变量配置，且长度不少于 32")
+            msg = "JWT_SECRET_KEY 未配置或过弱（要求长度不少于 32），将使用开发环境默认密钥"
+            if self.DEBUG:
+                warnings.append(msg)
+            else:
+                errors.append("JWT_SECRET_KEY 必须通过环境变量配置，且长度不少于 32")
 
         origins = self.cors_allow_origins
         if not origins:
             errors.append("CORS_ALLOW_ORIGINS 不能为空")
         elif any(origin == "*" for origin in origins):
             errors.append("CORS_ALLOW_ORIGINS 不允许使用 '*'，请改为显式白名单")
+
+        for w in warnings:
+            _log.warning("⚠️ 安全配置警告: %s", w)
 
         if errors:
             raise RuntimeError("安全配置校验失败: " + "; ".join(errors))

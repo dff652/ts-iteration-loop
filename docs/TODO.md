@@ -1,5 +1,10 @@
 # TODO
 
+## 新需求（2026-03）入口
+
+- 新需求与下一步工作统一维护在：`docs/NEXT_PHASE_PLAN_2026Q1.md`
+- 本文（TODO）继续维护存量改造与跨阶段通用待办，避免重复登记。
+
 ## 当前执行顺序（已确认）
 
 ### P0（先做）
@@ -11,7 +16,12 @@
 - [x] 将“数据资产管理”从 WebUI 直连 DB 下沉为 API 层（`/api/v1/assets/...`）
 - [x] 引入数据库迁移机制（轻量 SQL 迁移 + `schema_migrations` + `scripts/db_migrate.py`）
 - [x] 统一任务执行模型（BackgroundTasks / UI 内部进程 / Celery），保证状态与日志口径一致（data/training/inference API 已切至 Celery 投递；WebUI 推理/数据获取/训练入口及训练 stop/log 轮询均已收敛到 API；三者 status/log 返回字段已对齐）
-- [ ] DB-First 统一数据结构（标注/索引/审核/资产共享同一实体与字段口径）
+- [x] 拆分 `task_center.py`（2000+行 API 单文件拆分为路由层及 5 个功能子模块），提升后端模块内聚并保证原有逻辑向后兼容
+- [x] 拆分 `database.py`，将 20+ 个 ORM 模型提取至 `src/db/models` 子包并保留原文件重导出以实现业务代码零侵入的无缝兼容
+- [x] DB-First 统一数据结构（标注/索引/审核/资产共享同一实体与字段口径）
+
+### P1后续规划（生产环境改造）
+- [ ] 规划并执行生产环境架构升级：将 Celery Broker 从 SQLite 迁移至 Redis，解决并发写入瓶颈与锁表隐患。
 
 ### P2（产品化增强）
 - [x] 统一版本号与文档口径（`settings.APP_VERSION` 与 docs 发布版本一致）

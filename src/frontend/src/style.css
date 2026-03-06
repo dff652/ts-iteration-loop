@@ -1,79 +1,163 @@
 :root {
-  font-family: system-ui, Avenir, Helvetica, Arial, sans-serif;
-  line-height: 1.5;
-  font-weight: 400;
+  /* Typography - 与标注工具一致 */
+  --font-display: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --font-body: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+  --font-mono: 'SF Mono', 'Monaco', 'Consolas', 'Courier New', monospace;
 
-  color-scheme: light dark;
-  color: rgba(255, 255, 255, 0.87);
-  background-color: #242424;
+  /* Light Theme - 对齐标注工具 Index.vue 风格 */
+  --bg-dark: #f5f5f5;
+  --bg-panel: #ffffff;
+  --bg-hover: #f8f8f8;
+  --accent-primary: #7E4C64;
+  --accent-primary-light: #f8f4f6;
+  --accent-primary-hover: #6a3f54;
+  --accent-cyan: #7E4C64;
+  /* 兼容旧引用 */
+  --accent-cyan-dim: rgba(126, 76, 100, 0.12);
+  --accent-red: #ef4444;
+  --text-primary: #333333;
+  --text-secondary: #666666;
+  --border-color: #e0e0e0;
+  --border-light: #eee;
 
-  font-synthesis: none;
-  text-rendering: optimizeLegibility;
+  /* Element Plus Light Theme Overrides */
+  --el-color-primary: var(--accent-primary);
+  --el-color-primary-light-3: #a67b8f;
+  --el-color-primary-light-5: #bf9dac;
+  --el-color-primary-light-7: #d8bfc9;
+  --el-color-primary-light-8: #e4d1d9;
+  --el-color-primary-light-9: var(--accent-primary-light);
+  --el-color-primary-dark-2: #6a3f54;
+
+  --el-color-danger: #ef4444;
+  --el-color-success: #22c55e;
+  --el-color-warning: #f59e0b;
+  --el-color-info: #8c8c8c;
+
+  --el-bg-color: var(--bg-panel);
+  --el-bg-color-page: var(--bg-dark);
+  --el-bg-color-overlay: var(--bg-panel);
+
+  --el-text-color-primary: var(--text-primary);
+  --el-text-color-regular: var(--text-primary);
+  --el-text-color-secondary: var(--text-secondary);
+
+  --el-border-color: var(--border-color);
+  --el-border-color-light: var(--border-light);
+  --el-border-color-lighter: #f0f0f0;
+  --el-fill-color-blank: var(--bg-panel);
+
+  /* Rounded corners & soft shadows */
+  --el-border-radius-base: 6px;
+  --el-border-radius-small: 4px;
+  --el-border-radius-round: 20px;
+  --el-border-radius-circle: 100%;
+  --el-box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+  --el-box-shadow-light: 0 1px 2px rgba(0, 0, 0, 0.06);
+  --el-box-shadow-lighter: 0 1px 1px rgba(0, 0, 0, 0.04);
+  --el-box-shadow-dark: 0 4px 12px rgba(0, 0, 0, 0.15);
+}
+
+body,
+html {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  font-family: var(--font-body);
+  background-color: var(--bg-dark);
+  color: var(--text-primary);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
 
-a {
-  font-weight: 500;
-  color: #646cff;
-  text-decoration: inherit;
-}
-a:hover {
-  color: #535bf2;
-}
-
-body {
-  margin: 0;
-  display: flex;
-  place-items: center;
-  min-width: 320px;
-  min-height: 100vh;
-}
-
-h1 {
-  font-size: 3.2em;
-  line-height: 1.1;
-}
-
-button {
-  border-radius: 8px;
-  border: 1px solid transparent;
-  padding: 0.6em 1.2em;
-  font-size: 1em;
-  font-weight: 500;
-  font-family: inherit;
-  background-color: #1a1a1a;
-  cursor: pointer;
-  transition: border-color 0.25s;
-}
-button:hover {
-  border-color: #646cff;
-}
-button:focus,
-button:focus-visible {
-  outline: 4px auto -webkit-focus-ring-color;
-}
-
-.card {
-  padding: 2em;
-}
-
 #app {
-  max-width: 1280px;
-  margin: 0 auto;
-  padding: 2rem;
-  text-align: center;
+  width: 100%;
+  height: 100vh;
 }
 
-@media (prefers-color-scheme: light) {
-  :root {
-    color: #213547;
-    background-color: #ffffff;
-  }
-  a:hover {
-    color: #747bff;
-  }
-  button {
-    background-color: #f9f9f9;
-  }
+/* Headers */
+h1,
+h2,
+h3,
+h4,
+h5,
+h6,
+.el-dialog__title,
+.el-drawer__header {
+  font-family: var(--font-display);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+/* Monospace for data */
+code,
+pre,
+.el-tag,
+.value,
+.run-id {
+  font-family: var(--font-mono);
+}
+
+/* Element Plus component overrides */
+.el-card {
+  border: 1px solid var(--border-color);
+  background-color: var(--bg-panel);
+  border-radius: 8px;
+}
+
+.el-button {
+  border-radius: 6px;
+  font-family: var(--font-display);
+  font-weight: 500;
+  transition: all 0.2s;
+}
+
+.el-button--primary {
+  background-color: var(--accent-primary);
+  border-color: var(--accent-primary);
+}
+
+.el-button--primary:hover {
+  background-color: var(--accent-primary-hover);
+  border-color: var(--accent-primary-hover);
+}
+
+.el-input__wrapper,
+.el-select__wrapper,
+.el-textarea__inner {
+  border-radius: 6px;
+}
+
+/* Table */
+.el-table {
+  --el-table-border-color: var(--border-color);
+  --el-table-header-bg-color: #fafafa;
+  --el-table-tr-bg-color: var(--bg-panel);
+  --el-table-row-hover-bg-color: #f8f8f8;
+}
+
+.el-table th.el-table__cell {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+/* Divider */
+.el-divider__text {
+  background-color: var(--bg-panel);
+  font-family: var(--font-display);
+  color: var(--accent-primary);
+  font-weight: 600;
+  font-size: 13px;
+}
+
+/* Tabs */
+.el-tabs__item.is-active {
+  color: var(--accent-primary);
+}
+
+.el-tabs__active-bar {
+  background-color: var(--accent-primary);
 }

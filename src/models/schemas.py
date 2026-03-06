@@ -2,18 +2,29 @@
 数据模型定义 (Pydantic schemas)
 """
 from datetime import datetime
-from typing import Optional, List
+from typing import Optional, List, Any
 from pydantic import BaseModel, Field, field_validator
 from enum import Enum
 
 
 class TaskStatus(str, Enum):
     """任务状态"""
+    BLOCKED = "blocked"
+    RUNNABLE = "runnable"
     PENDING = "pending"
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
+    TIMEOUT = "timeout"
+
+
+class TriggerMode(str, Enum):
+    """任务触发方式"""
+    MANUAL = "manual"
+    AUTO = "auto"
+    SCHEDULE = "schedule"
+    EVENT = "event"
 
 
 # ==================== 数据服务 ====================
@@ -47,6 +58,39 @@ class AcquireTaskRequest(BaseModel):
         if not normalized:
             raise ValueError("字段不能为空")
         return normalized
+
+
+class IotdbSourceCreate(BaseModel):
+    """IoTDB 数据源：创建请求"""
+    name: str = Field(..., min_length=1, max_length=200)
+    host: str = "192.168.199.185"
+    port: str = "6667"
+    username: str = Field(..., min_length=1)
+    password: str = Field(..., min_length=1)
+    source_path: str = Field(..., min_length=1)  # root.xxx.yyy
+    point_name: str = "*"
+    target_points: int = 5000
+    description: Optional[str] = None
+
+
+class IotdbSourceUpdate(BaseModel):
+    """IoTDB 数据源：更新请求"""
+    name: Optional[str] = None
+    host: Optional[str] = None
+    port: Optional[str] = None
+    username: Optional[str] = None
+    password: Optional[str] = None
+    source_path: Optional[str] = None
+    point_name: Optional[str] = None
+    target_points: Optional[int] = None
+    description: Optional[str] = None
+
+
+class IotdbSourceAcquireRequest(BaseModel):
+    """IoTDB 数据源：采集任务请求"""
+    start_time: Optional[str] = None
+    end_time: Optional[str] = None
+    target_points: Optional[int] = None  # 可覆盖数据源默认值
 
 
 # ==================== 标注服务 ====================
@@ -129,6 +173,101 @@ class InferenceResult(BaseModel):
     filename: str
     anomalies: List[dict]
     confidence: Optional[float] = None
+
+
+# ==================== 任务中心 ====================
+
+class TaskCenterDefinitionRequest(BaseModel):
+    """任务中心：任务定义创建请求"""
+    name: str = Field(..., min_length=1)
+    task_type: str = "acquire_inference"
+    trigger_mode: TriggerMode = TriggerMode.MANUAL
+    schedule_cron: Optional[str] = None
+    enabled: bool = True
+    config: Optional[dict[str, Any]] = None
+    created_by: Optional[str] = None
+
+
+class TaskCenterRunCreateRequest(BaseModel):
+    """任务中心：运行实例创建请求"""
+    definition_id: Optional[str] = None
+    task_type: str = "acquire_inference"
+    trigger_mode: TriggerMode = TriggerMode.MANUAL
+    input_payload: Optional[dict[str, Any]] = None
+    steps: List[str] = Field(default_factory=lambda: ["acquire", "inference"])
+    step_specs: Optional[List[dict[str, Any]]] = None
+    max_retries: Optional[int] = Field(default=None, ge=0, le=10)
+    retry_policy: Optional[str] = Field(default=None)
+    retry_delay_sec: Optional[int] = Field(default=None, ge=0, le=3600)
+    retry_backoff_factor: Optional[float] = Field(default=None, ge=1.0, le=10.0)
+    retry_max_delay_sec: Optional[int] = Field(default=None, ge=1, le=86400)
+    retry_on_errors: Optional[List[str]] = None
+    timeout_sec: Optional[int] = Field(default=None, ge=1, le=86400)
+    auto_execute: bool = False
+
+    @field_validator("retry_policy")
+    @classmethod
+    def _validate_retry_policy(cls, value: str) -> str:
+        normalized = str(value or "").strip().lower()
+        if normalized not in {"fixed", "exponential"}:
+            raise ValueError("retry_policy 仅支持 fixed/exponential")
+        return normalized
+
+    @field_validator("retry_on_errors")
+    @classmethod
+    def _validate_retry_on_errors(cls, value: Optional[List[str]]) -> Optional[List[str]]:
+        if value is None:
+            return None
+        items: List[str] = []
+        for raw in value:
+            text = str(raw or "").strip()
+            if text and text not in items:
+                items.append(text)
+        return items or None
+
+
+class TaskCenterRunExecuteRequest(BaseModel):
+    """任务中心：执行请求"""
+    simulate: bool = True
+
+
+class TaskCenterEventTriggerRequest(BaseModel):
+    """任务中心：事件触发请求"""
+    event_key: str = Field(..., min_length=1)
+    payload: Optional[dict[str, Any]] = None
+    definition_id: Optional[str] = None
+    dedupe_key: Optional[str] = None
+    execute_mode: str = Field(default="dispatch")
+
+    @field_validator("event_key")
+    @classmethod
+    def _validate_event_key(cls, value: str) -> str:
+        normalized = str(value or "").strip().lower()
+        if not normalized:
+            raise ValueError("event_key 不能为空")
+        return normalized
+
+    @field_validator("execute_mode")
+    @classmethod
+    def _validate_execute_mode(cls, value: str) -> str:
+        normalized = str(value or "").strip().lower()
+        if normalized not in {"dispatch", "simulate", "none"}:
+            raise ValueError("execute_mode 仅支持 dispatch/simulate/none")
+        return normalized
+
+
+class TaskCenterDeadLetterReplayRequest(BaseModel):
+    """任务中心：死信重放请求"""
+    event_id: Optional[str] = None
+    execute_mode: str = Field(default="dispatch")
+
+    @field_validator("execute_mode")
+    @classmethod
+    def _validate_execute_mode(cls, value: str) -> str:
+        normalized = str(value or "").strip().lower()
+        if normalized not in {"dispatch", "simulate", "none"}:
+            raise ValueError("execute_mode 仅支持 dispatch/simulate/none")
+        return normalized
 
 
 # ==================== 版本管理 ====================

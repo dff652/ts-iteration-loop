@@ -3,17 +3,29 @@
 ## [Unreleased]
 
 ### 新增
+- 🎯 **全局任务中心 (Task Center)**:
+    - 落地 `/api/v1/task-center`，包含任务流转、状态监控与异步调度结构
+    - 新增相关数据表迁移如 `0006_add_task_center_core.sql`
+- 💻 **前端现代化迁移 (Vue 3)**:
+    - 引入全新基于 Vue 3 + Vite 的前端架构，重构 `TaskCenterDashboard`、`DataAssets`、`AnnotationWorkbench` 等核心页面
+    - 统一前端路由、API 拦截器与样式风格 (`frontend/src/*`)
+- 🤖 **模型库与基础认证**:
+    - 增加模型注册层(`/api/v1/models`)，解耦推理微调路径
+    - 增加 `/api/v1/auth` 及 IoTDB sources 动态配置
 - 🗂️ **数据资产 API 化**:
     - 新增 `/api/v1/assets` 路由（数据集列表/详情/保存/删除、来源筛选、训练导出）
     - 数据资产管理 UI 从直连 DB 改为调用正式 API
 - 🧱 **数据库迁移机制**:
     - 新增轻量迁移执行器 `src/db/migration.py`
-    - 新增迁移脚本 `src/db/migrations/0001_add_core_indexes.sql`
+    - 新增迁移脚本 `src/db/migrations/0001_add_core_indexes.sql` 等
     - 新增命令行工具 `scripts/db_migrate.py`（`--status/--apply`）
 
 ### 修复
-- 🐞 **推理任务状态枚举不一致**:
+- 🐞 **标注数据打通与显示**:
+    - 修复 `/api/v1/annotator/files` 缺失标注记录导致列表过滤为空的问题，现已注入查询结果并正确携带 `has_annotations` 与 `annotation_count`，使数据资产与标注工作台成功打通
+- 📈 **推理任务状态与监控**:
     - `TaskStatus.PROCESSING` 调整为合法状态 `TaskStatus.RUNNING`
+    - 补齐推理日志获取（`raw_output`尾部映射）以及返回 `indexed_results` 回退支持
 - 🔁 **推理导出预标注断点**:
     - 补齐 `CheckOutlierAdapter.convert_to_annotation_format`，支持多种输入形态
 - 🔐 **Annotator 鉴权恢复**:

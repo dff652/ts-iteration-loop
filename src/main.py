@@ -30,7 +30,7 @@ setup_logging()
 logger = get_logger(__name__)
 
 # 导入 API 路由
-from src.api import data, annotation, training, inference, assets, points, evaluation
+from src.api import data, annotation, training, inference, assets, points, review, evaluation, task_center
 
 # 导入 Gradio 界面
 from src.webui.training_ui import training_ui
@@ -79,11 +79,25 @@ app.include_router(training.router, prefix="/api/v1/training", tags=["微调服�
 app.include_router(inference.router, prefix="/api/v1/inference", tags=["推理服务"])
 app.include_router(assets.router, prefix="/api/v1/assets", tags=["数据资产"])
 app.include_router(points.router, prefix="/api/v1/points", tags=["点位中心"])
+app.include_router(review.router, prefix="/api/v1/review", tags=["审核服务"])
 app.include_router(evaluation.router, prefix="/api/v1/evaluation", tags=["评估服务"])
+app.include_router(task_center.router, prefix="/api/v1/task-center", tags=["任务中心"])
+
+# 导入并注册模型库路由
+from src.api import model_registry
+app.include_router(model_registry.router, prefix="/api/v1/models", tags=["模型库"])
 
 # 导入并注册迭代版本管理路由
 from src.api import iteration
 app.include_router(iteration.router, prefix="/api/v1/iteration", tags=["迭代管理"])
+
+# 导入并注册认证路由
+from src.api import auth as auth_api
+app.include_router(auth_api.router, prefix="/api/v1/auth", tags=["认证"])
+
+# 导入并注册标注工作台路由 (原生实现, 替代 Flask 代理)
+from src.api import annotator as annotator_api
+app.include_router(annotator_api.router, prefix="/api/v1/annotator", tags=["标注工作台"])
 
 # 挂载 Gradio 微调界面到 /train-ui
 app = gr.mount_gradio_app(app, training_ui, path="/train-ui")
@@ -107,7 +121,9 @@ async def root():
             "inference": "/api/v1/inference",
             "assets": "/api/v1/assets",
             "points": "/api/v1/points",
+            "review": "/api/v1/review",
             "evaluation": "/api/v1/evaluation",
+            "task_center": "/api/v1/task-center",
         }
     }
 

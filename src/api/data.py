@@ -3,17 +3,21 @@
 封装 Data-Processing 项目功能
 """
 import json
+import re
+import shutil
 from datetime import datetime
+from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy.orm import Session
 import uuid
 
 from src.core.logging_config import get_logger
 from src.core.tasks import celery_app
-from src.db.database import get_db, Task
+from src.db.database import get_db, Task, IotdbSource
 from src.models.schemas import (
     AcquireTaskRequest,
+    IotdbSourceCreate, IotdbSourceUpdate, IotdbSourceAcquireRequest,
     TaskResponse, TaskStatus, ApiResponse
 )
 from src.adapters.data_processing import DataProcessingAdapter
@@ -28,6 +32,18 @@ def _sanitize_task_config(config: dict) -> dict:
     if masked.get("password"):
         masked["password"] = "***"
     return masked
+
+
+def _normalize_dataset_filename(raw_name: str | None, fallback: str = "dataset") -> str:
+    text = Path(str(raw_name or fallback)).name.strip()
+    if not text:
+        text = fallback
+    if text.lower().endswith(".csv"):
+        text = text[:-4]
+    text = re.sub(r"[^A-Za-z0-9._-]+", "_", text).strip("._-")
+    if not text:
+        text = fallback
+    return f"{text}.csv"
 
 
 def _dispatch_acquire_task(task_id: str, request: AcquireTaskRequest) -> str:
@@ -114,6 +130,53 @@ async def list_datasets():
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/datasets/upload", response_model=ApiResponse)
+async def upload_dataset_csv(
+    file: UploadFile = File(...),
+    dataset_name: str | None = Form(default=None),
+    overwrite: bool = Form(default=False),
+):
+    """上传 CSV 并创建可用于推理的数据集文件。"""
+    filename = str(file.filename or "").strip()
+    if not filename or not filename.lower().endswith(".csv"):
+        raise HTTPException(status_code=400, detail="仅支持上传 CSV 文件")
+
+    target_filename = _normalize_dataset_filename(dataset_name or filename, fallback="uploaded_dataset")
+    target_path = Path(adapter.data_path) / target_filename
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if target_path.exists() and not overwrite:
+        raise HTTPException(status_code=400, detail=f"数据集已存在: {target_filename}（可启用 overwrite）")
+
+    try:
+        with target_path.open("wb") as out_file:
+            shutil.copyfileobj(file.file, out_file)
+    finally:
+        await file.close()
+
+    if not target_path.exists() or target_path.stat().st_size <= 0:
+        raise HTTPException(status_code=400, detail="上传失败或文件为空")
+
+    return ApiResponse(
+        success=True,
+        data={
+            "filename": target_filename,
+            "path": str(target_path),
+            "size_bytes": int(target_path.stat().st_size),
+        },
+        message="CSV 数据集上传成功",
+    )
+
+
+@router.post("/datasets/acquire", response_model=TaskResponse)
+async def create_dataset_from_iotdb(
+    request: AcquireTaskRequest,
+    db: Session = Depends(get_db),
+):
+    """语义化入口：通过 IoTDB 采集创建数据集。"""
+    return await start_acquire_task(request=request, db=db)
 
 
 @router.post("/acquire", response_model=TaskResponse)
@@ -228,3 +291,127 @@ async def preview_data(filename: str, limit: int = 100):
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ==================== IoTDB 数据源管理 ====================
+
+def _source_to_dict(src: IotdbSource) -> dict:
+    return {
+        "id": src.id,
+        "name": src.name,
+        "host": src.host,
+        "port": src.port,
+        "username": src.username,
+        "source_path": src.source_path,
+        "point_name": src.point_name,
+        "target_points": src.target_points,
+        "description": src.description,
+        "created_at": _dt_iso(src.created_at),
+        "updated_at": _dt_iso(src.updated_at),
+    }
+
+
+@router.get("/sources", response_model=ApiResponse)
+async def list_iotdb_sources(db: Session = Depends(get_db)):
+    """列出所有 IoTDB 数据源配置"""
+    sources = db.query(IotdbSource).order_by(IotdbSource.created_at.desc()).all()
+    return ApiResponse(
+        success=True,
+        data={"sources": [_source_to_dict(s) for s in sources]},
+        message=f"找到 {len(sources)} 个数据源配置",
+    )
+
+
+@router.post("/sources", response_model=ApiResponse)
+async def create_iotdb_source(
+    request: IotdbSourceCreate,
+    db: Session = Depends(get_db),
+):
+    """创建 IoTDB 数据源配置"""
+    source = IotdbSource(
+        id=str(uuid.uuid4()),
+        name=request.name.strip(),
+        host=request.host.strip(),
+        port=request.port.strip(),
+        username=request.username.strip(),
+        password=request.password.strip(),
+        source_path=request.source_path.strip(),
+        point_name=request.point_name.strip(),
+        target_points=request.target_points,
+        description=(request.description or "").strip() or None,
+    )
+    db.add(source)
+    db.commit()
+    db.refresh(source)
+    logger.info("创建 IoTDB 数据源: %s (%s)", source.name, source.id)
+    return ApiResponse(
+        success=True,
+        data={"source": _source_to_dict(source)},
+        message="数据源创建成功",
+    )
+
+
+@router.put("/sources/{source_id}", response_model=ApiResponse)
+async def update_iotdb_source(
+    source_id: str,
+    request: IotdbSourceUpdate,
+    db: Session = Depends(get_db),
+):
+    """更新 IoTDB 数据源配置"""
+    source = db.query(IotdbSource).filter(IotdbSource.id == source_id).first()
+    if not source:
+        raise HTTPException(status_code=404, detail="数据源不存在")
+
+    update_data = request.model_dump(exclude_unset=True)
+    for key, value in update_data.items():
+        if value is not None:
+            setattr(source, key, value.strip() if isinstance(value, str) else value)
+    db.commit()
+    db.refresh(source)
+    logger.info("更新 IoTDB 数据源: %s (%s)", source.name, source.id)
+    return ApiResponse(
+        success=True,
+        data={"source": _source_to_dict(source)},
+        message="数据源更新成功",
+    )
+
+
+@router.delete("/sources/{source_id}", response_model=ApiResponse)
+async def delete_iotdb_source(
+    source_id: str,
+    db: Session = Depends(get_db),
+):
+    """删除 IoTDB 数据源配置"""
+    source = db.query(IotdbSource).filter(IotdbSource.id == source_id).first()
+    if not source:
+        raise HTTPException(status_code=404, detail="数据源不存在")
+
+    db.delete(source)
+    db.commit()
+    logger.info("删除 IoTDB 数据源: %s (%s)", source.name, source_id)
+    return ApiResponse(success=True, message="数据源删除成功")
+
+
+@router.post("/sources/{source_id}/acquire", response_model=TaskResponse)
+async def acquire_from_source(
+    source_id: str,
+    request: IotdbSourceAcquireRequest,
+    db: Session = Depends(get_db),
+):
+    """使用指定数据源配置启动采集任务"""
+    source = db.query(IotdbSource).filter(IotdbSource.id == source_id).first()
+    if not source:
+        raise HTTPException(status_code=404, detail="数据源不存在")
+
+    acquire_request = AcquireTaskRequest(
+        source=source.source_path,
+        host=source.host,
+        port=source.port,
+        user=source.username,
+        password=source.password,
+        point_name=source.point_name,
+        target_points=request.target_points or source.target_points,
+        start_time=request.start_time,
+        end_time=request.end_time,
+    )
+    return await start_acquire_task(request=acquire_request, db=db)

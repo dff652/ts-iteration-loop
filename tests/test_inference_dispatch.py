@@ -123,6 +123,94 @@ def test_get_inference_log_contract_incremental(tmp_path, monkeypatch):
     assert "task_error: first error" in tail
 
 
+def test_get_inference_log_includes_raw_output_tail(tmp_path, monkeypatch):
+    db_path = tmp_path / "iteration_loop.db"
+    engine = create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
+    test_session_local = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    monkeypatch.setattr(db_mod, "engine", engine)
+    monkeypatch.setattr(db_mod, "SessionLocal", test_session_local)
+    db_mod.Base.metadata.create_all(bind=engine)
+
+    task_id = "12121212-1212-1212-1212-121212121212"
+    result_payload = {
+        "total": 1,
+        "successful": 1,
+        "results": [
+            {
+                "file": "a.csv",
+                "success": True,
+                "result": {"raw_output": "line-1\nline-2\nline-3"},
+            }
+        ],
+    }
+    with test_session_local() as db:
+        task = db_mod.Task(
+            id=task_id,
+            type="inference",
+            status="completed",
+            result=json.dumps(result_payload),
+            config=json.dumps({"algorithm": "chatts"}),
+        )
+        db.add(task)
+        db.commit()
+        resp = asyncio.run(inference_api.get_inference_log(task_id, offset=0, max_bytes=10000, db=db))
+
+    log_text = str((resp.data or {}).get("log") or "")
+    assert "output_tail:" in log_text
+    assert "line-1" in log_text
+    assert "line-3" in log_text
+
+
+def test_get_inference_results_fallbacks_to_index_rows(tmp_path, monkeypatch):
+    db_path = tmp_path / "iteration_loop.db"
+    engine = create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
+    test_session_local = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    monkeypatch.setattr(db_mod, "engine", engine)
+    monkeypatch.setattr(db_mod, "SessionLocal", test_session_local)
+    db_mod.Base.metadata.create_all(bind=engine)
+
+    task_id = "34343434-3434-3434-3434-343434343434"
+    with test_session_local() as db:
+        task = db_mod.Task(
+            id=task_id,
+            type="inference",
+            status="completed",
+            result=json.dumps(
+                {
+                    "success": True,
+                    "results": [{"file": "a.csv", "success": True, "result": {"raw_output": "ok"}}],
+                }
+            ),
+        )
+        db.add(task)
+        db.add(
+            db_mod.InferenceResult(
+                id="ir-1",
+                task_id=task_id,
+                point_id="p1",
+                method="qwen",
+                model="/tmp/model",
+                point_name="P1",
+                result_path="/tmp/p1.csv",
+                metrics_path="/tmp/p1_metrics.json",
+                segments_path="/tmp/p1_segments.json",
+                score_avg=0.2,
+                score_max=0.8,
+                segment_count=2,
+            )
+        )
+        db.commit()
+        resp = asyncio.run(inference_api.get_inference_results(task_id, db=db))
+
+    assert resp.success is True
+    data = resp.data or {}
+    rows = data.get("results") if isinstance(data.get("results"), list) else []
+    assert len(rows) == 1
+    assert rows[0].get("result_path") == "/tmp/p1.csv"
+    indexed = data.get("indexed_results") if isinstance(data.get("indexed_results"), list) else []
+    assert len(indexed) == 1
+
+
 def test_export_to_annotation_returns_rows_by_default(tmp_path, monkeypatch):
     db_path = tmp_path / "iteration_loop.db"
     engine = create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})

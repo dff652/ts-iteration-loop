@@ -9,7 +9,10 @@ const request = axios.create({
 // Request Interceptor
 request.interceptors.request.use(
     (config) => {
-        // Add token or auth headers if needed
+        const token = localStorage.getItem('ts_loop_token')
+        if (token && config.headers) {
+            config.headers.Authorization = `Bearer ${token}`
+        }
         return config
     },
     (error) => {
@@ -30,7 +33,10 @@ request.interceptors.response.use(
     },
     (error) => {
         console.error('API Error:', error)
-        ElMessage.error(error.message || 'Network Error')
+        const silent = error?.config?.__silent
+        if (!silent) {
+            ElMessage.error(error.response?.data?.message || error.message || 'Request failed with status code ' + (error.response?.status || 'unknown'))
+        }
         return Promise.reject(error)
     }
 )

@@ -3,18 +3,28 @@ import request from './request'
 // Interface representing a Dataset Asset
 export interface DatasetAsset {
     id: string
-    uri: string
+    name: string
     dataset_type: string
-    tags: string
-    meta_data: string
+    status?: string
+    point_count?: number
+    note?: string
     created_at: string
-    updated_at: string
+    updated_at?: string
 }
 
 // Fetch all available datasets
 export function fetchDatasets(params?: any) {
     return request({
-        url: '/assets/',
+        url: '/assets/datasets',
+        method: 'get',
+        params
+    })
+}
+
+// Fetch single dataset details (including items)
+export function getDatasetDetails(datasetId: string, params?: any) {
+    return request({
+        url: `/assets/datasets/${datasetId}`,
         method: 'get',
         params
     })

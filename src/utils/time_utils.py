@@ -7,12 +7,12 @@ keeping existing naive-UTC storage semantics for DB DateTime columns.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 
 
 def utc_now() -> datetime:
     """Return current UTC datetime (timezone-aware)."""
-    return datetime.now(UTC)
+    return datetime.now(timezone.utc)
 
 
 def utc_now_naive() -> datetime:

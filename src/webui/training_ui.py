@@ -981,12 +981,23 @@ def start_acquire_task(
         yield "❌ Please enter IoTDB source path"
         return
 
+    # 安全基线：采集接口要求用户名/密码非空；优先使用表单，其次回退到共享配置
+    normalized_user = str(user or "").strip()
+    normalized_password = str(password or "").strip()
+    if not normalized_user or not normalized_password:
+        cfg = load_iotdb_config()
+        normalized_user = normalized_user or str(cfg.get("user") or "").strip()
+        normalized_password = normalized_password or str(cfg.get("password") or "").strip()
+    if not normalized_user or not normalized_password:
+        yield "❌ 请填写 IoTDB 用户名和密码（当前分支已禁用空凭据提交）"
+        return
+
     payload = {
         "source": source,
         "host": host,
         "port": str(port),
-        "user": user,
-        "password": password,
+        "user": normalized_user,
+        "password": normalized_password,
         "point_name": point_name or "*",
         "target_points": int(target_points),
         "start_time": start_time or None,
@@ -995,7 +1006,19 @@ def start_acquire_task(
 
     submit_resp = _data_api_call("post", "/acquire", payload=payload)
     if not submit_resp.get("success"):
-        yield f"❌ 数据采集任务提交失败: {submit_resp.get('error') or '未知错误'}"
+        err = submit_resp.get("error")
+        if isinstance(err, list):
+            loc_keys = []
+            for item in err:
+                if not isinstance(item, dict):
+                    continue
+                loc = item.get("loc")
+                if isinstance(loc, list) and loc:
+                    loc_keys.append(str(loc[-1]))
+            if "user" in loc_keys or "password" in loc_keys:
+                yield "❌ 数据采集任务提交失败: IoTDB 用户名和密码不能为空"
+                return
+        yield f"❌ 数据采集任务提交失败: {err or '未知错误'}"
         return
 
     submit_data = submit_resp.get("data") or {}
@@ -1004,44 +1027,70 @@ def start_acquire_task(
         yield "❌ 数据采集提交成功，但未返回 task_id"
         return
 
-    yield (
+    accumulated_log = (
         f"🚀 已提交数据采集任务: {task_id}\n"
         f"Source: {source}\n"
         f"Point: {point_name or '*'}\n"
         f"Target points: {int(target_points)}"
     )
+    yield accumulated_log
 
     poll_interval = 2.0
     max_polls = 1800  # 约 1 小时
     last_status = None
+    log_offset = 0
 
     for i in range(max_polls):
-        status_resp = _data_api_call("get", f"/status/{task_id}")
-        if not status_resp.get("success"):
-            if i % 5 == 0:
-                yield f"⚠️ 状态查询失败: {status_resp.get('error') or '未知错误'}"
-            time.sleep(poll_interval)
-            continue
+        status = ""
+        message = ""
 
-        status_data = _extract_task_status_payload(status_resp.get("data"))
-        status = str(status_data.get("status") or "").lower()
-        message = str(status_data.get("message") or "")
+        log_resp = _data_api_call(
+            "get",
+            f"/log/{task_id}",
+            params={"offset": log_offset, "max_bytes": 200000},
+        )
+        if log_resp.get("success"):
+            log_wrapper = log_resp.get("data") or {}
+            log_payload = log_wrapper.get("data") if isinstance(log_wrapper, dict) else {}
+            if isinstance(log_payload, dict):
+                status = str(log_payload.get("status") or "").lower()
+                message = str(log_payload.get("message") or "")
+                chunk = str(log_payload.get("log") or "")
+                if chunk:
+                    accumulated_log += f"\n{chunk}"
+                try:
+                    log_offset = int(log_payload.get("offset") or log_offset)
+                except Exception:
+                    pass
+        else:
+            # 兼容兜底：日志接口异常时，仍保留状态轮询
+            status_resp = _data_api_call("get", f"/status/{task_id}")
+            if status_resp.get("success"):
+                status_data = _extract_task_status_payload(status_resp.get("data"))
+                status = str(status_data.get("status") or "").lower()
+                message = str(status_data.get("message") or "")
+            elif i % 5 == 0:
+                accumulated_log += f"\n⚠️ 状态查询失败: {status_resp.get('error') or '未知错误'}"
 
         if status != last_status:
-            yield f"[{time.strftime('%H:%M:%S')}] 任务状态: {status or 'unknown'} {message}".strip()
+            accumulated_log += f"\n[{time.strftime('%H:%M:%S')}] 任务状态: {status or 'unknown'} {message}".strip()
             last_status = status
 
+        if len(accumulated_log) > LOG_TAIL_MAX_CHARS:
+            accumulated_log = accumulated_log[-LOG_TAIL_MAX_CHARS:]
+
         if status == "completed":
-            yield "✅ 数据采集完成，请点击“刷新列表”查看最新点位数据。"
+            yield accumulated_log + "\n✅ 数据采集完成，请点击“刷新列表”查看最新点位数据。"
             return
         if status in {"failed", "cancelled"}:
             err = message or "数据采集失败"
-            yield f"❌ 数据采集结束: {status} - {err}"
+            yield accumulated_log + f"\n❌ 数据采集结束: {status} - {err}"
             return
 
+        yield accumulated_log
         time.sleep(poll_interval)
 
-    yield "❌ 数据采集任务轮询超时，请稍后在任务历史中检查状态。"
+    yield accumulated_log + "\n❌ 数据采集任务轮询超时，请稍后在任务历史中检查状态。"
 
 
 # ==================== 推理监控辅助函数 ====================
@@ -1226,25 +1275,49 @@ def start_inference_task(
         last_status = None
         final_status = None
         final_message = ""
+        log_offset = 0
         for i in range(max_polls):
-            status_resp = _inference_api_call("get", f"/status/{task_id}")
-            if not status_resp.get("success"):
-                if i % 5 == 0:
+            status = ""
+            message = ""
+
+            log_resp = _inference_api_call(
+                "get",
+                f"/log/{task_id}",
+                params={"offset": log_offset, "max_bytes": 200000},
+            )
+            if log_resp.get("success"):
+                log_wrapper = log_resp.get("data") or {}
+                log_payload = log_wrapper.get("data") if isinstance(log_wrapper, dict) else {}
+                if isinstance(log_payload, dict):
+                    status = str(log_payload.get("status") or "").lower()
+                    message = str(log_payload.get("message") or "")
+                    chunk = str(log_payload.get("log") or "")
+                    if chunk:
+                        accumulated_log += f"\n{chunk}"
+                    try:
+                        log_offset = int(log_payload.get("offset") or log_offset)
+                    except Exception:
+                        pass
+            else:
+                # 兼容兜底：日志接口异常时，仍保留状态轮询
+                status_resp = _inference_api_call("get", f"/status/{task_id}")
+                if status_resp.get("success"):
+                    st_data = _extract_task_status_payload(status_resp.get("data"))
+                    status = str(st_data.get("status") or "").lower()
+                    message = str(st_data.get("message") or "")
+                elif i % 5 == 0:
                     err = status_resp.get("error") or "状态查询失败"
                     accumulated_log += f"\n⚠️ 状态查询异常: {err}"
-            else:
-                st_data = _extract_task_status_payload(status_resp.get("data"))
-                status = str(st_data.get("status") or "").lower()
-                message = str(st_data.get("message") or "")
-                if status != last_status:
-                    accumulated_log += f"\n[{time.strftime('%H:%M:%S')}] 状态: {status}"
-                    if message:
-                        accumulated_log += f" | {message}"
-                    last_status = status
-                if status in {"completed", "failed", "cancelled"}:
-                    final_status = status
-                    final_message = message
-                    break
+
+            if status != last_status:
+                accumulated_log += f"\n[{time.strftime('%H:%M:%S')}] 状态: {status or 'unknown'}"
+                if message:
+                    accumulated_log += f" | {message}"
+                last_status = status
+            if status in {"completed", "failed", "cancelled"}:
+                final_status = status
+                final_message = message
+                break
 
             if len(accumulated_log) > LOG_TAIL_MAX_CHARS:
                 accumulated_log = accumulated_log[-LOG_TAIL_MAX_CHARS:]
@@ -1289,7 +1362,15 @@ def start_inference_task(
         for row in rows:
             if not isinstance(row, dict):
                 continue
-            candidate = row.get("result_path") or row.get("file_path") or row.get("output_path")
+            nested = row.get("result") if isinstance(row.get("result"), dict) else {}
+            candidate = (
+                row.get("result_path")
+                or row.get("file_path")
+                or row.get("output_path")
+                or nested.get("result_path")
+                or nested.get("file_path")
+                or nested.get("output_path")
+            )
             if not candidate:
                 continue
             candidate_path = Path(str(candidate))
@@ -1301,6 +1382,20 @@ def start_inference_task(
                 p = str(candidate_path)
                 if p not in generated_files:
                     generated_files.append(p)
+
+        # fallback: use indexed_results from /results when rows do not expose file paths
+        if not generated_files and isinstance(payload, dict):
+            for row in payload.get("indexed_results") or []:
+                if not isinstance(row, dict):
+                    continue
+                candidate = row.get("result_path")
+                if not candidate:
+                    continue
+                candidate_path = Path(str(candidate))
+                if candidate_path.exists():
+                    p = str(candidate_path)
+                    if p not in generated_files:
+                        generated_files.append(p)
         
         # 自动将结果文件链接到用户数据目录，以便标注工具默认可见
         try:

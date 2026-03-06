@@ -18,6 +18,10 @@ export GRADIO_TEMP_DIR="$PROJECT_ROOT/data/gradio_tmp"
 mkdir -p "$GRADIO_TEMP_DIR"
 echo "📁 Gradio 临时目录: $GRADIO_TEMP_DIR"
 
+# 本地开发默认开启 Annotator 鉴权绕过，避免标注中心请求 401
+export ANNOTATOR_AUTH_BYPASS="${ANNOTATOR_AUTH_BYPASS:-true}"
+export ANNOTATOR_AUTH_BYPASS_USER="${ANNOTATOR_AUTH_BYPASS_USER:-${USER:-douff}}"
+
 # 检查 Redis
 # if ! command -v redis-cli &> /dev/null; then
 #     echo "⚠️  Redis 未安装，Celery 任务队列将不可用"

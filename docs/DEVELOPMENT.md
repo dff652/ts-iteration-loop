@@ -60,11 +60,11 @@
 chmod +x scripts/setup_dev.sh
 ./scripts/setup_dev.sh
 
-# 激活环境
-conda activate ts-iteration-loop
+# 旧版页面一键启动（后端 + worker）
+./scripts/start_local.sh legacy
 
-# 启动应用
-python -m src.main
+# 新旧页面同启（后端 + worker + Vue 前端）
+./scripts/start_local.sh dual
 ```
 
 ### 环境部署模式
@@ -99,7 +99,9 @@ docker-compose up --build -d
 
 ## UI 功能
 
-访问地址: `http://localhost:8000/train-ui`
+访问地址:
+- 旧版: `http://localhost:8000/train-ui`
+- 新版: `http://localhost:5173/task-center`
 
 | Tab | 功能 |
 |-----|------|

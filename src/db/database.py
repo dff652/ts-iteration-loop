@@ -1,12 +1,13 @@
 """
-数据库模型和连接
+数据库模型和连接（核心入口与向后兼容导出层）
+
+所有 ORM 模型已拆分至 src/db/models/ 子模块中。
+此类仅保留核心引擎及为了向旧业务代码兼容的无缝导入暴露。
 """
-from sqlalchemy import create_engine, Column, Integer, String, DateTime, Text, Enum, Float, Boolean
-from sqlalchemy.sql import func
-from sqlalchemy.orm import declarative_base, sessionmaker
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
 
 from configs.settings import settings
-from src.utils.time_utils import utc_now_naive
 
 # 创建数据库引擎
 engine = create_engine(
@@ -17,207 +18,62 @@ engine = create_engine(
 # 创建会话
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
-# 基类
-Base = declarative_base()
+# ==================== 数据库模型向后兼容层 ====================
+# 这里将全部模型通过 import 重新导出，
+# 这保证了 src.db.database.Task, AnnotationRecord 等能够继续在所有原代码中被访问
+from src.db.models import (
+    Base,
+    Task,
+    TaskCenterDefinition,
+    TaskCenterRun,
+    TaskCenterStepRun,
+    TaskCenterResultIndex,
+    IterationVersion,
+    Dataset,
+    DatasetAsset,
+    DatasetItem,
+    AnnotationRecord,
+    AnnotationSegment,
+    InferenceResult,
+    SegmentScore,
+    MetricRecord,
+    ReviewQueue,
+    ModelEval,
+    ModelRegistry,
+    IotdbSource,
+    User,
+)
+
+# 为了让 wildcard import `from src.db.database import *` 不出问题（如果有的话）
+__all__ = [
+    "engine",
+    "SessionLocal",
+    "Base",
+    "init_db",
+    "get_db",
+    "Task",
+    "TaskCenterDefinition",
+    "TaskCenterRun",
+    "TaskCenterStepRun",
+    "TaskCenterResultIndex",
+    "IterationVersion",
+    "Dataset",
+    "DatasetAsset",
+    "DatasetItem",
+    "AnnotationRecord",
+    "AnnotationSegment",
+    "InferenceResult",
+    "SegmentScore",
+    "MetricRecord",
+    "ReviewQueue",
+    "ModelEval",
+    "ModelRegistry",
+    "IotdbSource",
+    "User",
+]
 
 
-# ==================== 数据库模型 ====================
-
-class Task(Base):
-    """异步任务表"""
-    __tablename__ = "tasks"
-    
-    id = Column(String(36), primary_key=True)
-    type = Column(String(50), nullable=False)  # acquire / training / inference
-    status = Column(String(20), default="pending")
-    config = Column(Text)  # JSON 配置
-    result = Column(Text)  # JSON 结果
-    error = Column(Text)
-    created_at = Column(DateTime, default=utc_now_naive)
-    started_at = Column(DateTime)
-    completed_at = Column(DateTime)
-
-
-class IterationVersion(Base):
-    """迭代版本表"""
-    __tablename__ = "iteration_versions"
-    
-    id = Column(String(36), primary_key=True)
-    version = Column(String(50), nullable=False)
-    description = Column(Text)
-    dataset_path = Column(String(500))
-    annotation_count = Column(Integer, default=0)
-    model_path = Column(String(500))
-    metrics = Column(Text)  # JSON 指标
-    created_at = Column(DateTime, default=utc_now_naive)
-
-
-class Dataset(Base):
-    """数据集表"""
-    __tablename__ = "datasets"
-    
-    id = Column(String(36), primary_key=True)
-    name = Column(String(200), nullable=False)
-    path = Column(String(500))
-    point_count = Column(Integer)
-    source = Column(String(500))  # 来源 (IoTDB路径等)
-    version_id = Column(String(36))  # 关联迭代版本
-    created_at = Column(DateTime, default=utc_now_naive)
-
-
-class DatasetAsset(Base):
-    """数据资产集（点位集合）"""
-    __tablename__ = "dataset_assets"
-
-    id = Column(String(36), primary_key=True)
-    name = Column(String(200), nullable=False)
-    owner_id = Column(String(100), default=settings.DEFAULT_USER)
-    org_id = Column(String(100), default=settings.DEFAULT_ORG)
-    created_by = Column(String(100), default=settings.DEFAULT_USER)
-    updated_by = Column(String(100), default=settings.DEFAULT_USER)
-    dataset_type = Column(String(20), nullable=False)  # train / golden
-    status = Column(String(20), default="draft")  # draft / frozen
-    point_count = Column(Integer, default=0)
-    meta = Column(Text)  # JSON
-    created_at = Column(DateTime, default=utc_now_naive)
-    updated_at = Column(DateTime, default=utc_now_naive, onupdate=func.now())
-
-
-class DatasetItem(Base):
-    """数据资产集条目（点位）"""
-    __tablename__ = "dataset_items"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    dataset_id = Column(String(36), nullable=False)
-    point_id = Column(String(200))
-    point_name = Column(String(200), nullable=False)
-    created_at = Column(DateTime, default=utc_now_naive)
-
-
-class AnnotationRecord(Base):
-    """标注统一实体（DB-First 在线真相源）"""
-    __tablename__ = "annotation_records"
-
-    id = Column(String(36), primary_key=True)
-    user_id = Column(String(100), nullable=False)
-    point_id = Column(String(200))
-    source_id = Column(String(200), nullable=False)  # 规范化点位名
-    filename = Column(String(500), nullable=False)
-    source_kind = Column(String(20), default="human")  # auto / human
-    source_inference_id = Column(String(36))
-    method = Column(String(50))
-    status = Column(String(20), default="draft")
-    is_human_edited = Column(Boolean, default=True)
-    annotation_count = Column(Integer, default=0)
-    segment_count = Column(Integer, default=0)
-    overall_attribute_json = Column(Text)  # JSON
-    annotations_json = Column(Text)  # JSON
-    meta = Column(Text)  # JSON
-    created_at = Column(DateTime, default=utc_now_naive)
-    updated_at = Column(DateTime, default=utc_now_naive, onupdate=func.now())
-
-
-class AnnotationSegment(Base):
-    """段级统一实体（标注段）"""
-    __tablename__ = "annotation_segments"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    annotation_id = Column(String(36), nullable=False)
-    user_id = Column(String(100), nullable=False)
-    point_id = Column(String(200))
-    source_id = Column(String(200), nullable=False)
-    ann_index = Column(Integer, default=0)
-    seg_index = Column(Integer, default=0)
-    start = Column(Integer)
-    end = Column(Integer)
-    count = Column(Integer)
-    label_id = Column(String(200))
-    label_text = Column(String(200))
-    score = Column(Float)
-    review_status = Column(String(20), default="pending")
-    created_at = Column(DateTime, default=utc_now_naive)
-    updated_at = Column(DateTime, default=utc_now_naive, onupdate=func.now())
-
-
-class InferenceResult(Base):
-    """推理结果索引（含置信度摘要）"""
-    __tablename__ = "inference_results"
-
-    id = Column(String(36), primary_key=True)
-    task_id = Column(String(36))
-    point_id = Column(String(200))
-    method = Column(String(50))
-    model = Column(String(200))
-    point_name = Column(String(200))
-    result_path = Column(String(500))
-    metrics_path = Column(String(500))
-    segments_path = Column(String(500))
-    score_avg = Column(Float)
-    score_max = Column(Float)
-    segment_count = Column(Integer)
-    meta = Column(Text)  # JSON
-    created_at = Column(DateTime, default=utc_now_naive)
-
-
-class SegmentScore(Base):
-    """异常段级评分"""
-    __tablename__ = "segment_scores"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    inference_id = Column(String(36))
-    start = Column(Integer)
-    end = Column(Integer)
-    score = Column(Float)
-    raw_p = Column(Float)
-    left = Column(Float)
-    right = Column(Float)
-    created_at = Column(DateTime, default=utc_now_naive)
-
-
-class MetricRecord(Base):
-    """通用指标记录（多指标扩展）"""
-    __tablename__ = "metrics"
-
-    id = Column(String(36), primary_key=True)
-    owner_type = Column(String(50))  # inference / model / dataset
-    owner_id = Column(String(36))
-    name = Column(String(100))
-    data = Column(Text)  # JSON
-    created_at = Column(DateTime, default=utc_now_naive)
-
-
-class ReviewQueue(Base):
-    """人工审核队列"""
-    __tablename__ = "review_queue"
-
-    id = Column(String(36), primary_key=True)
-    source_type = Column(String(50))  # inference / annotation
-    source_id = Column(String(36))
-    point_id = Column(String(200))
-    method = Column(String(50))
-    model = Column(String(200))
-    point_name = Column(String(200))
-    score = Column(Float)
-    strategy = Column(String(50))  # topk / low_score / random
-    status = Column(String(20), default="pending")
-    reviewer = Column(String(100))
-    created_at = Column(DateTime, default=utc_now_naive)
-    updated_at = Column(DateTime, default=utc_now_naive, onupdate=func.now())
-
-
-class ModelEval(Base):
-    """训练后黄金集评估结果"""
-    __tablename__ = "model_evals"
-
-    id = Column(String(36), primary_key=True)
-    task_id = Column(String(36))
-    model_family = Column(String(50), default="chatts")
-    model_path = Column(String(500))
-    dataset_id = Column(String(36))
-    dataset_name = Column(String(200))
-    metrics = Column(Text)  # JSON
-    created_at = Column(DateTime, default=utc_now_naive)
-
+# ==================== 核心功能函数 ====================
 
 # 创建所有表
 def init_db():

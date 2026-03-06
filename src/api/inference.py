@@ -13,7 +13,7 @@ import uuid
 from configs.settings import settings
 from src.core.logging_config import get_logger
 from src.core.tasks import celery_app
-from src.db.database import get_db, Task
+from src.db.database import get_db, Task, InferenceResult
 from src.models.schemas import (
     InferenceTaskRequest,
     TaskResponse, TaskStatus, ApiResponse
@@ -24,6 +24,35 @@ from src.utils.time_utils import utc_now_naive
 logger = get_logger(__name__)
 router = APIRouter()
 adapter = CheckOutlierAdapter()
+
+
+def _load_indexed_results(db: Session, task_id: str) -> list[dict]:
+    rows = (
+        db.query(InferenceResult)
+        .filter(InferenceResult.task_id == task_id)
+        .order_by(InferenceResult.created_at.desc())
+        .all()
+    )
+    indexed: list[dict] = []
+    for row in rows:
+        indexed.append(
+            {
+                "id": row.id,
+                "task_id": row.task_id,
+                "point_id": row.point_id or "",
+                "point_name": row.point_name or "",
+                "method": row.method or "",
+                "model": row.model or "",
+                "result_path": row.result_path or "",
+                "metrics_path": row.metrics_path or "",
+                "segments_path": row.segments_path or "",
+                "score_avg": row.score_avg,
+                "score_max": row.score_max,
+                "segment_count": row.segment_count,
+                "created_at": _dt_iso(row.created_at),
+            }
+        )
+    return indexed
 
 
 def _dispatch_inference_task(task_id: str, model: str, algorithm: str, input_files: list, params: dict | None = None) -> str:
@@ -107,6 +136,12 @@ def _build_task_log_text(task: Task) -> str:
                 file_text = str(item.get("file") or "")
                 ok = bool(item.get("success"))
                 rows.append(f"result: {file_text} | success={ok}")
+                wrapped = item.get("result")
+                if isinstance(wrapped, dict):
+                    raw_output = str(wrapped.get("raw_output") or "").strip()
+                    if raw_output:
+                        tail_lines = raw_output.splitlines()[-20:]
+                        rows.append("output_tail:\n" + "\n".join(tail_lines))
     if task.error:
         rows.append(f"task_error: {task.error}")
     return "\n".join(rows).strip()
@@ -275,7 +310,52 @@ async def get_inference_results(task_id: str, db: Session = Depends(get_db)):
         )
     
     import json
-    results = json.loads(task.result) if task.result else {}
+
+    results = {}
+    if task.result:
+        try:
+            parsed = json.loads(task.result)
+            if isinstance(parsed, dict):
+                results = parsed
+        except Exception:
+            results = {}
+
+    indexed_results = _load_indexed_results(db, task_id)
+    if indexed_results:
+        results["indexed_results"] = indexed_results
+
+        current_rows = results.get("results") if isinstance(results.get("results"), list) else []
+        has_path = any(
+            isinstance(row, dict)
+            and (
+                row.get("result_path")
+                or row.get("file_path")
+                or row.get("output_path")
+                or (isinstance(row.get("result"), dict) and row.get("result", {}).get("result_path"))
+            )
+            for row in current_rows
+        )
+
+        if not current_rows or not has_path:
+            normalized_rows = []
+            for row in indexed_results:
+                result_path = str(row.get("result_path") or "").strip()
+                if not result_path:
+                    continue
+                normalized_rows.append(
+                    {
+                        "file": row.get("point_name") or row.get("point_id") or Path(result_path).name,
+                        "success": True,
+                        "result_path": result_path,
+                        "metrics_path": row.get("metrics_path") or "",
+                        "segments_path": row.get("segments_path") or "",
+                        "score_avg": row.get("score_avg"),
+                        "score_max": row.get("score_max"),
+                        "segment_count": row.get("segment_count"),
+                    }
+                )
+            if normalized_rows:
+                results["results"] = normalized_rows
     
     return ApiResponse(
         success=True,
