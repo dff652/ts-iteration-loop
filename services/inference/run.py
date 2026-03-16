@@ -352,6 +352,17 @@ def sigma_filtered_and_anomaly_detection(data, method='piecewise_linear', th=1.5
         reconstruct_data = None
         pre_data = None
 
+    elif method == 'stl_wavelet':
+        # stl_wavelet uses wavelet detection on the decomposed component
+        min_max_data = min_max_scaling(data.values.ravel())
+        reconstruct_data = reconstruct_residuals(min_max_data.ravel(), wavelet='db1', level=3)
+        anomaly_indices = nsigma_find_anomaly_indices(reconstruct_data, th, merge_len)
+        pre_data = None
+
+    else:
+        # Unknown method: return empty results
+        anomaly_indices = []
+
     # 确保anomaly_indices是有效的
     if anomaly_indices is None or len(anomaly_indices) == 0:
         anomaly_indices = []

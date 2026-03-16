@@ -7,24 +7,95 @@ import torch
 import numpy as np
 import pandas as pd
 from PIL import Image
-from transformers import AutoProcessor, AutoModelForImageTextToText
+from transformers import AutoProcessor, AutoModelForImageTextToText, BitsAndBytesConfig
 from matplotlib import pyplot as plt
 from matplotlib.ticker import ScalarFormatter, MaxNLocator
 
 # 配置日志
 logger = logging.getLogger("QwenDetect")
 
+# ========== 单例模型缓存 ==========
+_qwen_model = None
+_qwen_processor = None
+_qwen_config = None
+
+
+def get_qwen_model(model_path: str, device: str = "cuda:0", load_in_4bit: bool = True):
+    """
+    获取 Qwen VL 模型实例（单例模式）
+
+    Args:
+        model_path: 模型路径
+        device: GPU 设备, e.g. "cuda:0", "cuda:1"
+        load_in_4bit: 是否 4-bit 量化（27B 模型必须开启）
+    """
+    global _qwen_model, _qwen_processor, _qwen_config
+
+    new_config = {"model_path": model_path, "device": device, "load_in_4bit": load_in_4bit}
+
+    if _qwen_model is not None and _qwen_config == new_config:
+        return _qwen_model, _qwen_processor
+
+    print(f"[Qwen] 正在加载模型: {model_path} 到 {device} (4bit={load_in_4bit})...")
+
+    processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
+
+    model_kwargs = {
+        "trust_remote_code": True,
+        "low_cpu_mem_usage": True,
+    }
+
+    compute_dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
+
+    if load_in_4bit:
+        bnb_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_compute_dtype=compute_dtype,
+            bnb_4bit_use_double_quant=True,
+            bnb_4bit_quant_type="nf4",
+        )
+        model_kwargs["quantization_config"] = bnb_config
+
+    model_kwargs["dtype"] = compute_dtype
+
+    # 解析 device：支持 "cuda:0,cuda:1" 多卡格式和 "auto"
+    if "," in device:
+        gpu_ids = [int(d.strip().replace("cuda:", "")) for d in device.split(",")]
+        max_memory = {}
+        for gid in gpu_ids:
+            if gid < torch.cuda.device_count():
+                total = torch.cuda.get_device_properties(gid).total_memory
+                max_memory[gid] = f"{int(total / 1024**3) - 1}GiB"
+        max_memory["cpu"] = "32GiB"
+        model_kwargs["device_map"] = "auto"
+        model_kwargs["max_memory"] = max_memory
+        print(f"[Qwen] 多 GPU 模式: {gpu_ids}, max_memory: {max_memory}")
+    elif device == "auto":
+        model_kwargs["device_map"] = "auto"
+    else:
+        model_kwargs["device_map"] = device
+
+    model = AutoModelForImageTextToText.from_pretrained(model_path, **model_kwargs)
+
+    _qwen_model = model
+    _qwen_processor = processor
+    _qwen_config = new_config
+    print(f"[Qwen] 模型加载完成")
+
+    return model, processor
+
+
 class JSONParser:
     """JSON解析，处理非标准JSON格式"""
-    
+
     @staticmethod
     def robust_json_loads(json_str: str):
         """鲁棒的JSON解析"""
         if not json_str or not json_str.strip():
             return None
-            
+
         json_str = json_str.strip()
-        
+
         # 尝试清理 markdown 代码块标记
         if json_str.startswith("```json"):
             json_str = json_str[7:]
@@ -39,38 +110,35 @@ class JSONParser:
             return json.loads(json_str)
         except json.JSONDecodeError:
             pass
-        
-        # 方法2: 预处理后JSON解析 (保留原文的正则替换逻辑)
+
+        # 方法2: 预处理后JSON解析
         try:
             fixed = JSONParser._preprocess_json_str(json_str)
             return json.loads(fixed)
         except Exception:
             pass
-        
+
         # 方法3: 正则提取
         try:
             return JSONParser._extract_with_regex(json_str)
         except Exception:
             pass
-            
+
         return None
 
     @staticmethod
     def _preprocess_json_str(json_str: str) -> str:
         """预处理JSON字符串，修复常见格式错误"""
         if not json_str: return ""
-        # 简单空格清理
-        # 此处简化保留原文核心逻辑
-        json_str = re.sub(r',\s*([}\]])', r'\1', json_str) # 去掉尾部逗号
+        json_str = re.sub(r',\s*([}\]])', r'\1', json_str)  # 去掉尾部逗号
         return json_str
 
     @staticmethod
     def _extract_with_regex(json_str: str):
         """使用正则表达式提取 interval 和 type"""
-        # 简化版实现，提取 interval=[start, end]
         result = {"detected_anomalies": []}
         interval_patterns = [r'\[(\d+)\s*,\s*(\d+)\]', r'\((\d+)\s*,\s*(\d+)\)']
-        
+
         for pattern in interval_patterns:
             found = re.findall(pattern, json_str)
             for start, end in found:
@@ -85,15 +153,12 @@ class ImageGenerator:
     """生成时序图"""
     @staticmethod
     def create_single_image(data: pd.Series, title: str = "", dpi: int = 100):
-        # 简化绘图逻辑，用于模型输入
         fig, ax = plt.subplots(figsize=(20, 4), dpi=dpi)
         ax.plot(data.values, color='black', linewidth=1)
         ax.set_title(title)
-        ax.axis('off') # 关闭坐标轴以减少干扰? 原文保留了坐标轴，这里保留基本绘图
-        
-        # 紧凑布局
+        ax.axis('off')
         plt.tight_layout()
-        
+
         buf = io.BytesIO()
         plt.savefig(buf, format='png', bbox_inches='tight', dpi=dpi)
         plt.close(fig)
@@ -104,35 +169,38 @@ class ImageGenerator:
 def qwen_detect(
     data: pd.DataFrame,
     model_path: str,
-    device: str = "cuda",
+    device: str = "cuda:0",
     prompt_template_name: str = "default",
     n_downsample: int = 5000,
     downsampler: str = "m4",
+    load_in_4bit: bool = True,
     **kwargs,
 ):
     """
-    Qwen 模型推理入口函数
-    
+    Qwen VL 模型推理入口函数
+
     Args:
         data: 输入DataFrame，通常包含单列数值
         model_path: 模型路径
-        device: 'cuda' 或 'cpu'
-        prompt_template_name: 提示词模板名称 (预留)
-        
+        device: GPU 设备, e.g. "cuda:0", "cuda:1"
+        prompt_template_name: 提示词模板名称
+        n_downsample: 降采样目标点数
+        downsampler: 降采样方法 (m4/minmax)
+        load_in_4bit: 是否 4-bit 量化
+
     Returns:
         mask: 异常掩码 (numpy array, 0/1)
         anomalies: 异常列表
-        position_index: 降采样后的索引 (如果进行了降采样)
+        position_index: 降采样后的索引
     """
-    
+
     # 1. 数据准备
     if data.empty:
         return np.zeros(0), [], None
-        
-    # 提取第一列作为数值列
+
     series = data.iloc[:, 0]
-    
-    # 降采样逻辑
+
+    # 降采样
     try:
         if downsampler is None or str(downsampler).lower() == "none":
             series_ds = series
@@ -155,30 +223,22 @@ def qwen_detect(
         series_ds = series
         position_index = np.arange(len(series))
 
-    # 2. 模型加载
+    # 2. 模型加载（单例）
     try:
-        processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
-        model = AutoModelForImageTextToText.from_pretrained(
-            model_path,
-            trust_remote_code=True,
-            torch_dtype=torch.bfloat16 if "cuda" in device else torch.float32,
-            device_map=device
-        )
+        model, processor = get_qwen_model(model_path, device, load_in_4bit)
     except Exception as e:
         logger.error(f"Failed to load model from {model_path}: {e}")
-        # 返回全0掩码
         return np.zeros(len(data)), [], position_index
 
     # 3. 图像生成
     image = ImageGenerator.create_single_image(series_ds, title="Time Series Limit Check")
-    
+
     # 4. 构造 Prompt
     user_prompt = """分析图中的时间序列数据，基于信号特征识别异常区域。
-    输出必须是标准JSON格式：{"detected_anomalies":[{"interval":[start,end],"type":"类型","reason":"原因"}]}；若无异常：{"detected_anomalies":[]}。
-    异常区域必须以连续索引区间 [start, end] 表示，且满足 end - start + 1 > 5。
-    请精确标注异常区间的起止索引。"""
-    
-    # 参考 Qwen3-VL_test.py 的格式
+输出必须是标准JSON格式：{"detected_anomalies":[{"interval":[start,end],"type":"类型","reason":"原因"}]}；若无异常：{"detected_anomalies":[]}。
+异常区域必须以连续索引区间 [start, end] 表示，且满足 end - start + 1 > 5。
+请精确标注异常区间的起止索引。"""
+
     messages = [
         {
             "role": "user",
@@ -191,66 +251,54 @@ def qwen_detect(
 
     # 5. 推理
     text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-    
-    # 移除 process_vision_info, 直接传 images=[image]
+
     inputs = processor(
         text=[text],
         images=[image],
         padding=True,
         return_tensors="pt",
     )
-    inputs = inputs.to(device)
+    # 4-bit 量化模型已在 device 上，input tensors 需移过去
+    input_device = next(model.parameters()).device
+    inputs = inputs.to(input_device)
 
-    generated_ids = model.generate(**inputs, max_new_tokens=1024)
+    with torch.no_grad():
+        generated_ids = model.generate(**inputs, max_new_tokens=1024)
+
     generated_ids_trimmed = [
-        out_ids[len(in_ids) :] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
+        out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
     ]
     output_text = processor.batch_decode(
         generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
     )[0]
 
+    print(f"[Qwen] 模型输出: {output_text[:500]}")
+
     # 6. 解析结果
     parsed = JSONParser.robust_json_loads(output_text)
-    
+
     # 7. 生成 Mask
     mask = np.zeros(len(series_ds), dtype=int)
     anomalies = []
-    
+
     if parsed and "detected_anomalies" in parsed:
         for item in parsed["detected_anomalies"]:
             start, end = item.get("interval", [0, 0])
-            # 确保范围有效
             start = max(0, min(start, len(series_ds)-1))
             end = max(start, min(end, len(series_ds)))
             mask[start:end] = 1
             anomalies.append(item)
-            
-    # 如果进行了降采样，需要映射回原始长度? 
-    # run.py 的逻辑通常是返回降采样后的 mask 和 position_index，由 run.py 或後处理负责
-    # 但根据 run.py `model_inference` 后的代码，它似乎期望 global_mask 也是降采样后的?
-    # 不，run.py line 793 `data = raw_data.copy()` 且 line 799 `data['outlier_mask'] = outlier_mask`
-    # 这意味着 run.py 期望 outlier_mask 与 raw_data 长度一致。
-    # 如果 chatts_detect 返回了降采样 mask, run.py 需要做插值还原。
-    # 让我们检查 chatts_detect 的返回值约定。
-    # run.py line 768: global_mask, anomalies, position_index_ds = chatts_detect(...)
-    # 并没有看到后续有插值代码，直接赋值给了 data['outlier_mask']?
-    # No, wait. 
-    # 如果 outlier_mask 长度 != len(data)，赋值会报错。
-    # 所以 chatts_detect 必须返回原始长度的 mask。
 
+    # 如果进行了降采样，映射回原始长度
     if len(mask) != len(data):
-        # 简单还原：创建一个全长mask
         full_mask = np.zeros(len(data), dtype=int)
-        # 将降采样索引对应的位置设为 mask 值
-        # 这只是近似
-        # 正确做法：如果是区间 [s, e] 在降采样空间，对应原始空间的 [pos[s], pos[e]]
-        for start, end in [item.get("interval", [0, 0]) for item in anomalies]:
-             # 找到对应的原始索引
-             if hasattr(position_index, '__getitem__'):
-                 real_start = position_index[min(start, len(position_index)-1)]
-                 real_end = position_index[min(end-1, len(position_index)-1)] # end是exclusive
-                 full_mask[real_start:real_end+1] = 1
-        
+        for item in anomalies:
+            start, end = item.get("interval", [0, 0])
+            if hasattr(position_index, '__getitem__'):
+                real_start = position_index[min(start, len(position_index)-1)]
+                real_end = position_index[min(end-1, len(position_index)-1)]
+                full_mask[real_start:real_end+1] = 1
+
         return full_mask, anomalies, position_index
 
     return mask, anomalies, position_index

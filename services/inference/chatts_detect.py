@@ -304,10 +304,14 @@ class ChatTSAnalyzer:
         
         # 检测是否是 ChatTS-8B 模型（基于 Qwen3，对量化敏感）
         is_8b_model = '8B' in model_path or '8b' in model_path
-        if is_8b_model and load_in_4bit:
+        force_4bit = (load_in_4bit == "force" or os.environ.get("CHATTS_FORCE_4BIT") == "1")
+        if is_8b_model and load_in_4bit and not force_4bit:
             print("[ChatTS] ⚠️ 检测到 ChatTS-8B 模型，4-bit 量化会严重影响输出质量！")
             print("[ChatTS] ⚠️ 自动禁用 4-bit 量化以确保正常输出（需要约 16GB 显存）")
             load_in_4bit = False
+        elif is_8b_model and force_4bit:
+            print("[ChatTS] ⚠️ ChatTS-8B 强制使用 4-bit 量化（显存不足模式）")
+            load_in_4bit = True
         
         # ChatTS-8B 使用 eager attention 会导致输出乱码，需要使用默认 SDPA
         if is_8b_model and attn_implementation == 'eager':
