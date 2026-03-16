@@ -1123,7 +1123,9 @@ def process_sensor(sensor_info, args):
                 
                 # 解析 load_in_4bit 参数
                 load_in_4bit_str = getattr(args, 'chatts_load_in_4bit', 'auto')
-                if load_in_4bit_str == 'auto':
+                if load_in_4bit_str == 'force':
+                    load_in_4bit = "force"  # 强制 4-bit，即使是 8B 模型（显存不足时使用）
+                elif load_in_4bit_str == 'auto':
                     load_in_4bit = True  # 默认启用，ChatTSAnalyzer 会针对 8B 模型自动禁用
                 elif load_in_4bit_str.lower() in ['true', '1', 'yes']:
                     load_in_4bit = True
@@ -1225,13 +1227,18 @@ def process_sensor(sensor_info, args):
             gpu_metrics_before = perf_logger.get_gpu_metrics(device)
             
             with Timer("model_inference") as t_inference:
+                # 解析 load_in_4bit（Qwen 27B 默认需要 4-bit）
+                _qwen_4bit_str = getattr(args, 'chatts_load_in_4bit', 'auto')
+                _qwen_4bit = _qwen_4bit_str not in ('false', '0', 'no')
+
                 global_mask, anomalies, position_index_ds = qwen_detect(
                     data=input_df,
-                    model_path=args.chatts_model_path, # Reuse ChatTS arg for generic VLM
+                    model_path=args.chatts_model_path,
                     device=device,
                     prompt_template_name=getattr(args, 'chatts_prompt_template', 'default'),
-                    n_downsample=getattr(args, 'n_downsample', 5000), # Pass downsample config
+                    n_downsample=getattr(args, 'n_downsample', 5000),
                     downsampler=getattr(args, 'downsampler', 'm4'),
+                    load_in_4bit=_qwen_4bit,
                 )
             metrics.anomaly_detect_time = t_inference.elapsed
             
@@ -1591,6 +1598,111 @@ def process_sensor(sensor_info, args):
             perf_logger.log_metrics(metrics)
             return None
     
+    elif args.method in ('piecewise_linear', 'ensemble', 'wavelet', 'iforest',
+                         'isolation_forest', 'cv', 'standardized'):
+        # CPU statistical methods: direct sigma_filtered_and_anomaly_detection
+        try:
+            # Map platform aliases to detection function names
+            _detect_method_map = {
+                'ensemble': 'piecewise_linear',
+                'isolation_forest': 'iforest',
+            }
+            detect_method = _detect_method_map.get(args.method, args.method)
+
+            # Skip get_fulldata (insert_missing) — statistical methods work on values directly,
+            # and expanding timestamps causes position_index/raw_series length mismatch.
+            data = raw_data.copy()
+            raw_series = raw_data[column].values
+
+            with Timer("downsample") as t_downsample:
+                downsampled_data, ts, position_index = adaptive_downsample(
+                    data[column],
+                    downsampler=args.downsampler,
+                    sample_param=args.ratio,
+                    min_threshold=args.min_threshold
+                )
+            metrics.downsample_time = t_downsample.elapsed
+
+            metrics.downsampled_data_length = len(downsampled_data)
+            metrics.downsample_ratio = metrics.downsampled_data_length / metrics.raw_data_length if metrics.raw_data_length > 0 else 0
+
+            data = pd.DataFrame()
+            data.index = ts
+            data[column] = downsampled_data
+            del raw_data
+
+            # iforest uses contamination ratio (0, 0.5], not sigma threshold
+            detect_th = 0.01 if detect_method == 'iforest' else args.threshold
+
+            with Timer("anomaly_detect") as t_detect:
+                outlier_mask, anomaly_indices = sigma_filtered_and_anomaly_detection(
+                    data, detect_method, detect_th, args.num_points)
+                anomaly_group = split_continuous_outliers(anomaly_indices)
+                global_indices, local_indices = range_split_outliers(data, anomaly_group, args.ratio_classify)
+                global_indices_cluster = global_indices.copy()
+                local_indices_cluster = local_indices.copy()
+                if args.use_clustering and len(anomaly_group) > 1:
+                    try:
+                        from wavelet import adaptive_outlier_split
+                        global_indices_cluster, local_indices_cluster = adaptive_outlier_split(
+                            data, anomaly_group, method='cluster',
+                            n_clusters=args.clustering_n_clusters,
+                            cluster_method=args.clustering_method
+                        )
+                    except Exception as e:
+                        print(f"Clustering failed, using fixed threshold: {e}")
+            metrics.anomaly_detect_time = t_detect.elapsed
+
+            with Timer("postprocess") as t_postprocess:
+                global_mask = create_outlier_mask(data, global_indices)
+                local_mask = create_outlier_mask(data, local_indices)
+                global_mask_cluster = create_outlier_mask(data, global_indices_cluster)
+                local_mask_cluster = create_outlier_mask(data, local_indices_cluster)
+                data['outlier_mask'] = outlier_mask
+                data['global_mask'] = global_mask
+                data['local_mask'] = local_mask
+                data['global_mask_cluster'] = global_mask_cluster
+                data['local_mask_cluster'] = local_mask_cluster
+                if args.task_name == 'global' and 'global_mask' in data.columns:
+                    data = variance_filter(data, 'global_mask', args.post_filter, args.threhold_filter)
+            metrics.postprocess_time = t_postprocess.elapsed
+
+            metrics.anomaly_count = int(np.sum(outlier_mask > 0)) if isinstance(outlier_mask, np.ndarray) else 0
+            metrics.anomaly_ratio = (metrics.anomaly_count / len(data) * 100) if len(data) > 0 else 0
+            metrics.global_anomaly_count = int(np.sum(global_mask)) if isinstance(global_mask, np.ndarray) else 0
+            metrics.local_anomaly_count = int(np.sum(local_mask)) if isinstance(local_mask, np.ndarray) else 0
+
+            with Timer("save") as t_save:
+                print(f"Saving results for {sensor_info} with shape {data.shape}")
+                save_info = save_results(data, sensor_info, args, position_index=position_index)
+            metrics.save_time = t_save.elapsed
+
+            _finalize_inference_outputs(
+                raw_series, global_mask, save_info, args, sensor_info,
+                position_index=position_index,
+            )
+
+            sys_metrics = perf_logger.get_system_metrics()
+            metrics.cpu_percent = sys_metrics["cpu_percent"]
+            metrics.memory_used_gb = sys_metrics["memory_used_gb"]
+            metrics.memory_percent = sys_metrics["memory_percent"]
+
+            metrics.status = "success"
+            metrics.total_time = time.perf_counter() - total_start_time
+            perf_logger.log_metrics(metrics)
+
+            logging.info(f"=== Finished processing sensor ({args.method}): {sensor_info} ===")
+            return data
+        except Exception as e:
+            print(f"{args.method} method failed: {e}")
+            import traceback
+            traceback.print_exc()
+            metrics.status = "failed"
+            metrics.error_message = str(e)
+            metrics.total_time = time.perf_counter() - total_start_time
+            perf_logger.log_metrics(metrics)
+            return None
+
     # 如果没有匹配到任何方法
     metrics.status = "failed"
     metrics.error_message = f"Unknown method: {args.method}"
@@ -1657,14 +1769,14 @@ def main():
                         help='ChatTS 使用的 GPU 设备')
     parser.add_argument('--chatts_use_cache', type=str, default=None,
                         help='ChatTS 是否使用 KV cache (true/false)，默认None表示自动检测')
-    parser.add_argument('--chatts_lora_adapter_path', type=str, default='/home/douff/ts/ChatTS-Training/saves/chatts-8b',
+    parser.add_argument('--chatts_lora_adapter_path', type=str, default=None,
                         help='ChatTS LoRA 微调适配器路径，默认None表示使用原始模型')
     parser.add_argument('--chatts_max_new_tokens', type=int, default=4096,
                         help='ChatTS 最大生成token数，默认4096')
     parser.add_argument('--chatts_prompt_template', type=str, default='default',
                         help='ChatTS prompt模板名称: default, detailed, minimal, industrial, english')
     parser.add_argument('--chatts_load_in_4bit', type=str, default='auto',
-                        help='ChatTS 是否使用 4-bit 量化 (true/false/auto)。auto=8B模型自动禁用，14B模型启用')
+                        help='ChatTS 是否使用 4-bit 量化 (true/false/auto/force)。auto=8B模型自动禁用；force=强制启用即使是8B')
     
     # Timer 相关参数
     parser.add_argument('--timer_model_path', type=str,
@@ -1723,6 +1835,17 @@ def main():
     
     # ChatTS 和 Timer 方法需要串行处理以避免 GPU OOM
     if args.method == 'chatts':
+        # 解析 load_in_4bit 参数用于预加载
+        _preload_4bit_str = getattr(args, 'chatts_load_in_4bit', 'auto')
+        if _preload_4bit_str == 'force':
+            _preload_4bit = "force"
+        elif _preload_4bit_str == 'auto':
+            _preload_4bit = True
+        elif _preload_4bit_str.lower() in ['true', '1', 'yes']:
+            _preload_4bit = True
+        else:
+            _preload_4bit = False
+
         # 预加载 ChatTS 模型，保证整个运行过程只加载一次（单进程内复用）
         try:
             from chatts_detect import get_analyzer
@@ -1730,7 +1853,7 @@ def main():
             _ = get_analyzer(
                 model_path=args.chatts_model_path,
                 device=args.chatts_device,
-                load_in_4bit=True,
+                load_in_4bit=_preload_4bit,
                 lora_adapter_path=args.chatts_lora_adapter_path,
             )
         except Exception as e:
@@ -1747,6 +1870,34 @@ def main():
             print(f"[ChatTS] 使用并行处理（n_jobs={args.n_jobs}），注意 GPU 显存占用")
             results = Parallel(n_jobs=args.n_jobs)(
                 delayed(process_sensor)(info, args) for info in tqdm(sensor_infos, desc='ChatTS 处理进度')
+            )
+    elif args.method == 'qwen':
+        # 解析 load_in_4bit 参数用于 Qwen 预加载
+        _qwen_4bit_str = getattr(args, 'chatts_load_in_4bit', 'auto')
+        _qwen_4bit = _qwen_4bit_str not in ('false', '0', 'no')
+
+        # 预加载 Qwen VL 模型
+        try:
+            from qwen_detect import get_qwen_model
+            print("[Qwen] 预加载模型（仅加载一次，后续复用）...")
+            _ = get_qwen_model(
+                model_path=args.chatts_model_path,
+                device=args.chatts_device,
+                load_in_4bit=_qwen_4bit,
+            )
+        except Exception as e:
+            print(f"[Qwen] 预加载失败：{e}，将在首次调用时再尝试加载")
+
+        if args.n_jobs == 1:
+            print("[Qwen] 使用串行处理（n_jobs=1）")
+            results = []
+            for info in tqdm(sensor_infos, desc='Qwen 处理进度'):
+                result = process_sensor(info, args)
+                results.append(result)
+        else:
+            print(f"[Qwen] 使用并行处理（n_jobs={args.n_jobs}），注意 GPU 显存占用")
+            results = Parallel(n_jobs=args.n_jobs)(
+                delayed(process_sensor)(info, args) for info in tqdm(sensor_infos, desc='Qwen 处理进度')
             )
     elif args.method == 'timer':
         # 预加载 Timer 模型
