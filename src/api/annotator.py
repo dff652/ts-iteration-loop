@@ -23,6 +23,8 @@ from src.utils.annotation_store import (
     record_to_payload,
     upsert_annotation,
 )
+from src.api.auth import verify_token_from_header
+from fastapi import Request
 
 router = APIRouter()
 logger = get_logger(__name__)
@@ -106,11 +108,17 @@ def browse_directory(req: SetPathRequest):
 
 
 @router.get("/files")
-def list_files(data_path: str = Query(default=""), user: str = Query(default="default"), db: Session = Depends(get_db)):
+def list_files(request: Request, data_path: str = Query(default=""), user: str = Query(default=""), db: Session = Depends(get_db)):
     """列出指定目录下的 CSV 文件"""
     base = Path(data_path).resolve() if data_path else Path(DEFAULT_DATA_DIR)
     if not base.exists():
         return {"success": True, "files": [], "path": str(base)}
+
+    # 解析 Token 或使用 Query 中传入的，默认回退
+    if not user:
+        user = verify_token_from_header(request.headers.get("Authorization")) or "douff"
+    if user == "default":
+        user = "douff"
 
     # 查询当前用户的标注记录
     records = db.query(AnnotationRecord).filter(AnnotationRecord.user_id == user).all()
@@ -259,8 +267,13 @@ def get_data(filename: str, data_path: str = Query(default="")):
 # ==================== 标注 CRUD ====================
 
 @router.get("/annotations/{filename:path}")
-def get_annotations(filename: str, user: str = Query(default="default"), db: Session = Depends(get_db)):
+def get_annotations(request: Request, filename: str, user: str = Query(default=""), db: Session = Depends(get_db)):
     """获取文件标注"""
+    if not user:
+        user = verify_token_from_header(request.headers.get("Authorization")) or "douff"
+    if user == "default":
+        user = "douff"
+        
     record = get_annotation_record(db, user, filename)
     if record is None:
         return {"success": True, "filename": filename, "annotations": []}
@@ -274,8 +287,13 @@ def get_annotations(filename: str, user: str = Query(default="default"), db: Ses
 
 
 @router.post("/annotations/{filename:path}")
-def save_annotations(filename: str, req: SaveAnnotationRequest, user: str = Query(default="default"), db: Session = Depends(get_db)):
+def save_annotations(request: Request, filename: str, req: SaveAnnotationRequest, user: str = Query(default=""), db: Session = Depends(get_db)):
     """保存标注"""
+    if not user:
+        user = verify_token_from_header(request.headers.get("Authorization")) or "douff"
+    if user == "default":
+        user = "douff"
+        
     save_data = {
         "filename": req.filename or filename,
         "annotations": req.annotations,
@@ -291,8 +309,13 @@ def save_annotations(filename: str, req: SaveAnnotationRequest, user: str = Quer
 
 
 @router.delete("/annotations/{filename:path}")
-def delete_annotation(filename: str, annotation_id: str = Query(...), user: str = Query(default="default"), db: Session = Depends(get_db)):
+def delete_annotation(request: Request, filename: str, annotation_id: str = Query(...), user: str = Query(default=""), db: Session = Depends(get_db)):
     """删除一个标注"""
+    if not user:
+        user = verify_token_from_header(request.headers.get("Authorization")) or "douff"
+    if user == "default":
+        user = "douff"
+        
     record = get_annotation_record(db, user, filename)
     if record is None:
         raise HTTPException(status_code=404, detail="标注未找到")
@@ -305,8 +328,13 @@ def delete_annotation(filename: str, annotation_id: str = Query(...), user: str 
 
 
 @router.get("/annotations-all")
-def get_all_annotations(user: str = Query(default="default"), db: Session = Depends(get_db)):
+def get_all_annotations(request: Request, user: str = Query(default=""), db: Session = Depends(get_db)):
     """获取用户所有标注"""
+    if not user:
+        user = verify_token_from_header(request.headers.get("Authorization")) or "douff"
+    if user == "default":
+        user = "douff"
+        
     rows = (
         db.query(AnnotationRecord)
         .filter(AnnotationRecord.user_id == user)

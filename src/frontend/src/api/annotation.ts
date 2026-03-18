@@ -34,7 +34,7 @@ export function getAnnotations(filename: string, user?: string) {
   return request({
     url: `/annotator/annotations/${encodeURIComponent(filename)}`,
     method: 'get',
-    params: { user: user || 'default' },
+    params: { user: user || 'douff' },
   })
 }
 
@@ -47,7 +47,7 @@ export function saveAnnotations(filename: string, data: {
     url: `/annotator/annotations/${encodeURIComponent(filename)}`,
     method: 'post',
     data,
-    params: { user: user || 'default' },
+    params: { user: user || 'douff' },
   })
 }
 
@@ -55,7 +55,7 @@ export function deleteAnnotation(filename: string, annotationId: string, user?: 
   return request({
     url: `/annotator/annotations/${encodeURIComponent(filename)}`,
     method: 'delete',
-    params: { annotation_id: annotationId, user: user || 'default' },
+    params: { annotation_id: annotationId, user: user || 'douff' },
   })
 }
 

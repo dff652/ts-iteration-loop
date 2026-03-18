@@ -40,7 +40,7 @@
           </el-menu-item>
           <el-menu-item index="/assets/data">
             <el-icon><DataLine /></el-icon>
-            <span>数据集</span>
+            <span>标注数据管理</span>
           </el-menu-item>
         </el-sub-menu>
 
